@@ -1,0 +1,24 @@
+pub mod background;
+pub mod bus;
+pub mod checkpoints;
+pub mod decomposer;
+pub mod lanes;
+pub mod orchestrator;
+pub mod prompt_builder;
+pub mod reasoning;
+pub mod router;
+pub mod subagent;
+pub mod supervisor;
+pub mod task_tool;
+pub mod tool_loop;
+pub mod utils;
+
+pub use background::{BackgroundQueue, BackgroundTaskSnapshot, TaskStatus};
+pub use bus::{Message, MessageBus, MessagePayload};
+pub use orchestrator::{AgentEvent, Orchestrator};
+pub use router::{
+    ComplexityAssessment, ComplexityLabel, ComplexityRouter, ReasonCode, RiskFlag, Route,
+};
+pub use subagent::{SubagentConfig, SubagentResult, SubagentTask, SubagentType};
+pub use supervisor::Supervisor;
+pub use task_tool::TaskToolHandler;

@@ -1,0 +1,8 @@
+/target
+/.deepseek-code/target/
+/.deepseek-code/local.toml
+/.deepseek-code/checkpoints/
+/.deepseek-code/live-preview/
+*.pdb
+.env
+.env.*

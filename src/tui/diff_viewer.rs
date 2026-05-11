@@ -1,0 +1,189 @@
+use ratatui::{
+    layout::Rect,
+    style::{Color, Modifier, Style},
+    text::{Line, Span, Text},
+    widgets::{Paragraph, Wrap},
+    Frame,
+};
+
+use super::{syntax_highlight, theme};
+
+/// Status of a diff item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffStatus {
+    Pending,
+    Accepted,
+    Rejected,
+}
+
+/// A single file diff item to render.
+#[derive(Debug, Clone)]
+pub struct FileDiffItem {
+    pub path: String,
+    pub diff: String,
+    pub stats: String,
+    pub status: DiffStatus,
+}
+
+impl FileDiffItem {
+    #[must_use]
+    pub fn new(path: impl Into<String>, diff: impl Into<String>, stats: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            diff: diff.into(),
+            stats: stats.into(),
+            status: DiffStatus::Pending,
+        }
+    }
+}
+
+/// Render a list of file diff panels with optional selection and status.
+pub fn render_diff_viewer(
+    f: &mut Frame,
+    area: Rect,
+    diffs: &[FileDiffItem],
+    selected: Option<usize>,
+    diff_scroll: usize,
+) {
+    if diffs.is_empty() || area.width < 10 || area.height < 3 {
+        return;
+    }
+
+    let mut all_lines = Vec::new();
+
+    for (idx, item) in diffs.iter().enumerate() {
+        if idx > 0 {
+            all_lines.push(Line::from(""));
+        }
+
+        let is_selected = selected == Some(idx);
+
+        // Status indicator
+        let status_icon = match item.status {
+            DiffStatus::Pending => "○",
+            DiffStatus::Accepted => "✓",
+            DiffStatus::Rejected => "✗",
+        };
+        let status_color = match item.status {
+            DiffStatus::Pending => theme::FG_DIM,
+            DiffStatus::Accepted => theme::ACCENT_GREEN,
+            DiffStatus::Rejected => theme::ACCENT_RED,
+        };
+
+        // Header: path + stats + status
+        let _header = format!("{} {} ({})", status_icon, item.path, item.stats);
+        let header_style = if is_selected {
+            Style::default()
+                .fg(theme::ACCENT_AMBER)
+                .bg(theme::BG_CARD_ALT)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(theme::FG_PRIMARY)
+                .add_modifier(Modifier::BOLD)
+        };
+
+        all_lines.push(Line::from(vec![
+            Span::styled(status_icon.to_string(), Style::default().fg(status_color)),
+            Span::styled(" ", header_style),
+            Span::styled(format!("{} ({})", item.path, item.stats), header_style),
+        ]));
+
+        // Diff lines with syntax highlighting attempt
+        let lang = syntax_highlight::lang_from_path(&item.path);
+        let diff_lines: Vec<&str> = item.diff.lines().collect();
+
+        for line in &diff_lines {
+            let styled_line = if line.starts_with("+++ ") || line.starts_with("--- ") {
+                Line::from(Span::styled(
+                    truncate(line, area.width as usize),
+                    Style::default().fg(theme::FG_DIM),
+                ))
+            } else if line.starts_with("@@") {
+                Line::from(Span::styled(
+                    truncate(line, area.width as usize),
+                    Style::default().fg(theme::ACCENT_AMBER),
+                ))
+            } else if line.starts_with('+') {
+                // Try to highlight the added code portion
+                let hl = try_highlight_diff_line(line, lang, true);
+                Line::from(hl)
+            } else if line.starts_with('-') {
+                let hl = try_highlight_diff_line(line, lang, false);
+                Line::from(hl)
+            } else if line.starts_with("\\") {
+                // "\ No newline at end of file"
+                Line::from(Span::styled(
+                    truncate(line, area.width as usize),
+                    Style::default().fg(theme::FG_DIM),
+                ))
+            } else {
+                Line::from(Span::styled(
+                    truncate(line, area.width as usize),
+                    Style::default().fg(theme::FG_DIM),
+                ))
+            };
+            all_lines.push(styled_line);
+        }
+    }
+
+    // Apply scroll offset
+    let visible = area.height as usize;
+    let start = if diff_scroll > 0 && diff_scroll < all_lines.len() {
+        diff_scroll
+    } else {
+        all_lines.len().saturating_sub(visible)
+    };
+    let end = (start + visible).min(all_lines.len());
+    let visible_lines = all_lines[start..end].to_vec();
+
+    let paragraph = Paragraph::new(Text::from(visible_lines))
+        .style(Style::default().bg(theme::BG_DEEP))
+        .wrap(Wrap { trim: false });
+
+    f.render_widget(paragraph, area);
+}
+
+/// Try to syntax-highlight a diff line (with + or - prefix).
+fn try_highlight_diff_line(line: &str, lang: Option<&str>, is_add: bool) -> Vec<Span<'static>> {
+    let prefix = &line[..1];
+    let rest = &line[1..];
+    let prefix_color = if is_add {
+        theme::ACCENT_GREEN
+    } else {
+        theme::ACCENT_RED
+    };
+    let prefix_bg: Color = if is_add {
+        Color::Rgb(20, 50, 30)
+    } else {
+        Color::Rgb(50, 20, 20)
+    };
+
+    let mut spans = vec![Span::styled(
+        prefix.to_string(),
+        Style::default().fg(prefix_color).bg(prefix_bg),
+    )];
+
+    if let Some(language) = lang {
+        let highlighted = syntax_highlight::highlight_code_block(rest, Some(language));
+        if let Some(hl_spans) = highlighted.into_iter().next() {
+            spans.extend(hl_spans);
+            return spans;
+        }
+    }
+
+    spans.push(Span::styled(
+        rest.to_string(),
+        Style::default().fg(prefix_color),
+    ));
+    spans
+}
+
+fn truncate(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut out: String = value.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}

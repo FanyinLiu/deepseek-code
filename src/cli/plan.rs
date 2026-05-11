@@ -1,0 +1,103 @@
+use std::path::PathBuf;
+
+use crate::agent::orchestrator::{AgentEvent, Orchestrator};
+use crate::cli::output_blocks;
+use crate::deepseek::client::DeepSeekClient;
+use crate::deepseek::{
+    ReasoningEffort, ReasoningState, Session, SessionId, SessionMetadata, ThinkingMode,
+};
+use crate::storage;
+
+/// Run the plan command: read-only analysis, no file modifications.
+pub async fn plan(task: String, project_root: Option<PathBuf>) -> Result<(), anyhow::Error> {
+    let root = project_root
+        .unwrap_or_else(|| storage::find_project_root().unwrap_or_else(|| PathBuf::from(".")));
+    let api_key = super::login::resolve_or_prompt_api_key(Some(&root))?;
+    let client = DeepSeekClient::new(api_key);
+
+    output_blocks::print_header("plan mode", output_blocks::BlockStatus::Running);
+    output_blocks::print_kv("project", root.display().to_string());
+    output_blocks::print_kv("task", &task);
+
+    let session = Session {
+        id: SessionId::new_v4(),
+        name: None,
+        project_root: root.clone(),
+        messages: Vec::new(),
+        reasoning_state: ReasoningState {
+            mode: ThinkingMode::On,
+            effort: ReasoningEffort::Max,
+            ..Default::default()
+        },
+        tool_call_history: Vec::new(),
+        checkpoints: Vec::new(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        metadata: SessionMetadata::default(),
+    };
+
+    let mut orchestrator = Orchestrator::new(client, root, session);
+    let config = crate::storage::Config::load(Some(&orchestrator.project_root)).unwrap_or_default();
+    orchestrator.init_mcp(&config.mcp).await;
+
+    // Prepend /plan to trigger plan mode classification
+    let plan_input = format!("/plan {task}");
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let turn_handle = tokio::spawn(async move {
+        let result = orchestrator.run_turn(&plan_input, tx).await;
+        result.map(|_| orchestrator)
+    });
+
+    while let Some(event) = rx.recv().await {
+        match event {
+            AgentEvent::ContentDelta(text) => print!("{text}"),
+            AgentEvent::Error(e) => eprintln!("\nError: {e}"),
+            AgentEvent::PlanStarted { summary, total } => {
+                output_blocks::print_plan_started(&summary, total);
+            }
+            AgentEvent::PlanStepUpdate {
+                index,
+                total,
+                description,
+                status,
+            } => {
+                output_blocks::print_plan_step(index, total, &description, status);
+            }
+            AgentEvent::OptionsNeeded {
+                title,
+                options,
+                respond,
+            } => {
+                output_blocks::print_option_block(&title, &options);
+                let preview_choice = options
+                    .iter()
+                    .position(|option| {
+                        let option = option.to_ascii_lowercase();
+                        option.contains("preview") || option.contains("show")
+                    })
+                    .unwrap_or_else(|| options.len().saturating_sub(1));
+                println!(
+                    "CLI plan is read-only; selecting {}. {}",
+                    preview_choice + 1,
+                    options
+                        .get(preview_choice)
+                        .map(String::as_str)
+                        .unwrap_or("Cancel")
+                );
+                let _ = respond.send(preview_choice);
+            }
+            AgentEvent::TurnComplete { .. } => {}
+            AgentEvent::PlanCleared => {}
+            _ => {}
+        }
+    }
+
+    let _returned_orchestrator = turn_handle.await??;
+
+    output_blocks::print_header("plan mode complete", output_blocks::BlockStatus::Done);
+    output_blocks::print_kv("next", "review the plan above before executing");
+    output_blocks::print_kv("run", "ds run \"<your approved steps>\"");
+
+    Ok(())
+}

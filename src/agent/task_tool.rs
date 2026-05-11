@@ -1,0 +1,136 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use tokio::sync::mpsc;
+
+use crate::deepseek::client::DeepSeekClient;
+
+use super::background::BackgroundQueue;
+use super::orchestrator::AgentEvent;
+use super::subagent::{MergeStrategy, SubagentTask, SubagentToolArgs};
+use super::supervisor::Supervisor;
+
+/// Handles `run_subagent` tool invocations from the main agent.
+///
+/// Supports both synchronous (wait for result) and background execution modes.
+#[derive(Clone)]
+pub struct TaskToolHandler {
+    supervisor: Supervisor,
+    background_queue: BackgroundQueue,
+    /// The spawn_depth assigned to agents created by this handler.
+    spawn_depth: u8,
+}
+
+impl TaskToolHandler {
+    #[must_use]
+    pub fn new(
+        client: Arc<DeepSeekClient>,
+        project_root: PathBuf,
+        background_queue: BackgroundQueue,
+        spawn_depth: u8,
+    ) -> Self {
+        let supervisor = Supervisor::new(client, project_root);
+        Self {
+            supervisor,
+            background_queue,
+            spawn_depth,
+        }
+    }
+
+    /// Handle a `run_subagent` tool call.
+    ///
+    /// If `args.background` is true, spawns the task on the background queue
+    /// and returns a task ID immediately. Otherwise waits for completion.
+    pub async fn handle(
+        &self,
+        args: &SubagentToolArgs,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+        parent_context: Option<String>,
+    ) -> (String, bool) {
+        // Resolve config
+        let mut config = self.supervisor.registry.resolve(&args.subagent_type);
+
+        // Apply overrides from tool args
+        if let Some(model) = &args.model {
+            config.model = Some(model.clone());
+        }
+        if let Some(max_turns) = args.max_turns {
+            config.max_turns = max_turns;
+        }
+        config.spawn_depth = self.spawn_depth;
+
+        // Build task — merge optional parent context into the task context
+        let merged_context = match (args.context.clone(), parent_context) {
+            (Some(c), Some(p)) => Some(format!(
+                "{p}
+\n{c}"
+            )),
+            (Some(c), None) => Some(c),
+            (None, Some(p)) => Some(p),
+            (None, None) => None,
+        };
+        let task = SubagentTask {
+            description: args.description.clone(),
+            prompt: args.prompt.clone(),
+            context: merged_context,
+            focus_files: args.focus_files.clone(),
+            expected_output: None,
+        };
+
+        // Background execution: spawn and return task ID immediately
+        if args.background {
+            let mut bg_config = config.clone();
+            bg_config.is_background = true;
+            let task_id = self.background_queue.spawn(
+                self.supervisor.clone(),
+                bg_config,
+                task,
+                event_tx.clone(),
+            );
+            return (
+                format!(
+                    "Background subagent spawned. Task ID: {task_id}\nUse `/tasks` to check status."
+                ),
+                false,
+            );
+        }
+
+        // Synchronous execution with optional parallel decomposition
+        if let Some(batch) = self
+            .supervisor
+            .decompose_async(&args.description, &args.prompt)
+            .await
+        {
+            if batch.tasks.len() > 1 && batch.independent {
+                let results = self.supervisor.run_parallel(batch, event_tx).await;
+                let merged = self
+                    .supervisor
+                    .synthesize_results(&results, &MergeStrategy::Synthesize);
+                return (merged, false);
+            }
+        }
+
+        // Single subagent execution
+        let result = self.supervisor.run_single(config, task, event_tx).await;
+
+        if result.success {
+            let formatted = result.format_for_parent(4000);
+            (formatted, false)
+        } else {
+            let err = result
+                .error
+                .clone()
+                .unwrap_or_else(|| "Subagent failed without error details".to_string());
+            (
+                format!("Subagent failed: {}\n\nOutput:\n{}", err, result.output),
+                true,
+            )
+        }
+    }
+
+    /// Get the background queue for status queries.
+    #[must_use]
+    pub fn background_queue(&self) -> &BackgroundQueue {
+        &self.background_queue
+    }
+}

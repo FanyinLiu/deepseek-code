@@ -1,0 +1,58 @@
+# DeepSeek-Code project-level configuration
+# This file should be checked into version control.
+
+[model]
+default = "deepseek-v4-flash"
+heavy = "deepseek-v4-pro"
+thinking_mode = "auto"          # off | on | auto
+reasoning_effort = "max"
+allow_legacy_model_alias = false
+
+[execution]
+default_lane = "chat_non_thinking"
+plan_lane = "plan_thinking"
+fim_lane = "fim_non_thinking"
+json_output_enabled = true
+
+[search]
+engine = "local"
+use_deepseek_rerank = true
+max_results = 50
+max_context_tokens = 12000
+include_git_diff = true
+include_sessions = true
+
+[cache]
+stable_prefix_enabled = true
+show_cache_hud = true
+warn_on_low_cache_hit = true
+
+[policy]
+auto_approve_safe_read = true
+network_access = false
+command_timeout_seconds = 120
+require_approval_for_write = true
+require_approval_for_command = true
+block_protected_paths = true
+normalize_unicode_commands = true
+
+[paths]
+protected = [
+  "~/.ssh/**",
+  "~/.aws/**",
+  "~/.gnupg/**",
+  "**/.env",
+  "**/.env.*",
+  "**/credentials*",
+  "/etc/**"
+]
+
+[ui]
+language = "zh-CN"
+theme = "dark"
+show_reasoning_summary = true
+show_raw_reasoning = false
+show_cache_hud = true
+
+[telemetry]
+enabled = false
