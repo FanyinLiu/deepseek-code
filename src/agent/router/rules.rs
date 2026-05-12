@@ -26,6 +26,7 @@ impl RuleAssessment {
 pub fn assess_with_rules(task_input: &str, _project_context: Option<&str>) -> RuleAssessment {
     let input = task_input.trim();
     let lower = input.to_lowercase();
+    let emotional_manipulation = crate::defense::EmotionalShielding.detect(input).is_some();
 
     let mut score: u32 = 0;
     let mut reasons: Vec<ReasonCode> = Vec::new();
@@ -57,6 +58,13 @@ pub fn assess_with_rules(task_input: &str, _project_context: Option<&str>) -> Ru
         if lower.contains("permission") || lower.contains("权限") {
             risks.push(RiskFlag::PermissionChange);
         }
+    }
+
+    if emotional_manipulation {
+        hard_triggers.push("EMOTIONAL_MANIPULATION".into());
+        reasons.push(ReasonCode::HighRisk);
+        risks.push(RiskFlag::PermissionChange);
+        score = score.max(40);
     }
 
     let has_hard = !hard_triggers.is_empty();

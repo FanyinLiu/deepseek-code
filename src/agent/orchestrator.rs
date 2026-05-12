@@ -1139,6 +1139,10 @@ impl Orchestrator {
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
         force_lane: Option<ExecutionLane>,
     ) -> Result<(), anyhow::Error> {
+        let defense = crate::defense::DefenseProtocol::default();
+        let sanitized_user_input = defense.sanitize_input(user_input);
+        let user_input = sanitized_user_input.safe_text();
+
         // Load project rules once and reuse throughout the turn.
         let project_rules = load_project_rules(&self.project_root);
         let force_swarm = should_force_swarm(user_input);

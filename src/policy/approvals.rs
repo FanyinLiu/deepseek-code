@@ -38,7 +38,7 @@ pub enum RiskLevel {
 }
 
 impl PolicyDecision {
-    fn allow(
+    pub(crate) fn allow(
         reason: impl Into<String>,
         title: impl Into<String>,
         description: impl Into<String>,
@@ -56,7 +56,7 @@ impl PolicyDecision {
         }
     }
 
-    fn deny(
+    pub(crate) fn deny(
         reason: impl Into<String>,
         title: impl Into<String>,
         description: impl Into<String>,
@@ -137,6 +137,17 @@ pub fn evaluate_tool(
     let auto_approve_safe_read = policy.auto_approve_safe_read || policy.auto_mode;
     // Parse arguments for path extraction
     let args: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+    if let Some(violation) =
+        crate::defense::BehavioralPerimeter.check_tool_call(tool_name, arguments, project_root)
+    {
+        return PolicyDecision::deny(
+            violation.reason.clone(),
+            format!("Blocked: {tool_name}"),
+            violation.reason,
+            RiskLevel::Blocked,
+            violation.detail,
+        );
+    }
 
     match tool_name {
         "read_file" | "list_dir" => {

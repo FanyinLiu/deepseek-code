@@ -94,6 +94,10 @@ impl SubagentRegistry {
             "architect".to_string(),
             SubagentConfig::for_type(SubagentType::Architect),
         );
+        self.agents.insert(
+            "security-auditor".to_string(),
+            SubagentConfig::for_type(SubagentType::SecurityAuditor),
+        );
     }
 
     // ------------------------------------------------------------------
@@ -180,6 +184,7 @@ mod tests {
         assert!(reg.get("planner").is_some());
         assert!(reg.get("test-runner").is_some());
         assert!(reg.get("architect").is_some());
+        assert!(reg.get("security-auditor").is_some());
         assert!(reg.get("nonexistent").is_none());
     }
 
@@ -188,6 +193,19 @@ mod tests {
         let reg = SubagentRegistry::new();
         let config = reg.resolve(&SubagentType::CodeExplorer);
         assert_eq!(config.subagent_type, SubagentType::CodeExplorer);
+    }
+
+    #[test]
+    fn security_auditor_resolves_to_read_only_pro_agent() {
+        let reg = SubagentRegistry::new();
+        let config = reg.resolve(&SubagentType::SecurityAuditor);
+        assert_eq!(config.subagent_type, SubagentType::SecurityAuditor);
+        assert_eq!(
+            config.permission_mode,
+            super::super::types::PermissionMode::ReadOnly
+        );
+        assert_eq!(config.model, Some(crate::deepseek::DeepSeekModel::Pro));
+        assert!(config.effective_system_prompt().contains("VETO power"));
     }
 
     #[test]

@@ -83,6 +83,8 @@ impl SubagentExecutor {
         task: &SubagentTask,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
     ) -> SubagentResult {
+        let sanitized_task = sanitize_subagent_task(task);
+        let task = &sanitized_task;
         let started_at = Utc::now();
         let start = Instant::now();
 
@@ -598,6 +600,18 @@ impl SubagentExecutor {
     }
 
     // execute_single_tool moved to crate::tools::dispatch
+}
+
+fn sanitize_subagent_task(task: &SubagentTask) -> SubagentTask {
+    let defense = crate::defense::DefenseProtocol::default();
+    let mut sanitized = task.clone();
+    sanitized.description = defense.sanitize_input(&task.description).safe;
+    sanitized.prompt = defense.sanitize_input(&task.prompt).safe;
+    sanitized.context = task
+        .context
+        .as_ref()
+        .map(|context| defense.sanitize_input(context).safe);
+    sanitized
 }
 
 fn structured_subagent_limit_message(task: &SubagentTask, _max_turns: u32) -> String {

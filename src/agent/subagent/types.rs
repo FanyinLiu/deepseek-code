@@ -29,6 +29,9 @@ pub enum SubagentType {
     /// Architect — designs schemas, APIs, data models.
     #[serde(rename = "architect")]
     Architect,
+    /// Security auditor — read-only scanner with veto recommendations.
+    #[serde(rename = "security-auditor")]
+    SecurityAuditor,
     /// Custom agent loaded from `.deepseek-code/agents/`.
     #[serde(rename = "custom")]
     Custom { name: String },
@@ -44,6 +47,7 @@ impl SubagentType {
             Self::Planner => "planner",
             Self::TestRunner => "test-runner",
             Self::Architect => "architect",
+            Self::SecurityAuditor => "security-auditor",
             Self::Custom { name } => name.as_str(),
         }
     }
@@ -75,6 +79,10 @@ You may run commands and read files, but avoid unnecessary file modifications.".
                 "You are a system architect. Design APIs, schemas, and data models. \
 You may read the codebase for context, but focus on design documents and interfaces.".into()
             }
+            Self::SecurityAuditor => {
+                "You are a security auditor for a coding agent. Scan for hardcoded secrets, unsafe commands, path traversal, SQL injection, XSS, unsafe deserialization, and authorization bypasses. \
+You MUST stay read-only. You have VETO power: if you find a critical issue, report it clearly and recommend STOP before changes continue.".into()
+            }
             Self::Custom { .. } => {
                 "You are a specialized agent. Follow the instructions given in your task prompt.".into()
             }
@@ -99,6 +107,7 @@ impl std::str::FromStr for SubagentType {
             "planner" => Ok(Self::Planner),
             "test-runner" => Ok(Self::TestRunner),
             "architect" => Ok(Self::Architect),
+            "security-auditor" => Ok(Self::SecurityAuditor),
             other => Ok(Self::Custom {
                 name: other.to_string(),
             }),
@@ -213,7 +222,7 @@ impl SubagentConfig {
                 config.permission_mode = PermissionMode::AcceptEdits;
                 config.model = Some(DeepSeekModel::Flash);
             }
-            SubagentType::Architect => {
+            SubagentType::Architect | SubagentType::SecurityAuditor => {
                 config.permission_mode = PermissionMode::ReadOnly;
                 config.model = Some(DeepSeekModel::Pro);
             }
