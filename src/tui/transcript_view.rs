@@ -665,28 +665,49 @@ fn user_text_lines(content: &str, width: u16) -> Vec<Line<'static>> {
 }
 
 fn render_claude_tool_lines(view: &view_blocks::ToolCallView, width: u16) -> Vec<Line<'static>> {
-    let p = theme::palette();
-    if view.name == "run_command" && view.status == view_blocks::ViewStatus::Running {
-        let command = truncate(&view.detail, width.saturating_sub(8) as usize);
-        return vec![
-            Line::from(vec![
-                Span::styled("● ", Style::default().fg(p.muted).bg(p.canvas)),
-                Span::styled(
-                    "Running 1 shell command...",
-                    Style::default()
-                        .fg(p.text)
-                        .bg(p.canvas)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled("  └ ", Style::default().fg(p.dim).bg(p.canvas)),
-                Span::styled(command, Style::default().fg(p.dim).bg(p.canvas)),
-            ]),
-        ];
+    if view.status == view_blocks::ViewStatus::Running {
+        if view.name == "run_command" {
+            return connected_tool_lines("Running 1 shell command...", &view.detail, width);
+        }
+        if view.name == "read_file" {
+            return connected_tool_lines("Reading 1 file...", &view.detail, width);
+        }
+        if view.name == "list_dir" {
+            return connected_tool_lines("Listing 1 directory...", &view.detail, width);
+        }
+        if matches!(
+            view.name.as_str(),
+            "search_files" | "search_code" | "semantic_search"
+        ) {
+            return connected_tool_lines("Searching workspace...", &view.detail, width);
+        }
+        if matches!(view.name.as_str(), "fetch_url" | "web_search") {
+            return connected_tool_lines("Fetching...", &view.detail, width);
+        }
     }
 
     view_blocks::render_tool_lines(view, 88)
+}
+
+fn connected_tool_lines(title: &str, detail: &str, width: u16) -> Vec<Line<'static>> {
+    let p = theme::palette();
+    let detail = truncate(detail, width.saturating_sub(8) as usize);
+    vec![
+        Line::from(vec![
+            Span::styled("● ", Style::default().fg(p.muted).bg(p.canvas)),
+            Span::styled(
+                title.to_string(),
+                Style::default()
+                    .fg(p.text)
+                    .bg(p.canvas)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  └ ", Style::default().fg(p.dim).bg(p.canvas)),
+            Span::styled(detail, Style::default().fg(p.dim).bg(p.canvas)),
+        ]),
+    ]
 }
 
 fn should_hide_transcript_line(line: &str) -> bool {
@@ -1453,7 +1474,8 @@ fn format_duration(ms: u64) -> String {
 mod tests {
     use super::*;
     use crate::deepseek::{
-        MessageContent, MessageVisibility, ProtocolMessage, Role, ToolResultRecord,
+        MessageContent, MessageVisibility, ProtocolMessage, Role, ToolCall, ToolCallFunction,
+        ToolResultRecord,
     };
     use ratatui::{backend::TestBackend, Terminal};
     use uuid::Uuid;
@@ -1521,6 +1543,27 @@ mod tests {
                 result: result.to_string(),
                 is_error: false,
             }],
+            turn_id: Uuid::new_v4(),
+            sub_turn_id: None,
+            visibility: MessageVisibility::UserVisible,
+        }
+    }
+
+    fn assistant_tool_call(name: &str, arguments: &str) -> ProtocolMessage {
+        ProtocolMessage {
+            id: Uuid::new_v4(),
+            role: Role::Assistant,
+            content: MessageContent::None,
+            reasoning_content: None,
+            tool_calls: vec![ToolCall {
+                id: "tool-1".to_string(),
+                call_type: "function".to_string(),
+                function: ToolCallFunction {
+                    name: name.to_string(),
+                    arguments: arguments.to_string(),
+                },
+            }],
+            tool_results: Vec::new(),
             turn_id: Uuid::new_v4(),
             sub_turn_id: None,
             visibility: MessageVisibility::UserVisible,
@@ -1725,6 +1768,18 @@ mod tests {
         assert!(rendered.contains("changed todo.md"));
         assert!(!rendered.contains("intent"));
         assert!(!rendered.contains("detail"));
+        theme::set_active_theme(theme::ThemeMode::Light);
+    }
+
+    #[test]
+    fn running_read_file_uses_connector_detail_line() {
+        theme::set_active_theme(theme::ThemeMode::Light);
+        let msg = assistant_tool_call("read_file", r#"{"path":"src/tui/status_bar.rs"}"#);
+
+        let rendered = render_text(&[msg], 0, 4);
+
+        assert!(rendered.contains("Reading 1 file..."));
+        assert!(rendered.contains("└ src/tui/status_bar.rs"));
         theme::set_active_theme(theme::ThemeMode::Light);
     }
 

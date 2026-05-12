@@ -58,7 +58,7 @@ pub(crate) fn activity_hint_text(activity: &StatusActivity<'_>, thinking: &Think
     let spinner = activity_spinner(activity.elapsed_ms);
     let title = stable_activity_title(activity.title);
     let elapsed = format_elapsed(activity.elapsed_ms / 1_000);
-    let effort = thinking_effort_label(thinking);
+    let state = activity_state_label(activity, thinking);
 
     if activity.input_tokens > 0 || activity.tokens > 0 || activity.agent_tokens > 0 {
         let token_label = activity_token_label(
@@ -66,10 +66,27 @@ pub(crate) fn activity_hint_text(activity: &StatusActivity<'_>, thinking: &Think
             activity.tokens,
             activity.agent_tokens,
         );
-        format!("{spinner} {title}... ({elapsed} · {token_label} · thinking with {effort} effort)")
+        format!("{spinner} {title}... ({elapsed} · {token_label} · {state})")
     } else {
-        format!("{spinner} {title}... ({elapsed} · thinking with {effort} effort)")
+        format!("{spinner} {title}... ({elapsed} · {state})")
     }
+}
+
+fn activity_state_label(activity: &StatusActivity<'_>, thinking: &ThinkingMode) -> String {
+    if activity.thought_seconds > 0 && activity.tokens > 0 {
+        return format!("thought for {}", format_elapsed(activity.thought_seconds));
+    }
+
+    let elapsed_seconds = activity.elapsed_ms / 1_000;
+    let effort = thinking_effort_label(thinking);
+    let phase = if elapsed_seconds >= 90 {
+        "almost done thinking"
+    } else if elapsed_seconds >= 35 {
+        "thinking some more"
+    } else {
+        "thinking"
+    };
+    format!("{phase} with {effort} effort")
 }
 
 fn activity_token_label(input_tokens: u64, output_tokens: u64, agent_tokens: u64) -> String {
@@ -183,7 +200,7 @@ mod tests {
 
         assert_eq!(
             hint,
-            "⠴ Fix input colors... (6s · ↓ 578 tokens · thinking with auto effort)"
+            "⠴ Fix input colors... (6s · ↓ 578 tokens · thought for 2s)"
         );
     }
 
@@ -203,7 +220,7 @@ mod tests {
 
         assert_eq!(
             hint,
-            "⠴ 修复输入颜色... (6s · ↓ 578 tokens · thinking with auto effort)"
+            "⠴ 修复输入颜色... (6s · ↓ 578 tokens · thought for 2s)"
         );
     }
 
@@ -251,6 +268,26 @@ mod tests {
         assert_eq!(
             hint,
             "⠹ Fix input colors... (1s · ↓ 663 tokens · thinking with high effort)"
+        );
+    }
+
+    #[test]
+    fn activity_hint_status_changes_with_elapsed_time() {
+        let hint = activity_hint_text(
+            &StatusActivity {
+                title: "Fix input colors",
+                elapsed_ms: 96_000,
+                input_tokens: 0,
+                tokens: 663,
+                agent_tokens: 0,
+                thought_seconds: 0,
+            },
+            &ThinkingMode::On,
+        );
+
+        assert_eq!(
+            hint,
+            "⠋ Fix input colors... (1m 36s · ↓ 663 tokens · almost done thinking with high effort)"
         );
     }
 
