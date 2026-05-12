@@ -158,7 +158,7 @@ impl ScheduledTaskStore {
             let content = std::fs::read_to_string(path)?;
             tasks.push(toml::from_str::<ScheduledTask>(&content)?);
         }
-        tasks.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        tasks.sort_by_key(|a| a.created_at);
         Ok(tasks)
     }
 

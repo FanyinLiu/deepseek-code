@@ -1534,8 +1534,7 @@ impl Orchestrator {
                         total: steps.len(),
                     },
                 );
-                for i in 0..steps.len() {
-                    let description = step_lines[i].clone();
+                for (i, description) in step_lines.iter().cloned().enumerate().take(steps.len()) {
                     self.emit_event(
                         event_tx,
                         Some(turn_id),
@@ -1703,7 +1702,7 @@ impl Orchestrator {
                 // Add execution instruction as a synthetic user turn. Plan-mode prose is
                 // rendered by the tracker, so model narration stays internal.
                 let execution_prompt = plan_execution_prompt(use_chinese);
-                let plan_context = plan_execution_context(&plan_json, &execution_prompt);
+                let plan_context = plan_execution_context(&plan_json, execution_prompt);
                 self.session.messages.push(ProtocolMessage {
                     id: MessageId::new_v4(),
                     role: Role::User,

@@ -245,11 +245,7 @@ pub fn unfinished_turn_from_events(events: &[SessionEvent]) -> Option<TurnId> {
     for event in events {
         match event.kind {
             SessionEventKind::UserMessage { .. } => current = event.turn_id,
-            SessionEventKind::TurnFinished { .. } => {
-                if event.turn_id == current {
-                    current = None;
-                }
-            }
+            SessionEventKind::TurnFinished { .. } if event.turn_id == current => current = None,
             _ => {}
         }
     }

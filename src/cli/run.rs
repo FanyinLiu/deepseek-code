@@ -191,7 +191,7 @@ pub async fn run(
             AgentEvent::SwarmStarted { summary, total, .. } => {
                 output_blocks::print_header("swarm", output_blocks::BlockStatus::Running);
                 output_blocks::print_kv("summary", &summary);
-                output_blocks::print_kv("agents", &total.to_string());
+                output_blocks::print_kv("agents", total.to_string());
             }
             AgentEvent::SwarmTaskUpdated {
                 role,
@@ -201,7 +201,7 @@ pub async fn run(
             } => {
                 output_blocks::print_kv(
                     &format!("swarm {role}"),
-                    &format!("{status}: {description}"),
+                    format!("{status}: {description}"),
                 );
             }
             AgentEvent::SwarmFinished {

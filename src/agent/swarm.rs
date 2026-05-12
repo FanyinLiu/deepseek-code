@@ -1060,11 +1060,7 @@ fn validate_draft_plan(draft: &SwarmPlanDraft, fallback: &SwarmPlan) -> Result<S
             draft.goal.trim().to_string()
         },
         milestones: build_team_milestones(&tasks, contains_cjk(&fallback.summary)),
-        acceptance_criteria: if draft.tasks.is_empty() {
-            fallback.acceptance_criteria.clone()
-        } else {
-            fallback.acceptance_criteria.clone()
-        },
+        acceptance_criteria: fallback.acceptance_criteria.clone(),
         risks: if draft.risks.is_empty() {
             fallback.risks.clone()
         } else {
