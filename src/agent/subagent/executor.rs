@@ -450,16 +450,41 @@ impl SubagentExecutor {
             // Bypass and AcceptEdits (for non-command tools) skip the popup entirely.
             // Only Default mode routes to the TUI approval popup and waits.
             let is_command = tc.function.name == "run_command";
+            let policy_decision = crate::policy::evaluate_tool(
+                &tc.function.name,
+                &tc.function.arguments,
+                &self.project_root,
+                &policy_config,
+            );
+            if policy_decision.action == crate::policy::PolicyAction::Deny {
+                let record = ToolResultRecord {
+                    tool_call_id: tc.id.clone(),
+                    name: tc.function.name.clone(),
+                    result: format!(
+                        "Tool '{}' was blocked by policy: {}",
+                        tc.function.name, policy_decision.reason
+                    ),
+                    is_error: true,
+                };
+                results.push((tc.clone(), record));
+                continue;
+            }
             let approved = match self.config.permission_mode {
                 PermissionMode::Bypass => true,
-                PermissionMode::ReadOnly => {
-                    // Safety net — destructive tools already filtered above.
-                    !matches!(
-                        tc.function.name.as_str(),
-                        "write_file" | "edit_file" | "apply_patch" | "run_command"
-                    )
+                // Safety net — destructive tools already filtered above.
+                PermissionMode::ReadOnly
+                    if policy_decision.action == crate::policy::PolicyAction::Allow =>
+                {
+                    true
                 }
-                PermissionMode::AcceptEdits if !is_command => true,
+                PermissionMode::AcceptEdits
+                    if !is_command
+                        && policy_decision.display.risk_level
+                            != crate::policy::RiskLevel::SensitiveRead =>
+                {
+                    true
+                }
+                _ if policy_decision.action == crate::policy::PolicyAction::Allow => true,
                 _ => {
                     let (tx, rx) = tokio::sync::oneshot::channel();
                     send_event(

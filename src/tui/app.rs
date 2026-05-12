@@ -1923,28 +1923,42 @@ impl TuiApp {
             } => {
                 let short_id: String = agent_id.chars().take(8).collect();
                 self.push_activity(format!("subagent {short_id} needs approval: {tool_name}"));
-                let risk_level = match tool_name.as_str() {
-                    "run_command" => crate::policy::RiskLevel::CommandExecution,
-                    "write_file" | "edit_file" | "apply_patch" => {
-                        crate::policy::RiskLevel::WriteProject
-                    }
-                    "fetch_url" | "web_search" => crate::policy::RiskLevel::NetworkAccess,
-                    _ => crate::policy::RiskLevel::SensitiveRead,
-                };
+                let policy = storage::Config::load(Some(&self.file_tree.root))
+                    .map(|config| config.policy)
+                    .unwrap_or_default();
+                let decision = crate::policy::evaluate_tool(
+                    &tool_name,
+                    &arguments,
+                    &self.file_tree.root,
+                    &policy,
+                );
+                if decision.action == crate::policy::PolicyAction::Allow {
+                    let _ = respond.send(true);
+                    self.push_activity(format!(
+                        "subagent {short_id} auto-approved safe tool: {tool_name}"
+                    ));
+                    return;
+                }
+                if decision.action == crate::policy::PolicyAction::Deny {
+                    let _ = respond.send(false);
+                    self.status_message = format!(
+                        "Subagent tool blocked: {}",
+                        truncate_for_activity(&decision.reason, 80)
+                    );
+                    return;
+                }
                 // If another approval is already pending, auto-deny the new one to avoid
                 // deadlock (parallel subagents compete for the single approval slot).
                 if self.approval.is_some() {
                     let _ = respond.send(false);
                 } else {
                     self.approval = Some((
-                        ApprovalDisplay {
-                            title: format!("{tool_name}  [agent {short_id}]"),
-                            description: format!("subagent tool request: {tool_name}"),
-                            risk_level,
-                            details: format!(
-                                "Source: subagent {agent_id}\nTool: {tool_name}\nArguments: {arguments}"
-                            ),
-                        },
+                        subagent_tool_approval_display(
+                            &agent_id,
+                            &tool_name,
+                            &arguments,
+                            &decision.display,
+                        ),
                         respond,
                     ));
                 }
@@ -2650,6 +2664,82 @@ impl Drop for TerminalSession {
 
 fn first_line(value: &str) -> &str {
     value.lines().next().unwrap_or("")
+}
+
+fn subagent_tool_approval_display(
+    agent_id: &str,
+    tool_name: &str,
+    arguments: &str,
+    policy_display: &ApprovalDisplay,
+) -> ApprovalDisplay {
+    let short_id: String = agent_id.chars().take(8).collect();
+    let (target_label, target_value) = approval_target_summary(tool_name, arguments);
+    let title = match policy_display.risk_level {
+        crate::policy::RiskLevel::SensitiveRead => "子 agent 请求敏感读取",
+        crate::policy::RiskLevel::WriteProject => "子 agent 请求写入项目",
+        crate::policy::RiskLevel::GitMutation => "子 agent 请求 Git 修改",
+        crate::policy::RiskLevel::CommandExecution => "子 agent 请求执行命令",
+        crate::policy::RiskLevel::NetworkAccess => "子 agent 请求网络访问",
+        crate::policy::RiskLevel::Blocked => "子 agent 请求已阻止",
+        crate::policy::RiskLevel::SafeRead => "子 agent 请求读取",
+    };
+
+    let mut details = vec![
+        format!("来源: 子 agent {short_id}"),
+        format!("工具: {tool_name}"),
+    ];
+    if !target_value.trim().is_empty() {
+        details.push(format!("{target_label}: {target_value}"));
+    }
+    if tool_name == "list_dir"
+        && serde_json::from_str::<serde_json::Value>(arguments)
+            .ok()
+            .and_then(|value| value["recursive"].as_bool())
+            .unwrap_or(false)
+    {
+        details.push("范围: 递归".to_string());
+    }
+
+    ApprovalDisplay {
+        title: title.to_string(),
+        description: approval_description_for_tool(tool_name, &policy_display.risk_level),
+        risk_level: policy_display.risk_level.clone(),
+        details: details.join("\n"),
+    }
+}
+
+fn approval_description_for_tool(tool_name: &str, risk: &crate::policy::RiskLevel) -> String {
+    match (tool_name, risk) {
+        ("run_command", _) => "子 agent 需要执行本地命令".to_string(),
+        ("read_file" | "list_dir", crate::policy::RiskLevel::SensitiveRead) => {
+            "子 agent 需要读取工作区外或敏感路径".to_string()
+        }
+        ("read_file" | "list_dir", _) => "子 agent 需要读取项目文件".to_string(),
+        ("write_file" | "edit_file" | "apply_patch", _) => "子 agent 需要修改项目文件".to_string(),
+        ("fetch_url" | "web_search", _) => "子 agent 需要访问网络".to_string(),
+        _ => "子 agent 需要执行工具调用".to_string(),
+    }
+}
+
+fn approval_target_summary(tool_name: &str, arguments: &str) -> (&'static str, String) {
+    let value = serde_json::from_str::<serde_json::Value>(arguments).unwrap_or_default();
+    let target = match tool_name {
+        "run_command" => value["command"].as_str(),
+        "read_file" | "list_dir" | "write_file" | "edit_file" => value["path"].as_str(),
+        "search_files" | "search_code" | "semantic_search" => value["query"].as_str(),
+        "fetch_url" => value["url"].as_str(),
+        _ => None,
+    };
+    let label = match tool_name {
+        "run_command" => "命令",
+        "fetch_url" => "网址",
+        "search_files" | "search_code" | "semantic_search" => "查询",
+        _ => "路径",
+    };
+    let summary = target
+        .map(|value| truncate_for_activity(value, 160))
+        .unwrap_or_else(|| truncate_for_activity(arguments, 160));
+    (label, summary)
 }
 
 fn render_jump_to_bottom_hint(f: &mut Frame, area: Rect) {
@@ -4223,6 +4313,49 @@ mod tests {
         assert_eq!(app.current_turn_output_tokens, 24);
         assert_eq!(app.current_turn_tokens, app.current_turn_input_tokens + 24);
         assert!(app.stream_buffer.is_empty());
+    }
+
+    #[test]
+    fn subagent_workspace_list_dir_is_auto_approved() {
+        let root = tempfile::tempdir().expect("workspace");
+        let mut app = test_app_with_root(root.path().to_path_buf());
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+
+        app.apply_agent_event(AgentEvent::SubagentToolApprovalNeeded {
+            agent_id: "subagent-12345678".to_string(),
+            tool_name: "list_dir".to_string(),
+            arguments: serde_json::json!({ "path": ".", "recursive": true }).to_string(),
+            respond: tx,
+        });
+
+        assert!(app.approval.is_none());
+        assert!(matches!(rx.try_recv(), Ok(true)));
+    }
+
+    #[test]
+    fn subagent_sensitive_read_approval_is_localized_and_summarized() {
+        let root = tempfile::tempdir().expect("workspace");
+        let outside = tempfile::NamedTempFile::new().expect("outside file");
+        let mut app = test_app_with_root(root.path().to_path_buf());
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+
+        app.apply_agent_event(AgentEvent::SubagentToolApprovalNeeded {
+            agent_id: "subagent-abcdef123456".to_string(),
+            tool_name: "read_file".to_string(),
+            arguments: serde_json::json!({ "path": outside.path().to_string_lossy() }).to_string(),
+            respond: tx,
+        });
+
+        let Some((display, _)) = app.approval.as_ref() else {
+            panic!("expected approval");
+        };
+        assert_eq!(display.risk_level, crate::policy::RiskLevel::SensitiveRead);
+        assert!(display.title.contains("子 agent"));
+        assert!(display.description.contains("敏感路径"));
+        assert!(display.details.contains("来源: 子 agent subagent"));
+        assert!(display.details.contains("路径:"));
+        assert!(!display.details.contains("Arguments"));
+        assert!(!display.details.contains("{\"path\""));
     }
 
     #[test]
