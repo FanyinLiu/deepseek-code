@@ -248,6 +248,23 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
 }
 
+#[must_use]
+pub fn estimate_chat_request_tokens(request: &ChatRequest) -> u64 {
+    let payload = serde_json::to_string(request).unwrap_or_default();
+    estimate_tokenish_count(&payload)
+}
+
+#[must_use]
+pub fn estimate_tokenish_count(value: &str) -> u64 {
+    if value.trim().is_empty() {
+        return 0;
+    }
+    let chars = value.chars().count() as u64;
+    let non_ascii = value.chars().filter(|c| !c.is_ascii()).count() as u64;
+    let ascii = chars.saturating_sub(non_ascii);
+    ascii.div_ceil(4).saturating_add(non_ascii).max(1)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThinkingConfig {
     #[serde(rename = "type")]

@@ -169,6 +169,7 @@ impl SubagentExecutor {
                 max_tokens: Some(8192),
             };
 
+            send_request_token_delta(event_tx, &request);
             match self
                 .client
                 .chat_stream_accumulated_with_deltas(&request, |chunk| {
@@ -708,20 +709,36 @@ fn emit_subagent_chunk_delta(
         }
         let output_tokens = estimate_stream_tokens(&hidden_delta);
         if output_tokens > 0 {
-            send_event(tx, AgentEvent::TokenDelta { output_tokens });
+            send_event(
+                tx,
+                AgentEvent::TokenDelta {
+                    input_tokens: 0,
+                    output_tokens,
+                },
+            );
         }
         // Reasoning chunks are internal. Subagent cards show progress and results only.
     }
 }
 
-fn estimate_stream_tokens(value: &str) -> u64 {
-    if value.trim().is_empty() {
-        return 0;
+fn send_request_token_delta(
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+    request: &crate::deepseek::models::ChatRequest,
+) {
+    let input_tokens = crate::deepseek::models::estimate_chat_request_tokens(request);
+    if input_tokens > 0 {
+        send_event(
+            tx,
+            AgentEvent::TokenDelta {
+                input_tokens,
+                output_tokens: 0,
+            },
+        );
     }
-    let chars = value.chars().count() as u64;
-    let non_ascii = value.chars().filter(|c| !c.is_ascii()).count() as u64;
-    let ascii = chars.saturating_sub(non_ascii);
-    ascii.div_ceil(4).saturating_add(non_ascii).max(1)
+}
+
+fn estimate_stream_tokens(value: &str) -> u64 {
+    crate::deepseek::models::estimate_tokenish_count(value)
 }
 
 fn dedupe_preserving_order(values: Vec<String>) -> Vec<String> {
@@ -775,7 +792,7 @@ mod tests {
         ));
         assert!(matches!(
             rx.try_recv().expect("subagent hidden token delta"),
-            AgentEvent::TokenDelta { output_tokens } if output_tokens > 0
+            AgentEvent::TokenDelta { input_tokens: 0, output_tokens } if output_tokens > 0
         ));
     }
 

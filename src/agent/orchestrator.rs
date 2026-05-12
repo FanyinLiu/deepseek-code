@@ -35,6 +35,7 @@ pub enum AgentEvent {
     ContentDelta(String),
     ReasoningDelta(String),
     TokenDelta {
+        input_tokens: u64,
         output_tokens: u64,
     },
     ToolApprovalNeeded {
@@ -1316,6 +1317,7 @@ impl Orchestrator {
         };
 
         // 9. Stream and process
+        send_request_token_delta(event_tx, &request);
         let mut emitted = EmittedStreamDeltas::default();
         let result = self
             .client
@@ -1746,6 +1748,7 @@ impl Orchestrator {
                 };
 
                 let mut plan_execution_failed = false;
+                send_request_token_delta(event_tx, &request);
                 match self
                     .client
                     .chat_stream_accumulated_with_deltas(&request, |_| {})
@@ -2281,6 +2284,7 @@ impl Orchestrator {
         };
 
         let mut emitted = EmittedStreamDeltas::default();
+        send_request_token_delta(event_tx, &followup_request);
         match self
             .client
             .chat_stream_accumulated_with_deltas(&followup_request, |chunk| {
@@ -2460,20 +2464,36 @@ fn emit_stream_chunk_deltas(
         }
         let output_tokens = estimate_stream_tokens(&hidden_delta);
         if output_tokens > 0 {
-            send_event(tx, AgentEvent::TokenDelta { output_tokens });
+            send_event(
+                tx,
+                AgentEvent::TokenDelta {
+                    input_tokens: 0,
+                    output_tokens,
+                },
+            );
         }
     }
     emitted
 }
 
-fn estimate_stream_tokens(value: &str) -> u64 {
-    if value.trim().is_empty() {
-        return 0;
+fn send_request_token_delta(
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+    request: &crate::deepseek::models::ChatRequest,
+) {
+    let input_tokens = crate::deepseek::models::estimate_chat_request_tokens(request);
+    if input_tokens > 0 {
+        send_event(
+            tx,
+            AgentEvent::TokenDelta {
+                input_tokens,
+                output_tokens: 0,
+            },
+        );
     }
-    let chars = value.chars().count() as u64;
-    let non_ascii = value.chars().filter(|c| !c.is_ascii()).count() as u64;
-    let ascii = chars.saturating_sub(non_ascii);
-    ascii.div_ceil(4).saturating_add(non_ascii).max(1)
+}
+
+fn estimate_stream_tokens(value: &str) -> u64 {
+    crate::deepseek::models::estimate_tokenish_count(value)
 }
 
 fn changed_files_for_tool_call(tc: &ToolCall) -> Vec<String> {
@@ -3017,7 +3037,7 @@ mod tests {
         ));
         assert!(matches!(
             rx.try_recv().expect("hidden tool token delta"),
-            AgentEvent::TokenDelta { output_tokens } if output_tokens > 0
+            AgentEvent::TokenDelta { input_tokens: 0, output_tokens } if output_tokens > 0
         ));
     }
 }

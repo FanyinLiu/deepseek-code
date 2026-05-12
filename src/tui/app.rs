@@ -1474,9 +1474,9 @@ impl TuiApp {
         self.is_streaming = true;
         self.stream_start = Some(std::time::Instant::now());
         self.current_task_title = summarize_task_title(input);
-        self.current_turn_input_tokens = estimate_tokens(input);
+        self.current_turn_input_tokens = 0;
         self.current_turn_output_tokens = 0;
-        self.current_turn_tokens = self.current_turn_input_tokens;
+        self.current_turn_tokens = 0;
         self.current_turn_usage_finalized = false;
         self.pending_user_message = Some(input.to_string());
         self.stream_buffer.clear();
@@ -1489,6 +1489,16 @@ impl TuiApp {
     fn add_output_token_estimate(&mut self, text: &str) {
         let delta = estimate_tokens(text);
         self.add_output_tokens(delta);
+    }
+
+    fn add_input_tokens(&mut self, delta: u64) {
+        if delta == 0 {
+            return;
+        }
+        self.current_turn_input_tokens = self.current_turn_input_tokens.saturating_add(delta);
+        self.current_turn_tokens = self
+            .current_turn_input_tokens
+            .saturating_add(self.current_turn_output_tokens);
     }
 
     fn add_output_tokens(&mut self, delta: u64) {
@@ -1579,7 +1589,11 @@ impl TuiApp {
                 self.add_output_token_estimate(&text);
                 self.reasoning_buffer.push_str(&text);
             }
-            AgentEvent::TokenDelta { output_tokens } => {
+            AgentEvent::TokenDelta {
+                input_tokens,
+                output_tokens,
+            } => {
+                self.add_input_tokens(input_tokens);
                 self.add_output_tokens(output_tokens);
             }
             AgentEvent::ToolApprovalNeeded {
@@ -1612,9 +1626,16 @@ impl TuiApp {
             AgentEvent::StreamDone { usage, cache, .. } => {
                 if let Some(u) = usage {
                     let turn_tokens = u64::from(u.total_tokens);
-                    self.current_turn_input_tokens = u64::from(u.prompt_tokens);
-                    self.current_turn_output_tokens = u64::from(u.completion_tokens);
-                    self.current_turn_tokens = turn_tokens;
+                    self.current_turn_input_tokens = self
+                        .current_turn_input_tokens
+                        .max(u64::from(u.prompt_tokens));
+                    self.current_turn_output_tokens = self
+                        .current_turn_output_tokens
+                        .max(u64::from(u.completion_tokens));
+                    self.current_turn_tokens = self.current_turn_tokens.max(turn_tokens).max(
+                        self.current_turn_input_tokens
+                            .saturating_add(self.current_turn_output_tokens),
+                    );
                     self.current_turn_usage_finalized = true;
                     self.total_tokens = self.total_tokens.saturating_add(turn_tokens);
                     self.total_cost += u.estimate_cost_cny(&self.model);
@@ -4047,10 +4068,19 @@ mod tests {
         app.total_tokens = 5_000;
         app.begin_running_turn("检查滚动和 token");
 
-        assert!(app.current_turn_input_tokens > 0);
+        assert_eq!(app.current_turn_input_tokens, 0);
         assert_eq!(app.current_turn_output_tokens, 0);
-        assert_eq!(app.activity_input_tokens(), app.current_turn_input_tokens);
-        assert_eq!(app.visible_input_tokens(), app.current_turn_input_tokens);
+        assert_eq!(app.activity_input_tokens(), 0);
+        assert_eq!(app.visible_input_tokens(), 0);
+
+        app.apply_agent_event(AgentEvent::TokenDelta {
+            input_tokens: 240,
+            output_tokens: 0,
+        });
+
+        assert_eq!(app.current_turn_input_tokens, 240);
+        assert_eq!(app.activity_input_tokens(), 240);
+        assert_eq!(app.visible_input_tokens(), 240);
 
         app.apply_agent_event(AgentEvent::StreamDone {
             finish_reason: None,
@@ -4064,11 +4094,11 @@ mod tests {
             cache: None,
         });
 
-        assert_eq!(app.current_turn_tokens, 123);
-        assert_eq!(app.current_turn_input_tokens, 100);
+        assert_eq!(app.current_turn_tokens, 263);
+        assert_eq!(app.current_turn_input_tokens, 240);
         assert_eq!(app.current_turn_output_tokens, 23);
-        assert_eq!(app.activity_input_tokens(), 100);
-        assert_eq!(app.visible_input_tokens(), 100);
+        assert_eq!(app.activity_input_tokens(), 240);
+        assert_eq!(app.visible_input_tokens(), 240);
         assert_eq!(app.total_tokens, 5_123);
         assert!(app.total_cost > 0.0);
     }
@@ -4142,7 +4172,10 @@ mod tests {
         let mut app = test_app();
         app.begin_running_turn("开蜂群，审查代码");
 
-        app.apply_agent_event(AgentEvent::TokenDelta { output_tokens: 24 });
+        app.apply_agent_event(AgentEvent::TokenDelta {
+            input_tokens: 0,
+            output_tokens: 24,
+        });
 
         assert_eq!(app.current_turn_output_tokens, 24);
         assert_eq!(app.current_turn_tokens, app.current_turn_input_tokens + 24);
