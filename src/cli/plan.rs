@@ -65,6 +65,7 @@ pub async fn plan(task: String, project_root: Option<PathBuf>) -> Result<(), any
                 output_blocks::print_plan_step(index, total, &description, status);
             }
             AgentEvent::OptionsNeeded {
+                kind: _,
                 title,
                 options,
                 respond,

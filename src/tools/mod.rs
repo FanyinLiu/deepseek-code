@@ -1,3 +1,4 @@
+pub mod backend;
 pub mod dispatch;
 pub mod edit_file;
 pub mod fetch_url;

@@ -17,6 +17,7 @@ pub struct StatuslineProps<'a> {
     pub tokens: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub agent_tokens: u64,
     pub cost: f64,
     pub cache: Option<&'a CacheUsage>,
     pub permissions: &'a str,
@@ -71,26 +72,31 @@ fn statusline_row(props: &StatuslineProps<'_>, canvas: Color, width: u16) -> Vec
         );
     }
     if props.input_tokens > 0 || props.output_tokens > 0 {
+        if props.input_tokens > 0 {
+            push_gap(&mut spans, canvas);
+            push_chip(
+                &mut spans,
+                format!(" ↑ {} ", token_count_label(props.input_tokens)),
+                colors.input_bg,
+                colors.dark_fg,
+            );
+        }
+        if props.output_tokens > 0 {
+            push_gap(&mut spans, canvas);
+            push_chip(
+                &mut spans,
+                format!(" ↓ {} ", token_count_label(props.output_tokens)),
+                colors.tokens_bg,
+                colors.dark_fg,
+            );
+        }
+    }
+    if props.agent_tokens > 0 {
         push_gap(&mut spans, canvas);
         push_chip(
             &mut spans,
-            format!(" in {} ", compact_number(props.input_tokens)),
-            colors.input_bg,
-            colors.dark_fg,
-        );
-        push_gap(&mut spans, canvas);
-        push_chip(
-            &mut spans,
-            format!(" tok {} ", compact_number(props.output_tokens)),
-            colors.tokens_bg,
-            colors.dark_fg,
-        );
-    } else {
-        push_gap(&mut spans, canvas);
-        push_chip(
-            &mut spans,
-            format!(" tok {} ", compact_number(props.tokens)),
-            colors.tokens_bg,
+            format!(" agent {} ", token_count_label(props.agent_tokens)),
+            colors.agent_bg,
             colors.dark_fg,
         );
     }
@@ -186,6 +192,11 @@ fn compact_number(value: u64) -> String {
     }
 }
 
+fn token_count_label(value: u64) -> String {
+    let unit = if value == 1 { "token" } else { "tokens" };
+    format!("{} {unit}", compact_number(value))
+}
+
 fn context_limit_label() -> &'static str {
     "1M"
 }
@@ -218,6 +229,7 @@ struct StatuslineColors {
     mode_bg: Color,
     web_bg: Color,
     tokens_bg: Color,
+    agent_bg: Color,
     cost_bg: Color,
     cache_bg: Color,
     tools_bg: Color,
@@ -235,6 +247,7 @@ fn statusline_colors() -> StatuslineColors {
         mode_bg: Color::Rgb(87, 142, 214),
         web_bg: Color::Rgb(118, 184, 124),
         tokens_bg: Color::Rgb(102, 204, 204),
+        agent_bg: Color::Rgb(158, 206, 106),
         cost_bg: Color::Rgb(188, 139, 216),
         cache_bg: Color::Rgb(144, 184, 104),
         tools_bg: Color::Rgb(111, 191, 113),
@@ -263,6 +276,7 @@ mod tests {
                         tokens: 128,
                         input_tokens: 0,
                         output_tokens: 0,
+                        agent_tokens: 0,
                         cost: 0.001,
                         cache: None,
                         permissions: "permissions ask",
@@ -282,7 +296,9 @@ mod tests {
         assert!(rendered.contains("ds-code"));
         assert!(rendered.contains("chat"));
         assert!(rendered.contains("128/1M (0.0%)"));
-        assert!(rendered.contains("tok 128"));
+        assert!(!rendered.contains("tok "));
+        assert!(!rendered.contains("↑"));
+        assert!(!rendered.contains("↓"));
         assert!(rendered.contains("ask"));
         let chip = terminal.backend().buffer().cell((2, 1)).expect("chip");
         assert_ne!(chip.bg, theme::palette().canvas);
@@ -309,6 +325,7 @@ mod tests {
                         tokens: 128,
                         input_tokens: 0,
                         output_tokens: 0,
+                        agent_tokens: 0,
                         cost: 0.001,
                         cache: None,
                         permissions: "permissions ask",
@@ -342,6 +359,7 @@ mod tests {
                         tokens: 5_700,
                         input_tokens: 742,
                         output_tokens: 131,
+                        agent_tokens: 0,
                         cost: 0.001,
                         cache: None,
                         permissions: "permissions ask",
@@ -357,8 +375,113 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect();
-        assert!(rendered.contains("in 742"));
-        assert!(rendered.contains("tok 131"));
-        assert!(!rendered.contains("out 131"));
+        assert!(rendered.contains("↑ 742 tokens"));
+        assert!(rendered.contains("↓ 131 tokens"));
+        assert!(!rendered.contains("tok 131"));
+    }
+
+    #[test]
+    fn statusline_omits_empty_token_directions() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 2)).expect("terminal");
+        terminal
+            .draw(|f| {
+                render_statusline(
+                    f,
+                    f.area(),
+                    StatuslineProps {
+                        mode: AppMode::Run,
+                        status: "working",
+                        tokens: 5_700,
+                        input_tokens: 54,
+                        output_tokens: 0,
+                        agent_tokens: 0,
+                        cost: 0.001,
+                        cache: None,
+                        permissions: "permissions ask",
+                    },
+                );
+            })
+            .expect("draw");
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(rendered.contains("↑ 54 tokens"));
+        assert!(!rendered.contains("↓ 0"));
+        assert!(!rendered.contains("tok "));
+    }
+
+    #[test]
+    fn statusline_hides_token_chip_until_usage_exists() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 2)).expect("terminal");
+        terminal
+            .draw(|f| {
+                render_statusline(
+                    f,
+                    f.area(),
+                    StatuslineProps {
+                        mode: AppMode::Chat,
+                        status: "ready",
+                        tokens: 0,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        agent_tokens: 0,
+                        cost: 0.0,
+                        cache: None,
+                        permissions: "permissions ask",
+                    },
+                );
+            })
+            .expect("draw");
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(!rendered.contains("tok "));
+        assert!(!rendered.contains("tokens"));
+        assert!(!rendered.contains("↑"));
+        assert!(!rendered.contains("↓"));
+    }
+
+    #[test]
+    fn statusline_renders_agent_tokens_separately() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 2)).expect("terminal");
+        terminal
+            .draw(|f| {
+                render_statusline(
+                    f,
+                    f.area(),
+                    StatuslineProps {
+                        mode: AppMode::Run,
+                        status: "working",
+                        tokens: 16_160,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        agent_tokens: 16_160,
+                        cost: 0.0,
+                        cache: None,
+                        permissions: "permissions ask",
+                    },
+                );
+            })
+            .expect("draw");
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(rendered.contains("agent 16.2k tokens"));
+        assert!(!rendered.contains("↓ 16.2k"));
     }
 }

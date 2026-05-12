@@ -1,11 +1,11 @@
 use std::path::Path;
-use std::time::Instant;
 
 use chrono::Utc;
 use tokio::sync::mpsc;
 
 use crate::deepseek::{Session, SubTurnId, ToolCall, ToolCallRecord, ToolResultRecord, TurnId};
 use crate::policy;
+use crate::tools::backend::{LocalToolBackend, ToolBackend, ToolExecutionContext};
 
 use super::orchestrator::AgentEvent;
 
@@ -100,22 +100,22 @@ impl ToolLoop {
                 }
             };
 
-            // Execute the tool
-            let start = Instant::now();
-            let (result_text, is_error) = crate::tools::dispatch::execute_single_tool_with_config(
-                tc,
-                project_root,
+            let backend = LocalToolBackend;
+            let context = ToolExecutionContext {
+                project_root: project_root.to_path_buf(),
                 dispatch_config,
-            )
-            .await;
-            let duration_ms = start.elapsed().as_millis() as u64;
+            };
+            let backend_result = backend.execute(tc, &context).await;
+            let result_text = backend_result.content;
+            let is_error = !backend_result.success;
+            let duration_ms = backend_result.duration_ms;
 
             // Record in session history
             let record = ToolCallRecord {
                 id: tc.id.clone(),
                 name: tc.function.name.clone(),
                 arguments: tc.function.arguments.clone(),
-                result_summary: crate::agent::utils::truncate_for_summary(&result_text, 200),
+                result_summary: backend_result.summary,
                 exit_code: if is_error { Some(1) } else { Some(0) },
                 duration_ms,
                 risk_level: crate::agent::utils::risk_level_for_tool(&tc.function.name).to_string(),

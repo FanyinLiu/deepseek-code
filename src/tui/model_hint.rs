@@ -193,7 +193,9 @@ mod tests {
                     Some(status_bar::StatusActivity {
                         title: "Fix input colors",
                         elapsed_ms: 2_000,
+                        input_tokens: 41,
                         tokens: 578,
+                        agent_tokens: 0,
                         thought_seconds: 2,
                     }),
                     status_bar::AppMode::Chat,
@@ -208,8 +210,9 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect();
-        assert!(rendered
-            .contains("⠴ Fix input colors... (2s · ↓ 578 tokens · thinking with high effort)"));
+        assert!(
+            rendered.contains("⠴ Fix input colors... (2s · ↑ 41 tokens · ↓ 578 tokens · thinking")
+        );
         assert!(rendered.contains("DeepSeek V4 Flash (on)"));
     }
 }

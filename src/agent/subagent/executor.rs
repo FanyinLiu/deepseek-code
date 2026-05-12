@@ -129,14 +129,13 @@ impl SubagentExecutor {
         let mut files_written: Vec<String> = Vec::new();
         let mut token_usage: u64 = 0;
         let mut turn_count: u32 = 0;
-        let mut final_output = String::new();
         let mut success = true;
 
         // Main loop
-        loop {
+        let final_output = loop {
             if turn_count >= self.config.max_turns {
-                final_output.push_str("\n\n[Subagent reached max turns limit]");
-                break;
+                success = false;
+                break structured_subagent_limit_message(task, self.config.max_turns);
             }
             turn_count += 1;
 
@@ -185,7 +184,6 @@ impl SubagentExecutor {
 
                     if stream_result.tool_calls.is_empty() {
                         // No tool calls — final response
-                        final_output = stream_result.content.clone();
                         let msg = ReasoningManager::new_assistant_message(
                             &stream_result.content,
                             (!stream_result.reasoning_content.is_empty())
@@ -196,7 +194,7 @@ impl SubagentExecutor {
                             false,
                         );
                         session.messages.push(msg);
-                        break;
+                        break stream_result.content.clone();
                     } else {
                         // Collect tool call info
                         for tc in &stream_result.tool_calls {
@@ -267,11 +265,10 @@ impl SubagentExecutor {
                 }
                 Err(e) => {
                     success = false;
-                    final_output = format!("Subagent error: {e}");
-                    break;
+                    break structured_subagent_error_message(task, &e.to_string());
                 }
             }
-        }
+        };
 
         let duration_ms = start.elapsed().as_millis() as u64;
         let completed_at = Utc::now();
@@ -286,13 +283,13 @@ impl SubagentExecutor {
         let result = SubagentResult {
             success,
             summary,
-            output: final_output,
+            output: final_output.clone(),
             tool_calls_used: dedupe_preserving_order(tool_calls_used),
             files_read: dedupe_preserving_order(files_read),
             files_written: dedupe_preserving_order(files_written),
             duration_ms,
             token_usage,
-            error: (!success).then(|| "Subagent encountered errors during execution".to_string()),
+            error: (!success).then(|| summarize_subagent_failure_for_parent(&final_output)),
             started_at,
             completed_at,
         };
@@ -577,6 +574,70 @@ impl SubagentExecutor {
     // execute_single_tool moved to crate::tools::dispatch
 }
 
+fn structured_subagent_limit_message(task: &SubagentTask, _max_turns: u32) -> String {
+    if subagent_task_uses_chinese(task) {
+        format!(
+            "子任务未形成可用结论。\n任务：{}\n建议：缩小任务范围后重试。",
+            task.description
+        )
+    } else {
+        format!(
+            "Subtask did not produce a usable conclusion.\nTask: {}\nNext: narrow the scope and retry.",
+            task.description
+        )
+    }
+}
+
+fn structured_subagent_error_message(task: &SubagentTask, error: &str) -> String {
+    let classified = if error.contains("EOF while parsing")
+        || error.contains("parse error")
+        || error.contains("expected value")
+        || error.contains("expected ident")
+    {
+        "工具调用参数解析失败"
+    } else {
+        "子任务执行失败"
+    };
+    if subagent_task_uses_chinese(task) {
+        format!(
+            "{classified}。\n任务：{}\n说明：已保留完整错误到调试日志，用户界面只显示结构化摘要。",
+            task.description
+        )
+    } else {
+        format!(
+            "Subtask failed.\nTask: {}\nSummary: the detailed error was kept out of the visible transcript.",
+            task.description
+        )
+    }
+}
+
+fn summarize_subagent_failure_for_parent(output: &str) -> String {
+    output
+        .lines()
+        .next()
+        .unwrap_or("子任务执行失败")
+        .to_string()
+}
+
+fn subagent_task_uses_chinese(task: &SubagentTask) -> bool {
+    contains_cjk_local(&task.description)
+        || contains_cjk_local(&task.prompt)
+        || task.context.as_deref().is_some_and(contains_cjk_local)
+        || task
+            .expected_output
+            .as_deref()
+            .is_some_and(contains_cjk_local)
+}
+
+fn contains_cjk_local(value: &str) -> bool {
+    value.chars().any(|ch| {
+        matches!(
+            ch as u32,
+            0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0xF900..=0xFAFF
+        )
+    })
+}
+
 /// Run a child subagent for recursive agent spawning (Feature 3).
 ///
 /// Returns `Pin<Box<dyn Future + Send>>` (not `async fn`) so `execute_tool_calls` holds
@@ -629,17 +690,7 @@ fn emit_subagent_chunk_delta(
                 );
             }
         }
-        if let Some(reasoning) = &choice.delta.reasoning_content {
-            if !reasoning.trim().is_empty() {
-                send_event(
-                    tx,
-                    AgentEvent::SubagentDelta {
-                        agent_id: agent_id.to_string(),
-                        content: format!("thinking: {reasoning}"),
-                    },
-                );
-            }
-        }
+        // Reasoning chunks are internal. Subagent cards show progress and results only.
     }
 }
 
@@ -655,8 +706,12 @@ fn dedupe_preserving_order(values: Vec<String>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{dedupe_preserving_order, emit_subagent_chunk_delta};
+    use super::{
+        dedupe_preserving_order, emit_subagent_chunk_delta, structured_subagent_error_message,
+        structured_subagent_limit_message,
+    };
     use crate::agent::orchestrator::AgentEvent;
+    use crate::agent::subagent::types::SubagentTask;
     use crate::deepseek::models::StreamChunk;
 
     #[test]
@@ -688,5 +743,40 @@ mod tests {
             AgentEvent::SubagentDelta { agent_id, content }
                 if agent_id == "agent-1" && content == "working"
         ));
+    }
+
+    #[test]
+    fn subagent_limit_message_is_structured_and_localized() {
+        let task = SubagentTask {
+            description: "审查 swarm 失败摘要".into(),
+            prompt: "请审查，不要写文件".into(),
+            context: None,
+            focus_files: Vec::new(),
+            expected_output: None,
+        };
+
+        let message = structured_subagent_limit_message(&task, 12);
+
+        assert!(message.contains("子任务未形成可用结论"));
+        assert!(!message.contains("轮次"));
+        assert!(!message.contains("max_turns"));
+        assert!(!message.contains("Subagent reached max turns limit"));
+    }
+
+    #[test]
+    fn subagent_parse_error_message_hides_raw_error() {
+        let task = SubagentTask {
+            description: "审查工具参数".into(),
+            prompt: "请审查".into(),
+            context: None,
+            focus_files: Vec::new(),
+            expected_output: None,
+        };
+
+        let message =
+            structured_subagent_error_message(&task, "parse error: EOF while parsing a string");
+
+        assert!(message.contains("工具调用参数解析失败"));
+        assert!(!message.contains("EOF while parsing"));
     }
 }

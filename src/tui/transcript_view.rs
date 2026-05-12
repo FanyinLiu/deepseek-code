@@ -31,7 +31,7 @@ pub struct TranscriptProps<'a> {
 }
 
 pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) {
-    let mut lines: Vec<Line> = Vec::new();
+    let mut lines: Vec<Line<'static>> = Vec::new();
     let palette = theme::palette();
 
     // ── Messages ──
@@ -46,11 +46,15 @@ pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) 
         render_message(&mut lines, msg, area.width);
     }
 
-    let sticky_user_lines: Vec<Line<'static>> = props
+    if let Some(message) = props
         .pending_user_message
         .filter(|message| !message.trim().is_empty())
-        .map(|message| user_text_lines(message, area.width))
-        .unwrap_or_default();
+    {
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
+        }
+        lines.extend(user_text_lines(message, area.width));
+    }
 
     // ── Streaming response ──
     if props.is_streaming || !props.stream_buffer.is_empty() {
@@ -110,37 +114,71 @@ pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) 
         render_inline_diffs(&mut lines, props.diffs, props.selected_diff);
     }
 
-    // Chat-style scrollback: offset 0 is pinned to the newest lines.
+    // Chat-style scrollback: offset 0 is pinned to the newest visual lines.
+    let lines = wrap_visual_lines(&lines, area.width);
     let visible_height = area.height as usize;
-    let sticky_slots = if sticky_user_lines.is_empty() {
-        0
-    } else {
-        sticky_user_lines
-            .len()
-            .saturating_add(1)
-            .min(visible_height)
-    };
-    let scroll_height = visible_height.saturating_sub(sticky_slots);
-    let max_offset = lines.len().saturating_sub(scroll_height);
+    let max_offset = lines.len().saturating_sub(visible_height);
     let hidden_below = props.scroll_offset.min(max_offset);
     let end = lines.len().saturating_sub(hidden_below);
-    let start = end.saturating_sub(scroll_height);
+    let start = end.saturating_sub(visible_height);
     let mut visible: Vec<Line> = Vec::with_capacity(visible_height);
-    if !sticky_user_lines.is_empty() {
-        visible.extend(sticky_user_lines.into_iter().take(sticky_slots));
-        if visible.len() < visible_height {
-            visible.push(Line::from(""));
-        }
-    }
-    if scroll_height > 0 {
-        visible.extend(lines[start..end].iter().cloned());
-    }
+    visible.extend(lines[start..end].iter().cloned());
 
     let text = Text::from(visible);
     let paragraph = Paragraph::new(text)
         .style(Style::default().fg(palette.text).bg(palette.canvas))
         .wrap(Wrap { trim: false });
     f.render_widget(paragraph, area);
+}
+
+fn wrap_visual_lines(lines: &[Line<'static>], width: u16) -> Vec<Line<'static>> {
+    let max_width = (width as usize).max(1);
+    let mut out = Vec::new();
+
+    for line in lines {
+        if line.spans.is_empty() {
+            out.push(Line::from(""));
+            continue;
+        }
+
+        let mut current: Vec<Span<'static>> = Vec::new();
+        let mut current_width = 0usize;
+
+        for span in &line.spans {
+            let mut chunk = String::new();
+            let style = span.style;
+            for ch in span.content.chars() {
+                let ch_width = char_display_width(ch);
+                if current_width + ch_width > max_width
+                    && (!current.is_empty() || !chunk.is_empty())
+                {
+                    if !chunk.is_empty() {
+                        current.push(Span::styled(std::mem::take(&mut chunk), style));
+                    }
+                    out.push(Line::from(std::mem::take(&mut current)));
+                    current_width = 0;
+                }
+                chunk.push(ch);
+                current_width += ch_width;
+                if current_width >= max_width {
+                    current.push(Span::styled(std::mem::take(&mut chunk), style));
+                    out.push(Line::from(std::mem::take(&mut current)));
+                    current_width = 0;
+                }
+            }
+            if !chunk.is_empty() {
+                current.push(Span::styled(chunk, style));
+            }
+        }
+
+        if current.is_empty() {
+            out.push(Line::from(""));
+        } else {
+            out.push(Line::from(current));
+        }
+    }
+
+    out
 }
 
 fn render_message(lines: &mut Vec<Line>, msg: &ProtocolMessage, width: u16) {
@@ -202,7 +240,8 @@ fn render_assistant_content(
     fg: Color,
 ) {
     let palette = theme::palette();
-    let blocks = syntax_highlight::parse_markdown(content);
+    let visible_content = sanitize_transcript_visible_text(content);
+    let blocks = syntax_highlight::parse_markdown(&visible_content);
     let mut first_line = true;
 
     for block in blocks {
@@ -233,15 +272,16 @@ fn render_assistant_content(
                         line_index += 1;
                         continue;
                     }
+                    let sanitized_line = sanitize_transcript_visible_text(line);
                     let p = if first_line { prefix } else { "" }.to_string();
-                    if let Some(duration) = brewed_duration(line) {
+                    if let Some(duration) = brewed_duration(&sanitized_line) {
                         lines.push(brewed_line(&p, duration));
                         first_line = false;
                         line_index += 1;
                         continue;
                     }
                     let mut spans = vec![Span::styled(p, transcript_style(fg))];
-                    spans.extend(inline_spans(line, fg));
+                    spans.extend(inline_spans(&sanitized_line, fg));
                     lines.push(Line::from(spans));
                     first_line = false;
                     line_index += 1;
@@ -393,7 +433,7 @@ fn render_markdown_table(lines: &mut Vec<Line>, table_lines: &[&str], width: u16
     let p = theme::palette();
     let border_style = transcript_style(match theme::active_theme() {
         theme::ThemeMode::Light => Color::Rgb(42, 42, 36),
-        theme::ThemeMode::Dark => p.divider,
+        theme::ThemeMode::Dark | theme::ThemeMode::HighContrast => p.divider,
     });
 
     lines.push(table_border_line(
@@ -543,7 +583,7 @@ fn table_row_line(row: &[String], widths: &[usize], is_header: bool) -> Line<'st
     let p = theme::palette();
     let border_style = transcript_style(match theme::active_theme() {
         theme::ThemeMode::Light => Color::Rgb(42, 42, 36),
-        theme::ThemeMode::Dark => p.divider,
+        theme::ThemeMode::Dark | theme::ThemeMode::HighContrast => p.divider,
     });
     let mut spans = vec![Span::styled("│", border_style)];
     for (cell, width) in row.iter().zip(widths.iter().copied()) {
@@ -669,14 +709,14 @@ fn should_hide_transcript_line(line: &str) -> bool {
 fn user_bar_bg() -> Color {
     match theme::active_theme() {
         theme::ThemeMode::Light => Color::Rgb(42, 42, 42),
-        theme::ThemeMode::Dark => theme::palette().surface_alt,
+        theme::ThemeMode::Dark | theme::ThemeMode::HighContrast => theme::palette().surface_alt,
     }
 }
 
 fn user_bar_fg() -> Color {
     match theme::active_theme() {
         theme::ThemeMode::Light => Color::Rgb(250, 246, 232),
-        theme::ThemeMode::Dark => theme::palette().text,
+        theme::ThemeMode::Dark | theme::ThemeMode::HighContrast => theme::palette().text,
     }
 }
 
@@ -882,25 +922,50 @@ fn render_inline_plan(
     let total = total_steps.max(steps.len());
     let open = total.saturating_sub(completed + failed);
     let p = theme::palette();
+    let use_chinese = plan_uses_chinese(summary, steps, warnings);
+    let is_swarm = is_swarm_agent_plan(steps);
+    let clean_summary = summary
+        .map(clean_plan_summary)
+        .filter(|value| !value.trim().is_empty());
     lines.push(Line::from(vec![
         Span::styled("  ", transcript_style(p.text)),
         Span::styled(
-            format!("{total} tasks"),
+            if is_swarm && use_chinese {
+                format!("{total} 个 agent")
+            } else if is_swarm {
+                format!("{total} agents")
+            } else if use_chinese {
+                format!("{total} 项任务")
+            } else {
+                format!("{total} tasks")
+            },
             transcript_style(p.dim).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!(" ({completed} done, {open} open)"),
+            if use_chinese {
+                format!("（{completed} 完成，{open} 未完成）")
+            } else {
+                format!(" ({completed} done, {open} open)")
+            },
             transcript_style(p.dim),
+        ),
+        Span::styled(
+            clean_summary
+                .as_deref()
+                .filter(|_| is_swarm)
+                .map(|value| format!(" · {}", truncate(value, 64)))
+                .unwrap_or_default(),
+            transcript_style(p.secondary),
         ),
     ]));
 
-    if let Some(s) = summary.filter(|s| !s.trim().is_empty()) {
+    if let Some(s) = clean_summary.as_deref().filter(|_| !is_swarm) {
         let summary_status = aggregate_plan_status(steps);
         let summary_color = plan_color(summary_status);
         lines.push(Line::from(vec![
             Span::styled("  └ ", transcript_style(p.divider)),
             Span::styled(
-                format!("{} ", plan_checkbox(summary_status)),
+                format!("{} ", plan_marker(summary_status)),
                 transcript_style(summary_color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(truncate(s, 84), transcript_style(p.text)),
@@ -935,7 +1000,11 @@ fn render_inline_plan(
         lines.push(Line::from(vec![
             Span::styled("  │ ", transcript_style(p.divider)),
             Span::styled(
-                format!("… {} earlier tasks", visible.start),
+                if use_chinese {
+                    format!("… 前面还有 {} 项任务", visible.start)
+                } else {
+                    format!("… {} earlier tasks", visible.start)
+                },
                 transcript_style(p.dim),
             ),
         ]));
@@ -953,9 +1022,16 @@ fn render_inline_plan(
         };
         lines.push(Line::from(vec![
             Span::styled("  │ ", transcript_style(p.divider)),
-            Span::styled(plan_checkbox(step.status), transcript_style(color)),
+            Span::styled(plan_marker(step.status), transcript_style(color)),
             Span::styled(" ", transcript_style(p.divider)),
-            Span::styled(format!("{:>2}. ", idx + 1), transcript_style(p.dim)),
+            Span::styled(
+                if is_swarm {
+                    String::new()
+                } else {
+                    format!("{:>2}. ", idx + 1)
+                },
+                transcript_style(p.dim),
+            ),
             Span::styled(truncate(&plan_display_title(&step.description), 72), style),
             Span::styled(plan_duration_suffix(step), transcript_style(p.dim)),
         ]));
@@ -965,11 +1041,67 @@ fn render_inline_plan(
         lines.push(Line::from(vec![
             Span::styled("  │ ", transcript_style(p.divider)),
             Span::styled(
-                format!("… {} more tasks", steps.len() - visible.end),
+                if use_chinese {
+                    format!("… 后面还有 {} 项任务", steps.len() - visible.end)
+                } else {
+                    format!("… {} more tasks", steps.len() - visible.end)
+                },
                 transcript_style(p.dim),
             ),
         ]));
     }
+}
+
+fn is_swarm_agent_plan(steps: &[plan_tracker::PlanStepItem]) -> bool {
+    !steps.is_empty()
+        && steps
+            .iter()
+            .all(|step| step.description.trim_start().starts_with("agent "))
+}
+
+fn clean_plan_summary(summary: &str) -> String {
+    let mut value = summary.trim();
+    loop {
+        let next = value
+            .strip_prefix("蜂群计划：")
+            .or_else(|| value.strip_prefix("蜂群任务："))
+            .or_else(|| value.strip_prefix("蜂群计划"))
+            .or_else(|| value.strip_prefix("蜂群任务"))
+            .or_else(|| value.strip_prefix("Swarm plan:"))
+            .or_else(|| value.strip_prefix("Swarm task:"))
+            .or_else(|| value.strip_prefix("Swarm plan"))
+            .or_else(|| value.strip_prefix("Swarm task"))
+            .map(str::trim);
+        match next {
+            Some(rest) if rest != value => value = rest,
+            _ => break,
+        }
+    }
+    value.to_string()
+}
+
+fn plan_uses_chinese(
+    summary: Option<&str>,
+    steps: &[plan_tracker::PlanStepItem],
+    warnings: &[String],
+) -> bool {
+    summary.is_some_and(contains_cjk)
+        || steps.iter().any(|step| contains_cjk(&step.description))
+        || warnings.iter().any(|warning| contains_cjk(warning))
+}
+
+fn contains_cjk(value: &str) -> bool {
+    value.chars().any(|ch| {
+        matches!(
+            ch as u32,
+            0x4E00..=0x9FFF
+                | 0x3400..=0x4DBF
+                | 0x20000..=0x2A6DF
+                | 0x2A700..=0x2B73F
+                | 0x2B740..=0x2B81F
+                | 0x2B820..=0x2CEAF
+        )
+    })
 }
 
 fn visible_plan_range(len: usize, focus: usize, max_visible: usize) -> std::ops::Range<usize> {
@@ -989,7 +1121,9 @@ fn visible_plan_range(len: usize, focus: usize, max_visible: usize) -> std::ops:
 
 fn plan_display_title(description: &str) -> String {
     let mut value = description.trim();
-    for prefix in ["Read `", "Search `", "Edit `", "Run `"] {
+    for prefix in [
+        "Read `", "Search `", "Edit `", "Run `", "读取 `", "搜索 `", "修改 `", "运行 `",
+    ] {
         if let Some(rest) = value.strip_prefix(prefix) {
             if let Some((inside, _)) = rest.split_once('`') {
                 value = inside.trim();
@@ -1000,6 +1134,8 @@ fn plan_display_title(description: &str) -> String {
     if let Some(rest) = value.strip_prefix("Verify — ") {
         value = rest.trim();
     } else if let Some(rest) = value.strip_prefix("Verify - ") {
+        value = rest.trim();
+    } else if let Some(rest) = value.strip_prefix("验证 - ") {
         value = rest.trim();
     }
     strip_leading_task_number(value).to_string()
@@ -1028,12 +1164,17 @@ fn strip_leading_task_number(value: &str) -> &str {
 }
 
 fn plan_duration_suffix(step: &plan_tracker::PlanStepItem) -> String {
+    let use_chinese = contains_cjk(&step.description);
     step.elapsed_ms()
         .map(plan_tracker::format_duration_compact)
         .map(|duration| match step.status {
             plan_tracker::PlanStepStatus::Running => format!("  · {duration}"),
             plan_tracker::PlanStepStatus::Done | plan_tracker::PlanStepStatus::Failed => {
-                format!("  · took {duration}")
+                if use_chinese {
+                    format!("  · 用时 {duration}")
+                } else {
+                    format!("  · took {duration}")
+                }
             }
             plan_tracker::PlanStepStatus::Pending => String::new(),
         })
@@ -1099,6 +1240,7 @@ fn render_inline_subagents(
             .as_deref()
             .or(card.last_update.as_deref())
             .unwrap_or(&card.description);
+        let display = sanitize_agent_visible_summary(display);
         let mut metadata = vec![("time".to_string(), meta)];
         if card.files_read > 0 || card.files_written > 0 {
             metadata.push((
@@ -1115,7 +1257,7 @@ fn render_inline_subagents(
                 status,
                 task: card.description.clone(),
                 metadata,
-                summary: Some(display.to_string()),
+                summary: Some(display),
             },
             70,
         ));
@@ -1132,6 +1274,35 @@ fn render_inline_subagents(
             }
         }
     }
+}
+
+fn sanitize_transcript_visible_text(value: &str) -> String {
+    value
+        .replace(
+            "建议：提高 subagent.max_turns 后重试。",
+            "建议：缩小任务范围后重试。",
+        )
+        .replace("或提高 subagent.max_turns 后重试", "后重试")
+        .replace("提高 subagent.max_turns", "缩小任务范围")
+        .replace("增加 subagent.max_turns", "缩小任务范围")
+        .replace("subagent.max_turns", "任务范围")
+        .replace("max_turns", "任务范围")
+        .replace("max_iterations", "重试次数")
+        .replace("达到轮次上限", "未形成可用结论")
+        .replace("Subagent reached max turns limit", "子任务未形成可用结论")
+        .replace(
+            "reached max turn limit",
+            "did not produce a usable conclusion",
+        )
+        .replace("parse error", "工具调用格式不完整")
+        .replace("EOF while parsing", "工具调用内容被截断")
+        .replace("line 1 column", "位置")
+        .replace("Subagent error:", "子任务失败：")
+        .replace("tool call arguments", "工具调用参数")
+}
+
+fn sanitize_agent_visible_summary(value: &str) -> String {
+    sanitize_transcript_visible_text(value)
 }
 
 fn render_inline_diffs(
@@ -1192,12 +1363,10 @@ fn aggregate_diff_items(diffs: &[diff_viewer::FileDiffItem]) -> Vec<diff_viewer:
     items
 }
 
-fn plan_checkbox(status: plan_tracker::PlanStepStatus) -> &'static str {
+fn plan_marker(status: plan_tracker::PlanStepStatus) -> &'static str {
     match status {
-        plan_tracker::PlanStepStatus::Pending => "□",
-        plan_tracker::PlanStepStatus::Running => "■",
-        plan_tracker::PlanStepStatus::Done => "✓",
-        plan_tracker::PlanStepStatus::Failed => "✗",
+        plan_tracker::PlanStepStatus::Pending | plan_tracker::PlanStepStatus::Running => "○",
+        plan_tracker::PlanStepStatus::Done | plan_tracker::PlanStepStatus::Failed => "●",
     }
 }
 
@@ -1289,6 +1458,21 @@ mod tests {
     use ratatui::{backend::TestBackend, Terminal};
     use uuid::Uuid;
 
+    #[test]
+    fn visual_wrap_splits_long_lines_before_scrollback() {
+        let line = Line::from(vec![Span::styled(
+            "abcdefghijkl",
+            Style::default().fg(theme::palette().text),
+        )]);
+
+        let wrapped = wrap_visual_lines(&[line], 5);
+
+        assert_eq!(wrapped.len(), 3);
+        assert_eq!(line_text(&wrapped[0]), "abcde");
+        assert_eq!(line_text(&wrapped[1]), "fghij");
+        assert_eq!(line_text(&wrapped[2]), "kl");
+    }
+
     fn test_message(content: &str) -> ProtocolMessage {
         ProtocolMessage {
             id: Uuid::new_v4(),
@@ -1301,6 +1485,13 @@ mod tests {
             sub_turn_id: None,
             visibility: MessageVisibility::UserVisible,
         }
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
     }
 
     fn user_message(content: &str) -> ProtocolMessage {
@@ -1719,7 +1910,56 @@ mod tests {
     }
 
     #[test]
-    fn pending_user_message_stays_visible_above_long_streaming_output() {
+    fn pending_user_message_stays_in_transcript_order() {
+        theme::set_active_theme(theme::ThemeMode::Light);
+        let mut terminal = Terminal::new(TestBackend::new(80, 8)).expect("terminal");
+        let previous = test_message("上一轮 AI 回答");
+
+        terminal
+            .draw(|f| {
+                render_transcript(
+                    f,
+                    f.area(),
+                    TranscriptProps {
+                        messages: &[previous],
+                        pending_user_message: Some("测试 CLI"),
+                        scroll_offset: 0,
+                        plan_summary: None,
+                        plan_steps: &[],
+                        plan_current_step: 0,
+                        plan_total_steps: 0,
+                        plan_warnings: &[],
+                        subagents: &[],
+                        global_elapsed_ms: 0,
+                        diffs: &[],
+                        selected_diff: None,
+                        is_streaming: true,
+                        stream_buffer: "AI 正在回答",
+                        reasoning_buffer: "",
+                        show_reasoning: false,
+                    },
+                );
+            })
+            .expect("draw");
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        let compact = rendered.replace(' ', "");
+        let previous_idx = compact.find("上一轮AI").expect("previous answer");
+        let user_idx = compact.find("CLI").expect("pending user");
+        let answer_idx = compact.find("AI正在回答").expect("streaming answer");
+        assert!(previous_idx < user_idx);
+        assert!(user_idx < answer_idx);
+        theme::set_active_theme(theme::ThemeMode::Light);
+    }
+
+    #[test]
+    fn newest_streaming_output_stays_visible_when_long() {
         theme::set_active_theme(theme::ThemeMode::Light);
         let mut terminal = Terminal::new(TestBackend::new(80, 6)).expect("terminal");
         let long_stream = "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7";
@@ -1758,8 +1998,7 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect();
-        assert!(rendered.contains("CLI"));
-        assert!(rendered.contains("▸"));
+        assert!(!rendered.contains("CLI"));
         assert!(rendered.contains("line 7"));
         theme::set_active_theme(theme::ThemeMode::Light);
     }
@@ -1861,10 +2100,12 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect();
+        let compact = rendered.replace(' ', "");
         assert!(rendered.contains("Brewed for 1m 2s"));
-        assert!(rendered.contains("3 tasks (2 done, 1 open)"));
-        assert!(rendered.contains("并 行 构 建 演 示"));
-        assert!(rendered.contains("took 1s"));
+        assert!(compact.contains("3项任务"));
+        assert!(compact.contains("2完成"));
+        assert!(compact.contains("并行构建演示"));
+        assert!(compact.contains("用时1s"));
         theme::set_active_theme(theme::ThemeMode::Light);
     }
 
@@ -1912,8 +2153,33 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(rendered.contains("2 tasks (2 done, 0 open)"));
-        assert!(rendered.contains("└ ✓ Build project"));
+        assert!(rendered.contains("└ ● Build project"));
         theme::set_active_theme(theme::ThemeMode::Light);
+    }
+
+    #[test]
+    fn agent_summary_hides_internal_turn_budget() {
+        let visible = sanitize_agent_visible_summary(
+            "子任务未完成：达到轮次上限（10）。建议：提高 subagent.max_turns 后重试。",
+        );
+
+        assert!(visible.contains("未形成可用结论"));
+        assert!(!visible.contains("轮次"));
+        assert!(!visible.contains("max_turns"));
+    }
+
+    #[test]
+    fn assistant_content_hides_internal_retry_knobs() {
+        let visible = sanitize_transcript_visible_text(
+            "建议提高 subagent.max_turns 或 max_iterations，避免达到轮次上限。",
+        );
+
+        assert!(visible.contains("缩小任务范围"));
+        assert!(visible.contains("重试次数"));
+        assert!(visible.contains("未形成可用结论"));
+        assert!(!visible.contains("subagent.max_turns"));
+        assert!(!visible.contains("max_iterations"));
+        assert!(!visible.contains("轮次"));
     }
 
     #[test]

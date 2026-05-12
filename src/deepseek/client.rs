@@ -129,7 +129,8 @@ impl DeepSeekClient {
     where
         F: FnMut(&super::models::StreamChunk),
     {
-        let mut stream = self.chat_stream(req).await?;
+        let stream = self.chat_stream(req).await?;
+        tokio::pin!(stream);
         let mut accum = StreamAccumulator::new();
 
         const CHUNK_IDLE_TIMEOUT: Duration = Duration::from_secs(30);

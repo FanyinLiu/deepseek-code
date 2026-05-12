@@ -106,6 +106,8 @@ pub struct PolicyConfig {
     pub normalize_unicode_commands: bool,
     #[serde(default)]
     pub auto_mode: bool,
+    #[serde(default)]
+    pub autonomy_level: AutonomyLevel,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -136,6 +138,39 @@ struct PartialPolicyConfig {
     block_protected_paths: Option<bool>,
     normalize_unicode_commands: Option<bool>,
     auto_mode: Option<bool>,
+    autonomy_level: Option<AutonomyLevel>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AutonomyLevel {
+    #[default]
+    Off,
+    Low,
+    Medium,
+    High,
+}
+
+impl AutonomyLevel {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    #[must_use]
+    pub fn auto_workspace_writes(self) -> bool {
+        matches!(self, Self::Low | Self::Medium | Self::High)
+    }
+
+    #[must_use]
+    pub fn auto_local_commands(self) -> bool {
+        matches!(self, Self::Medium | Self::High)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -160,6 +195,8 @@ pub struct UiConfig {
     pub language: String,
     #[serde(default = "default_theme")]
     pub theme: String,
+    #[serde(default = "default_renderer")]
+    pub renderer: String,
     #[serde(default)]
     pub show_reasoning_summary: bool,
     #[serde(default)]
@@ -195,10 +232,16 @@ pub struct RouterConfig {
 pub struct SubagentConfig {
     #[serde(default = "default_subagent_enabled")]
     pub enabled: bool,
+    #[serde(default = "default_subagent_swarm_enabled")]
+    pub swarm_enabled: bool,
     #[serde(default = "default_subagent_max_parallel")]
     pub max_parallel: usize,
     #[serde(default = "default_subagent_auto_decompose")]
     pub auto_decompose: bool,
+    #[serde(default = "default_subagent_write_requires_approval")]
+    pub write_requires_approval: bool,
+    #[serde(default = "default_subagent_command_requires_approval")]
+    pub command_requires_approval: bool,
     #[serde(default = "default_subagent_default_model")]
     pub default_model: String,
     #[serde(default)]
@@ -287,6 +330,7 @@ impl Default for PolicyConfig {
             block_protected_paths: true,
             normalize_unicode_commands: true,
             auto_mode: false,
+            autonomy_level: AutonomyLevel::Off,
         }
     }
 }
@@ -304,6 +348,7 @@ impl Default for UiConfig {
         Self {
             language: default_language(),
             theme: default_theme(),
+            renderer: default_renderer(),
             show_reasoning_summary: true,
             show_raw_reasoning: false,
             show_cache_hud: true,
@@ -350,6 +395,9 @@ fn default_language() -> String {
 }
 fn default_theme() -> String {
     "light".into()
+}
+fn default_renderer() -> String {
+    "classic".into()
 }
 
 fn default_router_enabled() -> bool {
@@ -535,6 +583,7 @@ impl PolicyConfig {
                 .normalize_unicode_commands
                 .unwrap_or(self.normalize_unicode_commands),
             auto_mode: patch.auto_mode.unwrap_or(self.auto_mode),
+            autonomy_level: patch.autonomy_level.unwrap_or(self.autonomy_level),
         }
     }
 }
@@ -569,8 +618,11 @@ impl Default for SubagentConfig {
     fn default() -> Self {
         Self {
             enabled: default_subagent_enabled(),
+            swarm_enabled: default_subagent_swarm_enabled(),
             max_parallel: default_subagent_max_parallel(),
             auto_decompose: default_subagent_auto_decompose(),
+            write_requires_approval: default_subagent_write_requires_approval(),
+            command_requires_approval: default_subagent_command_requires_approval(),
             default_model: default_subagent_default_model(),
             allow_custom_agents: false,
             custom_agents_dir: None,
@@ -582,8 +634,11 @@ impl SubagentConfig {
     fn merge_subagent(self, other: Self) -> Self {
         Self {
             enabled: other.enabled,
+            swarm_enabled: other.swarm_enabled,
             max_parallel: other.max_parallel,
             auto_decompose: other.auto_decompose,
+            write_requires_approval: other.write_requires_approval,
+            command_requires_approval: other.command_requires_approval,
             default_model: other.default_model,
             allow_custom_agents: other.allow_custom_agents,
             custom_agents_dir: other.custom_agents_dir.or(self.custom_agents_dir),
@@ -594,10 +649,19 @@ impl SubagentConfig {
 fn default_subagent_enabled() -> bool {
     true
 }
+fn default_subagent_swarm_enabled() -> bool {
+    true
+}
 fn default_subagent_max_parallel() -> usize {
     4
 }
 fn default_subagent_auto_decompose() -> bool {
+    true
+}
+fn default_subagent_write_requires_approval() -> bool {
+    false
+}
+fn default_subagent_command_requires_approval() -> bool {
     true
 }
 fn default_subagent_default_model() -> String {
@@ -688,6 +752,7 @@ mod tests {
             block_protected_paths: true,
             normalize_unicode_commands: true,
             command_timeout_seconds: 120,
+            autonomy_level: AutonomyLevel::Off,
             ..PolicyConfig::default()
         };
         let patch = PartialPolicyConfig {
@@ -703,6 +768,7 @@ mod tests {
         assert!(merged.block_protected_paths);
         assert!(merged.normalize_unicode_commands);
         assert_eq!(merged.command_timeout_seconds, 60);
+        assert_eq!(merged.autonomy_level, AutonomyLevel::Off);
     }
 
     #[test]
@@ -719,6 +785,23 @@ command_timeout_seconds = 60
         assert_eq!(patch.command_timeout_seconds, Some(60));
         assert_eq!(patch.network_access, None);
         assert_eq!(patch.require_approval_for_write, None);
+    }
+
+    #[test]
+    fn policy_autonomy_level_parses_and_merges() {
+        let patch = parse_policy_patch(
+            r#"
+[policy]
+autonomy_level = "medium"
+"#,
+        )
+        .expect("parse patch")
+        .expect("policy patch");
+
+        let merged = PolicyConfig::default().merge_policy(Some(patch));
+        assert_eq!(merged.autonomy_level, AutonomyLevel::Medium);
+        assert!(merged.autonomy_level.auto_local_commands());
+        assert!(merged.autonomy_level.auto_workspace_writes());
     }
 
     #[test]

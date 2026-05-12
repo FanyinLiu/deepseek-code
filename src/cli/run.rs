@@ -187,12 +187,42 @@ pub async fn run(
                     eprintln!("⚠ {w}");
                 }
             }
+            AgentEvent::SwarmStarted { summary, total, .. } => {
+                output_blocks::print_header("swarm", output_blocks::BlockStatus::Running);
+                output_blocks::print_kv("summary", &summary);
+                output_blocks::print_kv("agents", &total.to_string());
+            }
+            AgentEvent::SwarmTaskUpdated {
+                role,
+                status,
+                description,
+                ..
+            } => {
+                output_blocks::print_kv(
+                    &format!("swarm {role}"),
+                    &format!("{status}: {description}"),
+                );
+            }
+            AgentEvent::SwarmFinished {
+                success, summary, ..
+            } => {
+                output_blocks::print_header(
+                    "swarm",
+                    if success {
+                        output_blocks::BlockStatus::Done
+                    } else {
+                        output_blocks::BlockStatus::Failed
+                    },
+                );
+                output_blocks::print_kv("summary", &summary);
+            }
             AgentEvent::FileDiff { path, stats, .. } => {
                 output_blocks::print_header("diff", output_blocks::BlockStatus::Done);
                 output_blocks::print_kv("path", path);
                 output_blocks::print_kv("stats", stats);
             }
             AgentEvent::OptionsNeeded {
+                kind: _,
                 title,
                 options,
                 respond,

@@ -16,7 +16,7 @@ pub const BG_CARD_ALT: Color = BG_CARD_HOVER; // deprecated alias //  card hover
 pub const BG_INPUT: Color = Color::Rgb(24, 24, 32); //  input area
 
 // Droid-like light canvas used by the welcome surface and composer.
-pub const DROID_CANVAS_BG: Color = Color::Rgb(232, 221, 188);
+pub const DROID_CANVAS_BG: Color = Color::Rgb(235, 226, 196);
 pub const DROID_INK: Color = Color::Rgb(17, 17, 14);
 pub const DROID_MUTED: Color = Color::Rgb(78, 78, 72);
 pub const DROID_ACCENT: Color = Color::Rgb(224, 82, 0);
@@ -25,6 +25,7 @@ pub const DROID_ACCENT: Color = Color::Rgb(224, 82, 0);
 pub enum ThemeMode {
     Light,
     Dark,
+    HighContrast,
 }
 
 impl ThemeMode {
@@ -32,6 +33,7 @@ impl ThemeMode {
     pub fn from_config(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "dark" | "terminal" => Self::Dark,
+            "high-contrast" | "high_contrast" | "contrast" | "hc" => Self::HighContrast,
             _ => Self::Light,
         }
     }
@@ -41,6 +43,7 @@ impl ThemeMode {
         match self {
             Self::Light => "light",
             Self::Dark => "dark",
+            Self::HighContrast => "high-contrast",
         }
     }
 
@@ -48,7 +51,8 @@ impl ThemeMode {
     pub fn toggled(self) -> Self {
         match self {
             Self::Light => Self::Dark,
-            Self::Dark => Self::Light,
+            Self::Dark => Self::HighContrast,
+            Self::HighContrast => Self::Light,
         }
     }
 }
@@ -82,8 +86,8 @@ pub struct ThemePalette {
 
 pub const LIGHT_PALETTE: ThemePalette = ThemePalette {
     canvas: DROID_CANVAS_BG,
-    surface: Color::Rgb(238, 228, 197),
-    surface_alt: Color::Rgb(224, 214, 184),
+    surface: DROID_CANVAS_BG,
+    surface_alt: Color::Rgb(228, 219, 190),
     input: DROID_CANVAS_BG,
     text: DROID_INK,
     secondary: Color::Rgb(54, 54, 48),
@@ -116,12 +120,31 @@ pub const DARK_PALETTE: ThemePalette = ThemePalette {
     inverse_text: BG_DEEP,
 };
 
+pub const HIGH_CONTRAST_PALETTE: ThemePalette = ThemePalette {
+    canvas: Color::Rgb(0, 0, 0),
+    surface: Color::Rgb(18, 18, 18),
+    surface_alt: Color::Rgb(34, 34, 34),
+    input: Color::Rgb(0, 0, 0),
+    text: Color::Rgb(255, 255, 255),
+    secondary: Color::Rgb(226, 226, 226),
+    dim: Color::Rgb(178, 178, 178),
+    muted: Color::Rgb(138, 138, 138),
+    divider: Color::Rgb(220, 220, 220),
+    accent: Color::Rgb(255, 209, 102),
+    success: Color::Rgb(82, 255, 145),
+    warning: Color::Rgb(255, 215, 0),
+    danger: Color::Rgb(255, 93, 93),
+    info: Color::Rgb(111, 200, 255),
+    inverse_text: Color::Rgb(0, 0, 0),
+};
+
 pub fn set_active_theme(mode: ThemeMode) {
     #[cfg(not(test))]
     ACTIVE_THEME.store(
         match mode {
             ThemeMode::Light => 0,
             ThemeMode::Dark => 1,
+            ThemeMode::HighContrast => 2,
         },
         Ordering::Relaxed,
     );
@@ -131,6 +154,7 @@ pub fn set_active_theme(mode: ThemeMode) {
         theme.set(match mode {
             ThemeMode::Light => 0,
             ThemeMode::Dark => 1,
+            ThemeMode::HighContrast => 2,
         });
     });
 }
@@ -140,6 +164,7 @@ pub fn active_theme() -> ThemeMode {
     #[cfg(not(test))]
     match ACTIVE_THEME.load(Ordering::Relaxed) {
         1 => ThemeMode::Dark,
+        2 => ThemeMode::HighContrast,
         _ => ThemeMode::Light,
     }
 
@@ -147,6 +172,7 @@ pub fn active_theme() -> ThemeMode {
     {
         ACTIVE_THEME.with(|theme| match theme.get() {
             1 => ThemeMode::Dark,
+            2 => ThemeMode::HighContrast,
             _ => ThemeMode::Light,
         })
     }
@@ -157,6 +183,7 @@ pub fn palette() -> ThemePalette {
     match active_theme() {
         ThemeMode::Light => LIGHT_PALETTE,
         ThemeMode::Dark => DARK_PALETTE,
+        ThemeMode::HighContrast => HIGH_CONTRAST_PALETTE,
     }
 }
 
@@ -347,6 +374,11 @@ mod tests {
     fn parses_theme_aliases() {
         assert_eq!(ThemeMode::from_config("dark"), ThemeMode::Dark);
         assert_eq!(ThemeMode::from_config("terminal"), ThemeMode::Dark);
+        assert_eq!(
+            ThemeMode::from_config("high-contrast"),
+            ThemeMode::HighContrast
+        );
+        assert_eq!(ThemeMode::from_config("hc"), ThemeMode::HighContrast);
         assert_eq!(ThemeMode::from_config("light"), ThemeMode::Light);
         assert_eq!(ThemeMode::from_config("unknown"), ThemeMode::Light);
     }
@@ -356,7 +388,9 @@ mod tests {
         assert_ne!(LIGHT_PALETTE.canvas, DARK_PALETTE.canvas);
         assert_ne!(LIGHT_PALETTE.text, LIGHT_PALETTE.canvas);
         assert_ne!(DARK_PALETTE.text, DARK_PALETTE.canvas);
+        assert_ne!(HIGH_CONTRAST_PALETTE.text, HIGH_CONTRAST_PALETTE.canvas);
         assert_ne!(LIGHT_PALETTE.accent, LIGHT_PALETTE.canvas);
         assert_ne!(DARK_PALETTE.accent, DARK_PALETTE.canvas);
+        assert_ne!(HIGH_CONTRAST_PALETTE.accent, HIGH_CONTRAST_PALETTE.canvas);
     }
 }

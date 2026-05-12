@@ -1,6 +1,25 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    io::{self, Write},
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
-use crossterm::event::{self, Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::{
+    cursor::{Hide, MoveTo, Show},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+    },
+    execute,
+    style::{
+        Color as CrosstermColor, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
+    },
+    terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
@@ -13,8 +32,10 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 const CTRL_C_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+const PAGE_SCROLL_LINES: usize = 20;
+const MOUSE_SCROLL_LINES: usize = 5;
 
-use crate::agent::orchestrator::{AgentEvent, Orchestrator};
+use crate::agent::orchestrator::{AgentEvent, DecisionKind, Orchestrator};
 use crate::deepseek::{
     CacheUsage, DeepSeekModel, MessageContent, MessageVisibility, ProtocolMessage, ReasoningState,
     Role, Session, SessionId, SessionMetadata, ThinkingMode, ToolCall, ToolCallFunction,
@@ -50,6 +71,7 @@ pub struct TuiApp {
     pub activity_log: Vec<String>,
     pub current_task_title: String,
     pub pending_user_message: Option<String>,
+    pub queued_input: Option<String>,
     pub stream_buffer: String,
     pub is_streaming: bool,
     pub stream_start: Option<std::time::Instant>,
@@ -63,9 +85,9 @@ pub struct TuiApp {
     pub plan_summary: Option<String>,
     pub plan_warnings: Vec<String>,
     pub subagents: Vec<subagent_cards::SubagentCard>,
+    pub active_swarm: Option<SwarmViewState>,
     pub file_diffs: Vec<diff_viewer::FileDiffItem>,
-    pub plan_confirm: Option<(String, tokio::sync::oneshot::Sender<bool>)>,
-    pub options_needed: Option<(String, Vec<String>, tokio::sync::oneshot::Sender<usize>)>,
+    pub options_needed: Option<DecisionPrompt>,
     pub pending_options: Option<(String, Vec<String>)>,
     pub selected_option_index: usize,
     pub selected_slash_index: usize,
@@ -85,10 +107,33 @@ pub struct TuiApp {
     pub file_tree_focused: bool,
     pub mcp_status: String,
     pub theme_mode: theme::ThemeMode,
+    pub renderer_mode: RendererMode,
     pub settings_open: bool,
     pub settings_tab: settings_panel::SettingsTab,
     pub settings_selected: usize,
     ctrl_c_exit_deadline: Option<std::time::Instant>,
+}
+
+pub struct DecisionPrompt {
+    pub kind: DecisionKind,
+    pub title: String,
+    pub options: Vec<String>,
+    pub respond: tokio::sync::oneshot::Sender<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SwarmViewState {
+    pub run_id: String,
+    pub summary: String,
+    pub total: usize,
+    pub running: usize,
+    pub done: usize,
+    pub failed: usize,
+    pub cancelled: usize,
+    pub status: String,
+    pub cancel_requested: bool,
+    pub detail_expanded: bool,
+    task_statuses: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +142,35 @@ pub enum InteractionMode {
     Plan,
     AutoReview,
     FullAccess,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RendererMode {
+    Classic,
+    Fullscreen,
+}
+
+impl RendererMode {
+    #[must_use]
+    pub fn from_config(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "fullscreen" | "full-screen" | "alternate" | "alt" => Self::Fullscreen,
+            _ => Self::Classic,
+        }
+    }
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Classic => "classic",
+            Self::Fullscreen => "fullscreen",
+        }
+    }
+
+    #[must_use]
+    fn uses_alternate_screen(self) -> bool {
+        self == Self::Fullscreen
+    }
 }
 
 impl InteractionMode {
@@ -167,6 +241,7 @@ impl TuiApp {
     ) -> Self {
         let config = storage::Config::load(Some(&project_root)).unwrap_or_default();
         let theme_mode = theme::ThemeMode::from_config(&config.ui.theme);
+        let renderer_mode = RendererMode::from_config(&config.ui.renderer);
         theme::set_active_theme(theme_mode);
         let welcome = welcome::WelcomeDashboardData::load(
             &project_root,
@@ -207,6 +282,7 @@ impl TuiApp {
             activity_log: Vec::new(),
             current_task_title: String::new(),
             pending_user_message: None,
+            queued_input: None,
             stream_buffer: String::new(),
             is_streaming: false,
             stream_start: None,
@@ -220,8 +296,8 @@ impl TuiApp {
             plan_summary: None,
             plan_warnings: Vec::new(),
             subagents: Vec::new(),
+            active_swarm: None,
             file_diffs: Vec::new(),
-            plan_confirm: None,
             options_needed: None,
             pending_options: None,
             selected_option_index: 0,
@@ -240,6 +316,7 @@ impl TuiApp {
             file_tree_focused: false,
             mcp_status: String::new(),
             theme_mode,
+            renderer_mode,
             settings_open: false,
             settings_tab: settings_panel::SettingsTab::SessionDefaults,
             settings_selected: 0,
@@ -270,6 +347,17 @@ impl TuiApp {
         }
     }
 
+    fn plan_execution_has_started(&self) -> bool {
+        self.plan_steps.iter().any(|step| {
+            matches!(
+                step.status,
+                plan_tracker::PlanStepStatus::Running
+                    | plan_tracker::PlanStepStatus::Done
+                    | plan_tracker::PlanStepStatus::Failed
+            )
+        })
+    }
+
     pub fn set_interaction_mode(&mut self, mode: InteractionMode) {
         self.interaction_mode = mode;
         self.session_auto_approve = mode == InteractionMode::FullAccess;
@@ -286,6 +374,15 @@ impl TuiApp {
         theme::set_active_theme(mode);
         self.status_message = format!("Theme set to {}", mode.label());
         self.push_activity(format!("theme: {}", mode.label()));
+    }
+
+    pub fn set_renderer_mode(&mut self, mode: RendererMode) {
+        self.renderer_mode = mode;
+        self.status_message = format!(
+            "TUI renderer set to {}; restart ds to apply terminal mode",
+            mode.label()
+        );
+        self.push_activity(format!("renderer: {}", mode.label()));
     }
 
     pub fn open_settings_panel(&mut self) {
@@ -329,17 +426,33 @@ impl TuiApp {
             return;
         }
 
-        // Orchestrator OptionsNeeded selection mode: arrow keys + Enter, with digit/letter shortcuts.
-        if let Some((title, options, respond)) = self.options_needed.take() {
+        // Decision selection mode: arrow keys + Enter, with digit/letter shortcuts.
+        if let Some(decision) = self.options_needed.take() {
+            let DecisionPrompt {
+                kind,
+                title,
+                options,
+                respond,
+            } = decision;
             match key.code {
                 KeyCode::Up => {
                     self.move_option_selection_up(options.len());
-                    self.options_needed = Some((title, options, respond));
+                    self.options_needed = Some(DecisionPrompt {
+                        kind,
+                        title,
+                        options,
+                        respond,
+                    });
                     return;
                 }
                 KeyCode::Down | KeyCode::Tab => {
                     self.move_option_selection_down(options.len());
-                    self.options_needed = Some((title, options, respond));
+                    self.options_needed = Some(DecisionPrompt {
+                        kind,
+                        title,
+                        options,
+                        respond,
+                    });
                     return;
                 }
                 KeyCode::Enter => {
@@ -364,23 +477,12 @@ impl TuiApp {
                 }
                 _ => {}
             }
-            self.options_needed = Some((title, options, respond));
-            return;
-        }
-
-        // Plan confirmation mode: only accept y/n
-        if let Some((summary, respond)) = self.plan_confirm.take() {
-            match key.code {
-                KeyCode::Char('y') => {
-                    let _ = respond.send(true);
-                }
-                KeyCode::Char('n') | KeyCode::Esc => {
-                    let _ = respond.send(false);
-                }
-                _ => {
-                    self.plan_confirm = Some((summary, respond));
-                }
-            }
+            self.options_needed = Some(DecisionPrompt {
+                kind,
+                title,
+                options,
+                respond,
+            });
             return;
         }
 
@@ -441,25 +543,15 @@ impl TuiApp {
                     }
                     return;
                 }
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    // Shift+Enter: insert newline at cursor position
-                    let byte_idx = self
-                        .input_text
-                        .char_indices()
-                        .nth(self.cursor_pos)
-                        .map_or(self.input_text.len(), |(i, _)| i);
-                    self.input_text.insert(byte_idx, '\n');
-                    self.cursor_pos += 1;
+                if key.modifiers.contains(KeyModifiers::SHIFT)
+                    || key.modifiers.contains(KeyModifiers::ALT)
+                {
+                    self.insert_text_at_cursor("\n");
                 } else if key.modifiers.contains(KeyModifiers::CONTROL) {
                     self.status_message = "Ctrl+Enter is not assigned; press Enter to send".into();
                 } else {
                     let input = self.input_text.trim().to_string();
                     if !input.is_empty() {
-                        if self.is_streaming && !input.starts_with('/') {
-                            self.status_message =
-                                "A turn is already running; press Esc to interrupt".into();
-                            return;
-                        }
                         // Save to input history
                         if self.input_history.is_empty()
                             || self.input_history.last().unwrap() != &input
@@ -481,7 +573,15 @@ impl TuiApp {
                             // Not a valid option selection — treat as normal message
                         }
 
-                        let _ = tx.send(TuiAction::Submit(input));
+                        if self.is_streaming && !input.starts_with('/') {
+                            self.queued_input = Some(input);
+                            self.clear_input_editor();
+                            self.status_message =
+                                "已排队；当前回答结束后自动发送。Ctrl+S 可重新注入当前输入。"
+                                    .into();
+                        } else {
+                            let _ = tx.send(TuiAction::Submit(input));
+                        }
                     }
                 }
             }
@@ -507,6 +607,18 @@ impl TuiApp {
             }
             KeyCode::Right if self.cursor_pos < self.input_text.chars().count() => {
                 self.cursor_pos += 1;
+            }
+            KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.scroll_newer(usize::MAX);
+            }
+            KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.scroll_older(PAGE_SCROLL_LINES);
+            }
+            KeyCode::Home if self.input_text.is_empty() && !self.diff_focused => {
+                self.scroll_older(PAGE_SCROLL_LINES);
+            }
+            KeyCode::End if self.input_text.is_empty() && !self.diff_focused => {
+                self.scroll_newer(usize::MAX);
             }
             KeyCode::Home => {
                 let (line, _) = line_and_col(&self.input_text, self.cursor_pos);
@@ -563,10 +675,10 @@ impl TuiApp {
                 }
             }
             KeyCode::PageDown => {
-                self.scroll_newer(10);
+                self.scroll_newer(PAGE_SCROLL_LINES);
             }
             KeyCode::PageUp => {
-                self.scroll_older(10);
+                self.scroll_older(PAGE_SCROLL_LINES);
             }
             KeyCode::Tab => {
                 if let Some((_, options)) = &self.pending_options {
@@ -598,6 +710,21 @@ impl TuiApp {
                 self.cycle_interaction_mode();
             }
             KeyCode::Char(c) => match c {
+                'j' if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.insert_text_at_cursor("\n");
+                }
+                's' if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let input = self.input_text.trim().to_string();
+                    if input.is_empty() {
+                        self.status_message = "No input to inject".into();
+                    } else if self.is_streaming {
+                        self.queued_input = Some(input);
+                        self.clear_input_editor();
+                        self.status_message = "已注入队列；当前任务结束后发送".into();
+                    } else {
+                        let _ = tx.send(TuiAction::Submit(input));
+                    }
+                }
                 'l' if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.messages.clear();
                     self.stream_buffer.clear();
@@ -702,13 +829,7 @@ impl TuiApp {
                     self.scroll_older(10);
                 }
                 _ => {
-                    let byte_idx = self
-                        .input_text
-                        .char_indices()
-                        .nth(self.cursor_pos)
-                        .map_or(self.input_text.len(), |(i, _)| i);
-                    self.input_text.insert(byte_idx, c);
-                    self.cursor_pos += 1;
+                    self.insert_text_at_cursor(&c.to_string());
                 }
             },
             _ => {}
@@ -1188,13 +1309,7 @@ impl TuiApp {
                 self.cursor_pos = self.input_text.chars().count();
             }
             KeyCode::Char(c) => {
-                let byte_idx = self
-                    .input_text
-                    .char_indices()
-                    .nth(self.cursor_pos)
-                    .map_or(self.input_text.len(), |(i, _)| i);
-                self.input_text.insert(byte_idx, c);
-                self.cursor_pos += 1;
+                self.insert_text_at_cursor(&c.to_string());
             }
             _ => {}
         }
@@ -1233,6 +1348,30 @@ impl TuiApp {
     fn clear_input_editor(&mut self) {
         self.input_text.clear();
         self.cursor_pos = 0;
+    }
+
+    fn insert_text_at_cursor(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let byte_idx = char_to_byte_idx(&self.input_text, self.cursor_pos);
+        self.input_text.insert_str(byte_idx, &normalized);
+        self.cursor_pos += normalized.chars().count();
+    }
+
+    fn handle_paste(&mut self, text: &str) {
+        let text = text.trim_end_matches(['\r', '\n']);
+        if text.is_empty() {
+            return;
+        }
+        self.insert_text_at_cursor(text);
+        let line_count = text.lines().count().max(1);
+        self.status_message = if line_count > 6 || text.chars().count() > 600 {
+            format!("已粘贴 {line_count} 行到输入框；按 Enter 发送，Ctrl+J 换行")
+        } else {
+            "Pasted into input; press Enter to send".into()
+        };
     }
 
     fn show_local_output(&mut self, output: impl Into<String>) {
@@ -1349,6 +1488,10 @@ impl TuiApp {
 
     fn add_output_token_estimate(&mut self, text: &str) {
         let delta = estimate_tokens(text);
+        self.add_output_tokens(delta);
+    }
+
+    fn add_output_tokens(&mut self, delta: u64) {
         if delta == 0 {
             return;
         }
@@ -1365,11 +1508,8 @@ impl TuiApp {
         if let Some((_, respond)) = self.approval.take() {
             let _ = respond.send(false);
         }
-        if let Some((_, respond)) = self.plan_confirm.take() {
-            let _ = respond.send(false);
-        }
-        if let Some((_, _, respond)) = self.options_needed.take() {
-            let _ = respond.send(usize::MAX);
+        if let Some(decision) = self.options_needed.take() {
+            let _ = decision.respond.send(usize::MAX);
         }
         self.pending_options = None;
         self.selected_option_index = 0;
@@ -1395,6 +1535,18 @@ impl TuiApp {
         self.status_message = "Interrupted — all running work stopped".into();
     }
 
+    pub fn request_swarm_cancel(&mut self) {
+        if let Some(swarm) = self.active_swarm.as_mut() {
+            swarm.cancel_requested = true;
+            swarm.status = "cancel_requested".to_string();
+            let run_id = swarm.run_id.clone();
+            self.status_message = format!("Swarm cancel requested: {run_id}");
+            self.push_activity(format!("swarm {run_id} cancel requested"));
+        } else {
+            self.status_message = "No active swarm to cancel".into();
+        }
+    }
+
     fn session_snapshot(&self, root: &Path) -> Session {
         Session {
             id: SessionId::new_v4(),
@@ -1417,6 +1569,10 @@ impl TuiApp {
         match event {
             AgentEvent::ContentDelta(text) => {
                 self.add_output_token_estimate(&text);
+                if self.plan_execution_has_started() && !text.trim().is_empty() {
+                    self.push_activity(format!("plan output: {}", first_line(&text)));
+                    return;
+                }
                 self.stream_buffer.push_str(&text);
             }
             AgentEvent::ReasoningDelta(text) => {
@@ -1458,6 +1614,7 @@ impl TuiApp {
                     self.current_turn_tokens = turn_tokens;
                     self.current_turn_usage_finalized = true;
                     self.total_tokens = self.total_tokens.saturating_add(turn_tokens);
+                    self.total_cost += u.estimate_cost_cny(&self.model);
                     self.cache = cache;
                     self.push_activity(format!(
                         "usage: total={} prompt={} completion={} ¥{:.3}",
@@ -1531,6 +1688,7 @@ impl TuiApp {
                 description,
                 status,
             } => {
+                let had_started_plan_execution = self.plan_execution_has_started();
                 let should_reset_plan = index == 0
                     && (self.plan_steps.is_empty()
                         || (self.plan_total_steps > 0
@@ -1564,6 +1722,9 @@ impl TuiApp {
                 self.plan_steps[index].description = summarize_plan_step(&description);
                 self.plan_steps[index].transition_to(mapped);
                 self.plan_total_steps = total;
+                if !had_started_plan_execution && self.plan_execution_has_started() {
+                    self.stream_buffer.clear();
+                }
                 if mapped == plan_tracker::PlanStepStatus::Running {
                     self.plan_current_step = index;
                 } else if (mapped == plan_tracker::PlanStepStatus::Done
@@ -1573,7 +1734,11 @@ impl TuiApp {
                     self.plan_current_step = index.saturating_add(1);
                 }
                 if self.plan_summary.is_none() {
-                    self.plan_summary = Some("Plan".into());
+                    self.plan_summary = self
+                        .active_swarm
+                        .as_ref()
+                        .map(|swarm| swarm.summary.clone())
+                        .or_else(|| Some("Plan".into()));
                 }
                 self.auto_complete_parent_plan_step();
             }
@@ -1597,18 +1762,87 @@ impl TuiApp {
                     .push(diff_viewer::FileDiffItem::new(path, diff, stats));
             }
             AgentEvent::OptionsNeeded {
+                kind,
                 title,
                 options,
                 respond,
             } => {
-                self.options_needed = Some((title, options, respond));
+                self.options_needed = Some(DecisionPrompt {
+                    kind,
+                    title,
+                    options,
+                    respond,
+                });
                 self.selected_option_index = 0;
                 self.status_message = format!(
                     "Select with ↑↓ then Enter, or press 1–{}",
                     self.options_needed
                         .as_ref()
-                        .map_or(0, |(_, opts, _)| opts.len())
+                        .map_or(0, |decision| decision.options.len())
                 );
+            }
+            AgentEvent::SwarmStarted {
+                run_id,
+                summary,
+                total,
+            } => {
+                self.active_swarm = Some(SwarmViewState {
+                    run_id: run_id.clone(),
+                    summary: summary.clone(),
+                    total,
+                    running: 0,
+                    done: 0,
+                    failed: 0,
+                    cancelled: 0,
+                    status: "running".to_string(),
+                    cancel_requested: false,
+                    detail_expanded: false,
+                    task_statuses: HashMap::new(),
+                });
+                if self.plan_summary.is_none() {
+                    self.plan_summary = Some(summary.clone());
+                }
+                self.push_activity(format!("swarm {run_id} started: {summary}"));
+                self.status_message = format!("Swarm running: {total} agents");
+            }
+            AgentEvent::SwarmTaskUpdated {
+                run_id,
+                task_id,
+                role,
+                status,
+                description,
+            } => {
+                if let Some(swarm) = self.active_swarm.as_mut() {
+                    swarm.task_statuses.insert(task_id.clone(), status.clone());
+                    recalculate_swarm_counts(swarm);
+                    swarm.status = status.clone();
+                }
+                self.push_activity(format!(
+                    "swarm {run_id} task {task_id} [{role}] {status}: {description}"
+                ));
+                self.status_message = format!("Swarm {role}: {status}");
+            }
+            AgentEvent::SwarmFinished {
+                run_id,
+                success,
+                summary,
+            } => {
+                let status = if success { "ok" } else { "error" };
+                if success {
+                    self.active_swarm = None;
+                    self.subagents.clear();
+                    self.plan_steps.clear();
+                    self.plan_summary = None;
+                    self.plan_warnings.clear();
+                    self.plan_total_steps = 0;
+                    self.plan_current_step = 0;
+                } else if let Some(swarm) = self.active_swarm.as_mut() {
+                    swarm.status = status.to_string();
+                    swarm.running = 0;
+                    swarm.detail_expanded = true;
+                }
+                self.push_activity(format!("swarm {run_id} finished [{status}]"));
+                self.status_message = truncate_for_activity(&summary, 120);
             }
             AgentEvent::SubagentStarted {
                 agent_id,
@@ -1627,6 +1861,7 @@ impl TuiApp {
                 self.subagents.push(card);
             }
             AgentEvent::SubagentDelta { agent_id, content } => {
+                self.add_output_token_estimate(&content);
                 if let Some(card) = self.subagents.iter_mut().find(|c| c.agent_id == agent_id) {
                     card.apply_delta(content.clone());
                 }
@@ -1667,9 +1902,11 @@ impl TuiApp {
                     self.approval = Some((
                         ApprovalDisplay {
                             title: format!("{tool_name}  [agent {short_id}]"),
-                            description: arguments,
+                            description: format!("subagent tool request: {tool_name}"),
                             risk_level,
-                            details: format!("Subagent {agent_id}"),
+                            details: format!(
+                                "Source: subagent {agent_id}\nTool: {tool_name}\nArguments: {arguments}"
+                            ),
                         },
                         respond,
                     ));
@@ -1708,6 +1945,14 @@ impl TuiApp {
         self.scroll_offset = self.scroll_offset.saturating_sub(amount);
     }
 
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => self.scroll_older(MOUSE_SCROLL_LINES),
+            MouseEventKind::ScrollDown => self.scroll_newer(MOUSE_SCROLL_LINES),
+            _ => {}
+        }
+    }
+
     fn ctrl_c_exit_prompt_active_at(&self, now: std::time::Instant) -> bool {
         self.ctrl_c_exit_deadline
             .is_some_and(|deadline| now <= deadline)
@@ -1738,7 +1983,7 @@ impl TuiApp {
         let options_count = self
             .options_needed
             .as_ref()
-            .map(|(_, opts, _)| opts.len())
+            .map(|decision| decision.options.len())
             .or_else(|| self.pending_options.as_ref().map(|(_, opts)| opts.len()))
             .or_else(|| (!slash_suggestions.is_empty()).then_some(slash_suggestions.len()))
             .unwrap_or(0);
@@ -1765,22 +2010,35 @@ impl TuiApp {
         render_canvas(f, divider_area);
         render_canvas(f, input_area);
         render_canvas(f, footer_area);
+        let showing_welcome = self.is_showing_welcome();
+        let full_body_area = Rect::new(
+            content_area.x,
+            status_area.y,
+            content_area.width,
+            content_area
+                .y
+                .saturating_add(content_area.height)
+                .saturating_sub(status_area.y),
+        );
 
         // Render file tree sidebar
         if let Some(ta) = tree_area {
             file_tree::render_file_tree(f, ta, &self.file_tree);
         }
 
-        // Status bar (minimal)
-        status_bar::render_status_bar(
-            f,
-            status_area,
-            status_bar::StatusBarProps {
-                mode: self.current_mode(),
-                thinking: &self.thinking_mode,
-                activity: None,
-            },
-        );
+        // Status bar (minimal). Swarm progress is rendered in the transcript as
+        // agent rows, so the top activity line stays blank to avoid duplicate UI.
+        if !showing_welcome {
+            status_bar::render_status_bar(
+                f,
+                status_area,
+                status_bar::StatusBarProps {
+                    mode: self.current_mode(),
+                    thinking: &self.thinking_mode,
+                    activity: None,
+                },
+            );
+        }
 
         // Welcome page: full body (only when empty)
         if self.settings_open {
@@ -1795,13 +2053,27 @@ impl TuiApp {
                     theme_label: self.theme_mode.label(),
                 },
             );
-        } else if self.is_showing_welcome() {
-            welcome::render_welcome(f, content_area, &self.welcome);
+        } else if showing_welcome {
+            welcome::render_welcome(f, full_body_area, &self.welcome);
         } else {
             // Quiet terminal style: everything scrolls together in one stream.
             let elapsed = self
                 .stream_start
                 .map_or(0, |s| s.elapsed().as_millis() as u64);
+            let empty_subagents: &[subagent_cards::SubagentCard] = &[];
+            let visible_subagents = if self.active_swarm.is_some() {
+                if self
+                    .active_swarm
+                    .as_ref()
+                    .is_some_and(|swarm| swarm.detail_expanded)
+                {
+                    &self.subagents
+                } else {
+                    empty_subagents
+                }
+            } else {
+                &self.subagents
+            };
             transcript_view::render_transcript(
                 f,
                 content_area,
@@ -1814,7 +2086,7 @@ impl TuiApp {
                     plan_current_step: self.plan_current_step,
                     plan_total_steps: self.plan_total_steps,
                     plan_warnings: &self.plan_warnings,
-                    subagents: &self.subagents,
+                    subagents: visible_subagents,
                     global_elapsed_ms: elapsed,
                     diffs: &self.file_diffs,
                     selected_diff: self.selected_diff,
@@ -1826,19 +2098,28 @@ impl TuiApp {
             );
         }
 
+        if self.scroll_offset > 0 {
+            render_jump_to_bottom_hint(f, content_area);
+        }
+
         // Options panel (between content and activity)
         if options_h > 0 {
-            let (title, options) = if let Some((t, opts, _)) = &self.options_needed {
-                (t.as_str(), opts.as_slice())
+            let (kind, title, options) = if let Some(decision) = &self.options_needed {
+                (
+                    decision.kind,
+                    decision.title.as_str(),
+                    decision.options.as_slice(),
+                )
             } else if let Some((t, opts)) = &self.pending_options {
-                (t.as_str(), opts.as_slice())
+                (DecisionKind::Clarification, t.as_str(), opts.as_slice())
             } else {
-                ("", &[][..])
+                (DecisionKind::Clarification, "", &[][..])
             };
             if !options.is_empty() {
                 plan_tracker::render_options_panel(
                     f,
                     options_area,
+                    kind,
                     title,
                     options,
                     self.selected_option_index,
@@ -1863,7 +2144,9 @@ impl TuiApp {
                 elapsed_ms: self
                     .stream_start
                     .map_or(0, |started| started.elapsed().as_millis() as u64),
-                tokens: self.current_turn_output_tokens,
+                input_tokens: self.activity_input_tokens(),
+                tokens: self.activity_output_tokens(),
+                agent_tokens: self.live_agent_tokens(),
                 thought_seconds: self.stream_start.map_or(0, |started| {
                     thought_seconds_from_reasoning(
                         &self.reasoning_buffer,
@@ -1900,6 +2183,14 @@ impl TuiApp {
                 opts_for_input,
             );
         }
+        let (cursor_x, cursor_y) = input::terminal_cursor_position(
+            input_area,
+            &self.input_text,
+            self.cursor_pos,
+            self.api_key_entry.is_some(),
+        );
+        f.set_cursor_position((cursor_x, cursor_y));
+
         if self.ctrl_c_exit_prompt_active_at(std::time::Instant::now()) {
             self.render_ctrl_c_exit_footer(f, footer_area);
         } else {
@@ -1934,14 +2225,53 @@ impl TuiApp {
             statusline::StatuslineProps {
                 mode: self.current_mode(),
                 status,
-                tokens: self.total_tokens,
-                input_tokens: self.current_turn_input_tokens,
-                output_tokens: self.current_turn_output_tokens,
+                tokens: self.visible_context_tokens(),
+                input_tokens: self.visible_input_tokens(),
+                output_tokens: self.activity_output_tokens(),
+                agent_tokens: self.live_agent_tokens(),
                 cost: self.total_cost,
                 cache: self.cache.as_ref(),
                 permissions,
             },
         );
+    }
+
+    fn activity_input_tokens(&self) -> u64 {
+        self.current_turn_input_tokens
+    }
+
+    fn visible_input_tokens(&self) -> u64 {
+        if self.is_streaming || self.current_turn_usage_finalized {
+            self.current_turn_input_tokens
+        } else {
+            0
+        }
+    }
+
+    fn activity_output_tokens(&self) -> u64 {
+        if self.current_turn_usage_finalized || !self.is_streaming {
+            return self.current_turn_output_tokens;
+        }
+        let elapsed_estimate = self
+            .stream_start
+            .map(|started| started.elapsed().as_millis() as u64 / 120)
+            .unwrap_or(0);
+        self.current_turn_output_tokens.max(elapsed_estimate)
+    }
+
+    fn live_agent_tokens(&self) -> u64 {
+        self.subagents
+            .iter()
+            .map(|card| card.token_usage)
+            .sum::<u64>()
+    }
+
+    fn visible_context_tokens(&self) -> u64 {
+        if self.is_streaming && !self.current_turn_usage_finalized {
+            self.total_tokens.saturating_add(self.current_turn_tokens)
+        } else {
+            self.total_tokens
+        }
     }
 
     fn render_ctrl_c_exit_footer(&self, f: &mut Frame, area: ratatui::layout::Rect) {
@@ -2021,6 +2351,22 @@ impl TuiApp {
             normalized_plan_title(summary) == normalized_plan_title(&pending_step.description)
         });
         ((*pending_index == 0) || matches_summary).then_some(*pending_index)
+    }
+}
+
+fn recalculate_swarm_counts(swarm: &mut SwarmViewState) {
+    swarm.running = 0;
+    swarm.done = 0;
+    swarm.failed = 0;
+    swarm.cancelled = 0;
+    for status in swarm.task_statuses.values() {
+        match status.as_str() {
+            "running" => swarm.running += 1,
+            "done" => swarm.done += 1,
+            "failed" => swarm.failed += 1,
+            "cancelled" => swarm.cancelled += 1,
+            _ => {}
+        }
     }
 }
 
@@ -2190,29 +2536,97 @@ fn buffer_to_text(backend: &ratatui::backend::TestBackend) -> String {
 struct RunningTurn {
     events: mpsc::UnboundedReceiver<AgentEvent>,
     handle: JoinHandle<(Orchestrator, Option<String>)>,
+    cancel_token: Arc<AtomicBool>,
 }
 
 struct TerminalSession {
     active: bool,
+    renderer: RendererMode,
 }
 
 impl TerminalSession {
-    fn enter() -> Result<Self, anyhow::Error> {
+    fn enter(renderer: RendererMode) -> Result<Self, anyhow::Error> {
         crossterm::terminal::enable_raw_mode()?;
-        Ok(Self { active: true })
+        let mut stdout = io::stdout();
+        if renderer.uses_alternate_screen() {
+            execute!(
+                stdout,
+                EnterAlternateScreen,
+                Hide,
+                MoveTo(0, 0),
+                Clear(ClearType::Purge),
+                Clear(ClearType::All),
+                MoveTo(0, 0),
+                EnableMouseCapture,
+                EnableBracketedPaste
+            )?;
+        } else {
+            execute!(
+                stdout,
+                Hide,
+                MoveTo(0, 0),
+                Clear(ClearType::All),
+                MoveTo(0, 0),
+                EnableBracketedPaste
+            )?;
+        }
+        stdout.flush()?;
+        Ok(Self {
+            active: true,
+            renderer,
+        })
     }
 }
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         if self.active {
+            let mut stdout = io::stdout();
             let _ = crossterm::terminal::disable_raw_mode();
+            let _ = execute!(
+                stdout,
+                DisableBracketedPaste,
+                DisableMouseCapture,
+                Show,
+                ResetColor,
+                SetForegroundColor(CrosstermColor::Reset),
+                SetBackgroundColor(CrosstermColor::Reset),
+                SetAttribute(crossterm::style::Attribute::Reset),
+                ResetColor,
+                SetForegroundColor(CrosstermColor::Reset),
+                SetBackgroundColor(CrosstermColor::Reset),
+                SetAttribute(crossterm::style::Attribute::Reset)
+            );
+            if self.renderer.uses_alternate_screen() {
+                let _ = execute!(stdout, LeaveAlternateScreen);
+            }
+            let _ = write!(stdout, "\x1b[0m\x1b[39m\x1b[49m");
+            let _ = stdout.flush();
         }
     }
 }
 
 fn first_line(value: &str) -> &str {
     value.lines().next().unwrap_or("")
+}
+
+fn render_jump_to_bottom_hint(f: &mut Frame, area: Rect) {
+    if area.width < 28 || area.height == 0 {
+        return;
+    }
+    let label = " Jump to bottom (Ctrl+End) ↓ ";
+    let width = label.chars().count() as u16;
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(1);
+    let p = theme::palette();
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            label,
+            Style::default().fg(p.inverse_text).bg(p.text),
+        )))
+        .style(Style::default().bg(p.canvas)),
+        Rect::new(x, y, width.min(area.width), 1),
+    );
 }
 
 fn estimate_tokens(value: &str) -> u64 {
@@ -2249,6 +2663,11 @@ fn shell_command_from_input(input: &str) -> Result<Option<String>, &'static str>
     } else {
         Ok(Some(command.to_string()))
     }
+}
+
+fn is_swarm_cancel_command(input: &str) -> bool {
+    let mut parts = input.split_whitespace();
+    matches!(parts.next(), Some("/swarm" | "/cluster")) && matches!(parts.next(), Some("cancel"))
 }
 
 fn shell_tool_arguments(command: &str) -> String {
@@ -2657,6 +3076,9 @@ fn summarize_plan_step(description: &str) -> String {
     if trimmed.is_empty() {
         return "task".to_string();
     }
+    if let Some(agent_step) = summarize_agent_plan_step(trimmed) {
+        return agent_step;
+    }
     if trimmed.starts_with("Read `")
         || trimmed.starts_with("Search `")
         || trimmed.starts_with("Edit `")
@@ -2674,6 +3096,30 @@ fn summarize_plan_step(description: &str) -> String {
             .collect::<Vec<_>>()
             .join(" ");
         trim_title_punctuation(&title)
+    }
+}
+
+fn summarize_agent_plan_step(description: &str) -> Option<String> {
+    let rest = description.strip_prefix("agent ")?;
+    let (role, task) = rest
+        .split_once(" · ")
+        .or_else(|| rest.split_once(" - "))
+        .unwrap_or((rest, ""));
+    let role_label = match role.trim() {
+        "code-explorer" | "explorer" => "explorer",
+        "code-reviewer" | "reviewer" => "reviewer",
+        "general-purpose" | "planner" => "planner",
+        "test-runner" | "tester" => "tester",
+        "worker" => "worker",
+        "verifier" => "verifier",
+        other if !other.is_empty() => other,
+        _ => "agent",
+    };
+    let task = task.trim();
+    if task.is_empty() {
+        Some(format!("agent {role_label}"))
+    } else {
+        Some(truncate_chars(&format!("agent {role_label} · {task}"), 64))
     }
 }
 
@@ -2816,6 +3262,8 @@ pub async fn run_tui(
     let root = project_root
         .unwrap_or_else(|| storage::find_project_root().unwrap_or_else(|| PathBuf::from(".")));
     let api_key = storage::get_effective_api_key(Some(&root));
+    let config = storage::Config::load(Some(&root)).unwrap_or_default();
+    let renderer_mode = RendererMode::from_config(&config.ui.renderer);
     let mut active_client =
         crate::deepseek::client::DeepSeekClient::new(api_key.unwrap_or_default());
 
@@ -2873,9 +3321,12 @@ pub async fn run_tui(
     ));
 
     // Set up terminal
-    let _terminal_session = TerminalSession::enter()?;
+    let _terminal_session = TerminalSession::enter(renderer_mode)?;
     let backend = CrosstermBackend::new(std::io::stdout());
     let mut terminal = Terminal::new(backend)?;
+    if renderer_mode.uses_alternate_screen() {
+        terminal.clear()?;
+    }
 
     let (action_tx, mut action_rx) = mpsc::unbounded_channel::<TuiAction>();
     let mut app = TuiApp::new(model, thinking_mode, session_id, root.clone());
@@ -2945,6 +3396,12 @@ pub async fn run_tui(
             }
         }
 
+        if running_turn.is_none() && !app.is_streaming {
+            if let Some(queued) = app.queued_input.take() {
+                let _ = action_tx.send(TuiAction::Submit(queued));
+            }
+        }
+
         if local_task
             .as_ref()
             .is_some_and(tokio::task::JoinHandle::is_finished)
@@ -2980,7 +3437,14 @@ pub async fn run_tui(
                     app.dismiss_ctrl_c_exit_prompt();
                     app.handle_key(key, &action_tx);
                 }
-                CEvent::Mouse(_) => {}
+                CEvent::Paste(text) => {
+                    app.dismiss_ctrl_c_exit_prompt();
+                    app.handle_paste(&text);
+                }
+                CEvent::Mouse(mouse) => {
+                    app.dismiss_ctrl_c_exit_prompt();
+                    app.handle_mouse(mouse);
+                }
                 _ => {}
             }
         }
@@ -3025,6 +3489,12 @@ pub async fn run_tui(
                     if let Some(result) = registry.execute(&input, &mut ctx) {
                         match result {
                             Ok(Some(msg)) => {
+                                if is_swarm_cancel_command(&input) {
+                                    if let Some(running) = running_turn.as_ref() {
+                                        running.cancel_token.store(true, Ordering::SeqCst);
+                                    }
+                                    app.request_swarm_cancel();
+                                }
                                 if running_turn.is_some() || app.is_streaming {
                                     let status = msg
                                         .lines()
@@ -3113,6 +3583,7 @@ pub async fn run_tui(
                         app.plan_summary = None;
                     }
                     app.subagents.clear();
+                    app.active_swarm = None;
                     app.file_diffs.clear();
 
                     let Some(mut turn_orchestrator) = orchestrator.take() else {
@@ -3124,6 +3595,8 @@ pub async fn run_tui(
                     turn_orchestrator.yolo_mode = yolo_mode;
 
                     let (ev_tx, ev_rx) = mpsc::unbounded_channel();
+                    let cancel_token = Arc::new(AtomicBool::new(false));
+                    turn_orchestrator.set_swarm_cancel_token(cancel_token.clone());
                     app.begin_running_turn(&input);
 
                     let images = std::mem::take(&mut app.pending_images);
@@ -3154,6 +3627,7 @@ pub async fn run_tui(
                     running_turn = Some(RunningTurn {
                         events: ev_rx,
                         handle,
+                        cancel_token,
                     });
                 }
                 TuiAction::LocalToolResult {
@@ -3208,6 +3682,7 @@ pub async fn run_tui(
         }
     };
 
+    let _ = terminal.show_cursor();
     result
 }
 
@@ -3236,6 +3711,17 @@ mod tests {
     }
 
     #[test]
+    fn renderer_mode_defaults_to_classic_and_parses_fullscreen() {
+        assert_eq!(RendererMode::from_config(""), RendererMode::Classic);
+        assert_eq!(RendererMode::from_config("classic"), RendererMode::Classic);
+        assert_eq!(
+            RendererMode::from_config("fullscreen"),
+            RendererMode::Fullscreen
+        );
+        assert_eq!(RendererMode::from_config("alt"), RendererMode::Fullscreen);
+    }
+
+    #[test]
     fn release_key_events_do_not_duplicate_typing() {
         let mut app = test_app();
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -3245,6 +3731,21 @@ mod tests {
 
         assert_eq!(app.input_text, "a");
         assert_eq!(app.cursor_pos, 1);
+    }
+
+    #[test]
+    fn enter_while_streaming_queues_user_input() {
+        let mut app = test_app();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.input_text = "下一步继续".to_string();
+        app.cursor_pos = app.input_text.chars().count();
+        app.is_streaming = true;
+
+        app.handle_key(key(KeyCode::Enter, KeyEventKind::Press), &tx);
+
+        assert_eq!(app.queued_input.as_deref(), Some("下一步继续"));
+        assert!(app.input_text.is_empty());
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
@@ -3296,6 +3797,31 @@ mod tests {
 
         assert_eq!(app.input_text, "新你世界!");
         assert_eq!(app.cursor_pos, app.input_text.chars().count());
+    }
+
+    #[test]
+    fn paste_inserts_text_without_submitting() {
+        let mut app = test_app();
+        let (_tx, mut rx) = mpsc::unbounded_channel::<TuiAction>();
+
+        app.handle_paste("开蜂群，审查 src/agent/swarm.rs\n");
+
+        assert_eq!(app.input_text, "开蜂群，审查 src/agent/swarm.rs");
+        assert_eq!(app.cursor_pos, app.input_text.chars().count());
+        assert!(rx.try_recv().is_err());
+        assert!(app.status_message.contains("press Enter"));
+    }
+
+    #[test]
+    fn paste_can_insert_multiline_text_at_cursor() {
+        let mut app = test_app();
+        app.input_text = "ab".into();
+        app.cursor_pos = 1;
+
+        app.handle_paste("一\r\n二");
+
+        assert_eq!(app.input_text, "a一\n二b");
+        assert_eq!(app.cursor_pos, 4);
     }
 
     #[test]
@@ -3386,6 +3912,18 @@ mod tests {
     }
 
     #[test]
+    fn plan_step_summary_preserves_swarm_agent_role_and_task() {
+        assert_eq!(
+            summarize_plan_step("agent explorer · 阅读并定位 src/agent/swarm.rs"),
+            "agent explorer · 阅读并定位 src/agent/swarm.rs"
+        );
+        assert_eq!(
+            summarize_plan_step("agent reviewer · 审查关键风险并汇总"),
+            "agent reviewer · 审查关键风险并汇总"
+        );
+    }
+
+    #[test]
     fn task_title_extracts_keywords_from_chinese_filler() {
         assert_eq!(
             summarize_task_title("我要进行测试 我新写了个 CLI"),
@@ -3417,6 +3955,42 @@ mod tests {
     }
 
     #[test]
+    fn running_turn_renders_transcript_instead_of_welcome() {
+        let mut app = test_app();
+        assert!(app.is_showing_welcome());
+
+        app.begin_running_turn("苹果怎么截图");
+        app.apply_agent_event(AgentEvent::ContentDelta(
+            "可以按 Shift + Command + 4 选择区域截图。".to_string(),
+        ));
+
+        let backend = ratatui::backend::TestBackend::new(115, 33);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|f| app.render(f)).expect("draw");
+        let snapshot = buffer_to_text(terminal.backend());
+        let compact_snapshot = snapshot.replace(' ', "");
+
+        assert!(!app.is_showing_welcome());
+        assert!(compact_snapshot.contains("苹果怎么截图"));
+        assert!(snapshot.contains("Shift + Command + 4"));
+        assert!(!snapshot.contains("What are we changing today?"));
+        assert!(!snapshot.contains("Changelog"));
+    }
+
+    #[test]
+    fn app_places_terminal_cursor_in_input_area_for_ime() {
+        let mut app = test_app();
+        app.input_text = "测试".to_string();
+        app.cursor_pos = app.input_text.chars().count();
+
+        let backend = ratatui::backend::TestBackend::new(115, 33);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|f| app.render(f)).expect("draw");
+
+        terminal.backend_mut().assert_cursor_position((7, 30));
+    }
+
+    #[test]
     fn cancel_running_work_clears_modal_state_and_marks_running_plan_failed() {
         let mut app = test_app();
         let (approval_tx, _approval_rx) = tokio::sync::oneshot::channel();
@@ -3431,7 +4005,12 @@ mod tests {
             },
             approval_tx,
         ));
-        app.options_needed = Some(("Choose".into(), vec!["A".into(), "B".into()], options_tx));
+        app.options_needed = Some(DecisionPrompt {
+            kind: DecisionKind::Clarification,
+            title: "Choose".into(),
+            options: vec!["A".into(), "B".into()],
+            respond: options_tx,
+        });
         app.plan_steps = vec![
             plan_tracker::PlanStepItem::new("one", plan_tracker::PlanStepStatus::Done),
             plan_tracker::PlanStepItem::new("two", plan_tracker::PlanStepStatus::Running),
@@ -3478,6 +4057,8 @@ mod tests {
 
         assert!(app.current_turn_input_tokens > 0);
         assert_eq!(app.current_turn_output_tokens, 0);
+        assert_eq!(app.activity_input_tokens(), app.current_turn_input_tokens);
+        assert_eq!(app.visible_input_tokens(), app.current_turn_input_tokens);
 
         app.apply_agent_event(AgentEvent::StreamDone {
             finish_reason: None,
@@ -3494,7 +4075,10 @@ mod tests {
         assert_eq!(app.current_turn_tokens, 123);
         assert_eq!(app.current_turn_input_tokens, 100);
         assert_eq!(app.current_turn_output_tokens, 23);
+        assert_eq!(app.activity_input_tokens(), 100);
+        assert_eq!(app.visible_input_tokens(), 100);
         assert_eq!(app.total_tokens, 5_123);
+        assert!(app.total_cost > 0.0);
     }
 
     #[test]
@@ -3509,10 +4093,95 @@ mod tests {
 
         assert_eq!(app.current_turn_input_tokens, input_tokens);
         assert!(app.current_turn_output_tokens > 0);
+        assert_eq!(app.activity_input_tokens(), input_tokens);
         assert_eq!(
             app.current_turn_tokens,
             app.current_turn_input_tokens + app.current_turn_output_tokens
         );
+    }
+
+    #[test]
+    fn activity_output_tokens_tick_while_stream_is_waiting() {
+        let mut app = test_app();
+        app.begin_running_turn("开蜂群，审查代码");
+        app.stream_start = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+
+        assert_eq!(app.current_turn_output_tokens, 0);
+        assert!(app.activity_output_tokens() > 0);
+    }
+
+    #[test]
+    fn subagent_usage_does_not_pollute_live_activity_tokens() {
+        let mut app = test_app();
+        app.begin_running_turn("开蜂群，审查代码");
+
+        app.apply_agent_event(AgentEvent::SubagentStarted {
+            agent_id: "agent-1".to_string(),
+            agent_type: "explorer".to_string(),
+            description: "定位入口".to_string(),
+            is_background: false,
+        });
+        app.apply_agent_event(AgentEvent::SubagentDelta {
+            agent_id: "agent-1".to_string(),
+            content: "正在读取 src/tui/app.rs".to_string(),
+        });
+        let after_delta = app.current_turn_output_tokens;
+        assert!(after_delta > 0);
+
+        app.apply_agent_event(AgentEvent::SubagentCompleted {
+            agent_id: "agent-1".to_string(),
+            result: crate::agent::subagent::SubagentResult {
+                success: true,
+                summary: "完成定位".to_string(),
+                output: "完成定位".to_string(),
+                tool_calls_used: vec!["read_file".to_string()],
+                files_read: vec!["src/tui/app.rs".to_string()],
+                files_written: Vec::new(),
+                duration_ms: 1_000,
+                token_usage: 16_160,
+                error: None,
+                started_at: chrono::Utc::now(),
+                completed_at: chrono::Utc::now(),
+            },
+        });
+
+        assert_eq!(app.current_turn_output_tokens, after_delta);
+        assert_eq!(
+            app.current_turn_tokens,
+            app.current_turn_input_tokens + app.current_turn_output_tokens
+        );
+        let card = app.subagents.iter().find(|card| card.agent_id == "agent-1");
+        assert_eq!(card.map(|card| card.token_usage), Some(16_160));
+        assert_eq!(app.live_agent_tokens(), 16_160);
+    }
+
+    #[test]
+    fn visible_context_tokens_include_live_turn_estimate_until_usage_arrives() {
+        let mut app = test_app();
+        app.total_tokens = 5_000;
+        app.begin_running_turn("比较 CLI 工具");
+        app.apply_agent_event(AgentEvent::ContentDelta(
+            "这是一个正在流式输出的回答".to_string(),
+        ));
+
+        assert_eq!(
+            app.visible_context_tokens(),
+            5_000 + app.current_turn_tokens
+        );
+
+        app.apply_agent_event(AgentEvent::StreamDone {
+            finish_reason: None,
+            usage: Some(crate::deepseek::Usage {
+                prompt_tokens: 100,
+                completion_tokens: 23,
+                total_tokens: 123,
+                prompt_cache_hit_tokens: None,
+                prompt_cache_miss_tokens: None,
+            }),
+            cache: None,
+        });
+
+        assert_eq!(app.visible_context_tokens(), 5_123);
     }
 
     #[test]
@@ -3541,6 +4210,23 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_end_jumps_to_latest_even_with_input_text() {
+        let mut app = test_app();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.input_text = "draft".to_string();
+        app.cursor_pos = app.input_text.chars().count();
+        app.scroll_older(12);
+
+        app.handle_key(
+            modified_key(KeyCode::End, KeyModifiers::CONTROL, KeyEventKind::Press),
+            &tx,
+        );
+
+        assert_eq!(app.scroll_offset, 0);
+        assert_eq!(app.input_text, "draft");
+    }
+
+    #[test]
     fn transcript_scroll_helpers_saturate_at_latest() {
         let mut app = test_app();
 
@@ -3548,6 +4234,44 @@ mod tests {
         app.scroll_newer(3);
         app.scroll_newer(99);
 
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn jump_to_bottom_hint_renders_when_scrolled_up() {
+        let mut app = test_app();
+        app.begin_running_turn("检查滚动提示");
+        app.apply_agent_event(AgentEvent::ContentDelta(
+            "第一行\n第二行\n第三行\n第四行\n第五行\n第六行\n第七行\n第八行\n".to_string(),
+        ));
+        app.scroll_older(4);
+
+        let mut terminal =
+            Terminal::new(ratatui::backend::TestBackend::new(100, 24)).expect("terminal");
+        terminal.draw(|f| app.render(f)).expect("draw");
+        let rendered = buffer_to_text(terminal.backend());
+
+        assert!(rendered.contains("Jump to bottom (Ctrl+End)"));
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_transcript() {
+        let mut app = test_app();
+
+        app.handle_mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert_eq!(app.scroll_offset, MOUSE_SCROLL_LINES);
+
+        app.handle_mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        });
         assert_eq!(app.scroll_offset, 0);
     }
 
@@ -3606,7 +4330,7 @@ mod tests {
     }
 
     #[test]
-    fn normal_input_is_not_submitted_while_turn_is_running() {
+    fn normal_input_is_queued_while_turn_is_running() {
         let mut app = test_app();
         let (tx, mut rx) = mpsc::unbounded_channel();
         app.is_streaming = true;
@@ -3616,8 +4340,9 @@ mod tests {
         app.handle_key(key(KeyCode::Enter, KeyEventKind::Press), &tx);
 
         assert!(rx.try_recv().is_err());
-        assert_eq!(app.input_text, "hello");
-        assert!(app.status_message.contains("already running"));
+        assert_eq!(app.queued_input.as_deref(), Some("hello"));
+        assert!(app.input_text.is_empty());
+        assert!(app.status_message.contains("已排队"));
     }
 
     #[test]
@@ -3955,6 +4680,177 @@ mod tests {
         assert_eq!(app.plan_summary.as_deref(), Some("Improve TUI basics"));
         assert_eq!(app.plan_total_steps, 3);
         assert_eq!(app.plan_steps.len(), 1);
+    }
+
+    #[test]
+    fn plan_execution_suppresses_narrative_stream_deltas() {
+        let mut app = test_app();
+        app.begin_running_turn("测试 CLI 功能");
+        app.stream_buffer = "我会先列计划。".to_string();
+
+        app.apply_agent_event(AgentEvent::PlanStarted {
+            summary: "测试 CLI".to_string(),
+            total: 2,
+        });
+        app.apply_agent_event(AgentEvent::PlanStepUpdate {
+            index: 0,
+            total: 2,
+            description: "读取 `input_history.txt` - 了解上下文".to_string(),
+            status: crate::agent::orchestrator::PlanStepStatus::Running,
+        });
+        app.apply_agent_event(AgentEvent::ContentDelta(
+            "好的，我来按计划逐步执行。\n\nStep 1: 读取 input_history.txt。".to_string(),
+        ));
+
+        assert!(app.stream_buffer.is_empty());
+        assert!(app.current_turn_output_tokens > 0);
+        assert!(app
+            .activity_log
+            .iter()
+            .any(|entry| entry.contains("plan output: 好的")));
+    }
+
+    #[test]
+    fn pending_plan_still_shows_non_execution_messages() {
+        let mut app = test_app();
+
+        app.apply_agent_event(AgentEvent::PlanStarted {
+            summary: "测试 CLI".to_string(),
+            total: 1,
+        });
+        app.apply_agent_event(AgentEvent::PlanStepUpdate {
+            index: 0,
+            total: 1,
+            description: "读取文件".to_string(),
+            status: crate::agent::orchestrator::PlanStepStatus::Pending,
+        });
+        app.apply_agent_event(AgentEvent::ContentDelta(
+            "已选择预览模式 - 只显示计划，不执行。\n".to_string(),
+        ));
+
+        assert!(app.stream_buffer.contains("已选择预览模式"));
+    }
+
+    #[test]
+    fn swarm_finished_clears_live_task_ui_before_final_output() {
+        let mut app = test_app();
+        app.begin_running_turn("开蜂群，审查代码");
+        app.apply_agent_event(AgentEvent::SwarmStarted {
+            run_id: "swarm-1".to_string(),
+            summary: "蜂群任务：审查代码".to_string(),
+            total: 1,
+        });
+        app.apply_agent_event(AgentEvent::PlanStepUpdate {
+            index: 0,
+            total: 1,
+            description: "agent reviewer · 审查风险".to_string(),
+            status: crate::agent::orchestrator::PlanStepStatus::Running,
+        });
+        app.apply_agent_event(AgentEvent::SwarmFinished {
+            run_id: "swarm-1".to_string(),
+            success: true,
+            summary: "蜂群已完成".to_string(),
+        });
+        app.apply_agent_event(AgentEvent::ContentDelta("蜂群任务已完成\n".to_string()));
+
+        assert!(app.active_swarm.is_none());
+        assert!(app.plan_steps.is_empty());
+        assert!(app.subagents.is_empty());
+        assert!(app.stream_buffer.contains("蜂群任务已完成"));
+    }
+
+    #[test]
+    fn swarm_failure_keeps_detail_expanded() {
+        let mut app = test_app();
+        app.begin_running_turn("开蜂群，审查代码");
+        app.apply_agent_event(AgentEvent::SwarmStarted {
+            run_id: "swarm-1".to_string(),
+            summary: "蜂群任务".to_string(),
+            total: 1,
+        });
+        app.apply_agent_event(AgentEvent::PlanStepUpdate {
+            index: 0,
+            total: 1,
+            description: "agent reviewer · 审查风险".to_string(),
+            status: crate::agent::orchestrator::PlanStepStatus::Failed,
+        });
+        app.apply_agent_event(AgentEvent::SwarmFinished {
+            run_id: "swarm-1".to_string(),
+            success: false,
+            summary: "蜂群未完成".to_string(),
+        });
+
+        let swarm = app.active_swarm.as_ref().expect("swarm detail remains");
+        assert!(swarm.detail_expanded);
+        assert!(!app.plan_steps.is_empty());
+    }
+
+    #[test]
+    fn swarm_counts_track_latest_task_status_by_id() {
+        let mut app = test_app();
+        app.apply_agent_event(AgentEvent::SwarmStarted {
+            run_id: "swarm-1".to_string(),
+            summary: "蜂群任务".to_string(),
+            total: 2,
+        });
+        app.apply_agent_event(AgentEvent::SwarmTaskUpdated {
+            run_id: "swarm-1".to_string(),
+            task_id: "task-a".to_string(),
+            role: "explorer".to_string(),
+            status: "running".to_string(),
+            description: "定位入口".to_string(),
+        });
+        app.apply_agent_event(AgentEvent::SwarmTaskUpdated {
+            run_id: "swarm-1".to_string(),
+            task_id: "task-a".to_string(),
+            role: "explorer".to_string(),
+            status: "done".to_string(),
+            description: "定位入口".to_string(),
+        });
+        app.apply_agent_event(AgentEvent::SwarmTaskUpdated {
+            run_id: "swarm-1".to_string(),
+            task_id: "task-b".to_string(),
+            role: "reviewer".to_string(),
+            status: "running".to_string(),
+            description: "审查风险".to_string(),
+        });
+
+        let swarm = app.active_swarm.as_ref().expect("active swarm");
+        assert_eq!(swarm.running, 1);
+        assert_eq!(swarm.done, 1);
+        assert_eq!(swarm.failed, 0);
+    }
+
+    #[test]
+    fn active_swarm_does_not_duplicate_status_in_top_bar() {
+        let mut app = test_app();
+        app.begin_running_turn("开蜂群，审查代码");
+        app.apply_agent_event(AgentEvent::SwarmStarted {
+            run_id: "swarm-1".to_string(),
+            summary: "蜂群任务".to_string(),
+            total: 1,
+        });
+        app.apply_agent_event(AgentEvent::PlanStepUpdate {
+            index: 0,
+            total: 1,
+            description: "agent explorer · 阅读并定位 src/agent/swarm.rs".to_string(),
+            status: crate::agent::orchestrator::PlanStepStatus::Running,
+        });
+
+        let mut terminal =
+            Terminal::new(ratatui::backend::TestBackend::new(100, 24)).expect("terminal");
+        terminal.draw(|f| app.render(f)).expect("draw");
+
+        let rendered = buffer_to_text(terminal.backend());
+        let compact_rendered = rendered.replace(' ', "");
+        let first_line = rendered.lines().next().unwrap_or_default();
+        assert!(!first_line.contains("swarm"));
+        assert!(compact_rendered.contains("1个agent"));
+        assert!(compact_rendered.contains("审查代码"));
+        assert!(rendered.contains("○ agent explorer"));
+        assert!(!rendered.contains("○  1. agent explorer"));
+        assert!(!rendered.contains("蜂群计划："));
+        assert!(!rendered.contains("蜂群任务："));
     }
 
     #[test]

@@ -9,12 +9,15 @@ use super::background::BackgroundQueue;
 use super::orchestrator::AgentEvent;
 use super::subagent::{MergeStrategy, SubagentTask, SubagentToolArgs};
 use super::supervisor::Supervisor;
+use super::swarm::SwarmCoordinator;
 
 /// Handles `run_subagent` tool invocations from the main agent.
 ///
 /// Supports both synchronous (wait for result) and background execution modes.
 #[derive(Clone)]
 pub struct TaskToolHandler {
+    client: Arc<DeepSeekClient>,
+    project_root: PathBuf,
     supervisor: Supervisor,
     background_queue: BackgroundQueue,
     /// The spawn_depth assigned to agents created by this handler.
@@ -29,8 +32,10 @@ impl TaskToolHandler {
         background_queue: BackgroundQueue,
         spawn_depth: u8,
     ) -> Self {
-        let supervisor = Supervisor::new(client, project_root);
+        let supervisor = Supervisor::new(client.clone(), project_root.clone());
         Self {
+            client,
+            project_root,
             supervisor,
             background_queue,
             spawn_depth,
@@ -95,7 +100,21 @@ impl TaskToolHandler {
             );
         }
 
-        // Synchronous execution with optional parallel decomposition
+        // Synchronous execution: route through the local swarm coordinator when enabled.
+        let runtime_config =
+            crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
+        if runtime_config.subagent.swarm_enabled {
+            let coordinator = SwarmCoordinator::new(
+                self.client.clone(),
+                self.project_root.clone(),
+                runtime_config.subagent.max_parallel,
+            );
+            let plan = coordinator.plan(&args.description, &args.prompt, &args.focus_files);
+            let result = coordinator.run(plan, event_tx).await;
+            return (result.format_for_parent(), !result.success);
+        }
+
+        // Fallback: legacy optional parallel decomposition.
         if let Some(batch) = self
             .supervisor
             .decompose_async(&args.description, &args.prompt)

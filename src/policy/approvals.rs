@@ -283,9 +283,9 @@ pub fn evaluate_tool(
                     command.to_string(),
                 );
             }
-            if !policy.require_approval_for_command {
+            if policy.autonomy_level.auto_local_commands() || !policy.require_approval_for_command {
                 return PolicyDecision::allow(
-                    format!("command allowed by policy: {command}"),
+                    format!("local command allowed by policy: {command}"),
                     "Run Command",
                     command.to_string(),
                     RiskLevel::CommandExecution,
@@ -360,7 +360,12 @@ fn write_paths_decision(
     };
     let details = format_path_details(paths);
 
-    if !policy.require_approval_for_write {
+    let workspace_safe = paths.iter().all(|path| {
+        evaluate_path_risk(path, project_root, policy.block_protected_paths) == RiskLevel::SafeRead
+    });
+    if (policy.autonomy_level.auto_workspace_writes() && workspace_safe)
+        || !policy.require_approval_for_write
+    {
         return PolicyDecision::allow(
             format!("file write allowed by policy: {}", summarize_paths(paths)),
             title,
@@ -440,11 +445,16 @@ fn evaluate_path_risk(
         project_root.join(path)
     };
 
-    let project_root_norm = strip_unc_prefix(project_root);
+    let project_root_norm = std::fs::canonicalize(project_root)
+        .map(|path| strip_unc_prefix(&path))
+        .unwrap_or_else(|_| strip_unc_prefix(project_root));
+    let project_root_raw_norm = strip_unc_prefix(project_root);
 
     if let Ok(canonical) = std::fs::canonicalize(&absolute) {
         let canonical_norm = strip_unc_prefix(&canonical);
-        if canonical_norm.starts_with(&project_root_norm) {
+        if canonical_norm.starts_with(&project_root_norm)
+            || canonical_norm.starts_with(&project_root_raw_norm)
+        {
             RiskLevel::SafeRead
         } else {
             RiskLevel::SensitiveRead
@@ -452,7 +462,9 @@ fn evaluate_path_risk(
     } else {
         // Path doesn't exist yet — for writes, this is normal
         let absolute_norm = strip_unc_prefix(&absolute);
-        if absolute_norm.starts_with(&project_root_norm) {
+        if absolute_norm.starts_with(&project_root_norm)
+            || absolute_norm.starts_with(&project_root_raw_norm)
+        {
             RiskLevel::SafeRead
         } else {
             RiskLevel::SensitiveRead
@@ -576,6 +588,52 @@ mod tests {
             "run_command",
             &args(serde_json::json!({ "command": "cargo check" })),
             Path::new("."),
+            &policy,
+        );
+
+        assert_eq!(decision.action, PolicyAction::Allow);
+    }
+
+    #[test]
+    fn autonomy_low_allows_workspace_writes_but_not_commands() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let policy = PolicyConfig {
+            autonomy_level: crate::storage::config::AutonomyLevel::Low,
+            require_approval_for_write: true,
+            require_approval_for_command: true,
+            ..PolicyConfig::default()
+        };
+
+        let write = evaluate_tool(
+            "write_file",
+            &args(serde_json::json!({ "path": "src/main.rs" })),
+            temp.path(),
+            &policy,
+        );
+        let command = evaluate_tool(
+            "run_command",
+            &args(serde_json::json!({ "command": "cargo check" })),
+            temp.path(),
+            &policy,
+        );
+
+        assert_eq!(write.action, PolicyAction::Allow);
+        assert_eq!(command.action, PolicyAction::AskOnce);
+    }
+
+    #[test]
+    fn autonomy_medium_allows_local_commands() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let policy = PolicyConfig {
+            autonomy_level: crate::storage::config::AutonomyLevel::Medium,
+            require_approval_for_command: true,
+            ..PolicyConfig::default()
+        };
+
+        let decision = evaluate_tool(
+            "run_command",
+            &args(serde_json::json!({ "command": "cargo check" })),
+            temp.path(),
             &policy,
         );
 

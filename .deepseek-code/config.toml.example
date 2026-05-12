@@ -33,6 +33,7 @@ network_access = false
 command_timeout_seconds = 120
 require_approval_for_write = true
 require_approval_for_command = true
+autonomy_level = "off"          # off | low | medium | high
 block_protected_paths = true
 normalize_unicode_commands = true
 
@@ -50,6 +51,7 @@ protected = [
 [ui]
 language = "zh-CN"
 theme = "dark"
+renderer = "classic"            # classic | fullscreen
 show_reasoning_summary = true
 show_raw_reasoning = false
 show_cache_hud = true

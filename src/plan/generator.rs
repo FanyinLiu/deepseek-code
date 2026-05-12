@@ -13,6 +13,11 @@ pub async fn generate_plan(
     search_context: Option<&str>,
     project_rules: Option<&str>,
 ) -> Result<Plan, anyhow::Error> {
+    let language_instruction = if contains_cjk(task) {
+        "Use Simplified Chinese for all human-facing string fields: summary, target_files.reason, steps, risks.description, and verification."
+    } else {
+        "Use the same language as the user task for all human-facing string fields: summary, target_files.reason, steps, risks.description, and verification."
+    };
     let rule_context = project_rules
         .filter(|rules| !rules.trim().is_empty())
         .map(|rules| format!("Project rules that must be respected:\n{rules}\n\n"))
@@ -23,12 +28,14 @@ pub async fn generate_plan(
             "{rule_context}Task: {task}\n\n\
              Relevant project context from search:\n{ctx}\n\n\
              Generate a plan for completing this task. \
+             {language_instruction} \
              Include: target files, steps, risks, verification steps."
         )
     } else {
         format!(
             "{rule_context}Task: {task}\n\n\
              Generate a plan for completing this task. \
+             {language_instruction} \
              First identify what files you need to read. \
              Include: target files, steps, risks, verification steps."
         )
@@ -67,6 +74,20 @@ pub async fn generate_plan(
     // (parse_json_response already handles markdown fences)
 
     Ok(plan)
+}
+
+fn contains_cjk(value: &str) -> bool {
+    value.chars().any(|ch| {
+        matches!(
+            ch as u32,
+            0x4E00..=0x9FFF
+                | 0x3400..=0x4DBF
+                | 0x20000..=0x2A6DF
+                | 0x2A700..=0x2B73F
+                | 0x2B740..=0x2B81F
+                | 0x2B820..=0x2CEAF
+        )
+    })
 }
 
 /// Quick plan — shorter, fewer steps, for simpler tasks.

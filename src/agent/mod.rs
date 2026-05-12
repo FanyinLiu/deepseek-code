@@ -1,7 +1,9 @@
 pub mod background;
 pub mod bus;
 pub mod checkpoints;
+pub mod context;
 pub mod decomposer;
+pub mod event_sink;
 pub mod lanes;
 pub mod orchestrator;
 pub mod prompt_builder;
@@ -9,6 +11,7 @@ pub mod reasoning;
 pub mod router;
 pub mod subagent;
 pub mod supervisor;
+pub mod swarm;
 pub mod task_tool;
 pub mod tool_loop;
 pub mod utils;
@@ -21,4 +24,7 @@ pub use router::{
 };
 pub use subagent::{SubagentConfig, SubagentResult, SubagentTask, SubagentType};
 pub use supervisor::Supervisor;
+pub use swarm::{
+    SwarmAgentRole, SwarmCoordinator, SwarmPlan, SwarmRun, SwarmTask, SwarmTaskStatus,
+};
 pub use task_tool::TaskToolHandler;

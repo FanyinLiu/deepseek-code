@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::storage::{self, SessionStore, TranscriptFormat};
+use crate::storage::{self, EventLogStore, SessionStore, TranscriptFormat};
 
 /// Run the resume command: list and restore saved sessions.
 pub async fn resume(
@@ -13,6 +13,7 @@ pub async fn resume(
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?;
 
     let store = SessionStore::new(home.join(".deepseek-code"));
+    let event_store = EventLogStore::new(home.join(".deepseek-code"));
 
     match session_name {
         Some(name) => {
@@ -36,6 +37,41 @@ pub async fn resume(
                         println!("Name: {}", session.name.as_deref().unwrap_or("unnamed"));
                         println!("Created: {}", session.created_at.format("%Y-%m-%d %H:%M"));
                         println!("Updated: {}", session.updated_at.format("%Y-%m-%d %H:%M"));
+                        if let Ok(Some(turn_id)) = event_store.unfinished_turn(&root, &session.id) {
+                            println!();
+                            println!(
+                                "上次任务未完成: turn {}. 为避免重复执行有副作用的命令，继续前请先查看日志或手动确认下一步。",
+                                turn_id
+                            );
+                        }
+                        if let Ok(Some(swarm)) = event_store.latest_swarm_state(&root, &session.id)
+                        {
+                            println!();
+                            println!("Swarm 状态: {}", swarm.status_label());
+                            println!("Run ID: {}", swarm.run_id);
+                            println!("摘要: {}", swarm.summary);
+                            println!(
+                                "任务: running {} / done {} / failed {} / cancelled {} / total {}",
+                                swarm.running,
+                                swarm.done,
+                                swarm.failed,
+                                swarm.cancelled,
+                                swarm.total
+                            );
+                            if swarm.pending_patches > swarm.applied_patches {
+                                println!(
+                                    "待确认 patch: {}",
+                                    swarm.pending_patches - swarm.applied_patches
+                                );
+                            }
+                            println!(
+                                "事件日志: {}",
+                                event_store
+                                    .events_path(&root, &session.id)
+                                    .to_string_lossy()
+                            );
+                            println!("恢复提示: 只展示状态，不会自动重跑命令或重新写文件。");
+                        }
                         println!();
                         println!("To continue this session, run:");
                         println!("  deepseek-code chat --session {}", session.id);

@@ -652,21 +652,51 @@ fn cmd_theme(args: &str, ctx: &mut CommandContext) -> CommandResult {
     let mode = match requested.as_str() {
         "" => {
             return Ok(Some(format!(
-                "Theme: {}\n\nUsage: /theme light | dark | toggle",
+                "Theme: {}\n\nUsage: /theme light | dark | high-contrast | toggle",
                 ctx.app.theme_mode.label()
             )));
         }
         "light" | "droid" => crate::tui::theme::ThemeMode::Light,
         "dark" | "terminal" => crate::tui::theme::ThemeMode::Dark,
+        "high-contrast" | "high_contrast" | "contrast" | "hc" => {
+            crate::tui::theme::ThemeMode::HighContrast
+        }
         "toggle" => ctx.app.theme_mode.toggled(),
         other => {
             return Err(format!(
-                "Unknown theme: {other}. Use /theme light, /theme dark, or /theme toggle."
+                "Unknown theme: {other}. Use /theme light, /theme dark, /theme high-contrast, or /theme toggle."
             ));
         }
     };
     ctx.app.set_theme_mode(mode);
     Ok(Some(format!("Theme set to {}", mode.label())))
+}
+
+fn cmd_tui(args: &str, ctx: &mut CommandContext) -> CommandResult {
+    let requested = args.trim().to_ascii_lowercase();
+    let mode = match requested.as_str() {
+        "" => {
+            return Ok(Some(format!(
+                "TUI renderer: {}\n\nUsage: /tui classic | fullscreen",
+                ctx.app.renderer_mode.label()
+            )));
+        }
+        "classic" | "terminal" | "scrollback" => crate::tui::app::RendererMode::Classic,
+        "fullscreen" | "full-screen" | "alternate" | "alt" => {
+            crate::tui::app::RendererMode::Fullscreen
+        }
+        other => {
+            return Err(format!(
+                "Unknown TUI renderer: {other}. Use /tui classic or /tui fullscreen."
+            ));
+        }
+    };
+    write_project_ui_string_override(ctx.project_root, "renderer", mode.label())?;
+    ctx.app.set_renderer_mode(mode);
+    Ok(Some(format!(
+        "TUI renderer set to {}. Restart ds to apply terminal mode.",
+        mode.label()
+    )))
 }
 
 fn cmd_settings(_args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -1053,6 +1083,262 @@ fn cmd_tasks(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     Ok(Some(lines.join("\n").trim_end().to_string()))
 }
 
+fn cmd_schedule(args: &str, ctx: &mut CommandContext) -> CommandResult {
+    let store = crate::storage::ScheduledTaskStore::default_user();
+    let mut parts = args.trim().splitn(3, ' ');
+    let action = parts.next().unwrap_or("");
+    match action {
+        "" | "list" => {
+            let tasks = store
+                .list()
+                .map_err(|e| format!("Failed to list scheduled tasks: {e}"))?;
+            let mut lines = vec![manager_header("schedule", "local")];
+            if tasks.is_empty() {
+                lines.push("status   no planned tasks".to_string());
+                lines.push(format!("store    {}", store.root().display()));
+            } else {
+                lines.push(format!("count    {}", tasks.len()));
+                for task in tasks {
+                    lines.push(task.format_row());
+                }
+            }
+            lines.push(
+                "usage    /schedule add heartbeat|standalone <task> | pause|resume|logs|rm <id>"
+                    .to_string(),
+            );
+            Ok(Some(lines.join("\n")))
+        }
+        "add" => {
+            let Some(kind) = parts.next() else {
+                return Err("Usage: /schedule add heartbeat|standalone <task>".to_string());
+            };
+            let Some(prompt) = parts.next() else {
+                return Err("Usage: /schedule add heartbeat|standalone <task>".to_string());
+            };
+            let kind = kind.parse::<crate::storage::ScheduledTaskKind>()?;
+            let task = store
+                .create(kind, prompt.trim().to_string(), ctx.project_root.to_path_buf())
+                .map_err(|e| format!("Failed to create scheduled task: {e}"))?;
+            Ok(Some(format!(
+                "{}\nid      {}\nkind    {}\nstatus  {}",
+                manager_header("schedule", "created"),
+                task.id,
+                task.kind.as_str(),
+                task.status.as_str()
+            )))
+        }
+        "pause" | "resume" | "logs" | "rm" | "remove" | "run" => {
+            let Some(id) = parts.next() else {
+                return Err(format!("Usage: /schedule {action} <id>"));
+            };
+            match action {
+                "pause" => {
+                    let task = store
+                        .set_status(id, crate::storage::ScheduledTaskStatus::Paused)
+                        .map_err(|e| format!("Failed to pause task: {e}"))?;
+                    Ok(Some(format!(
+                        "{}\nid      {}",
+                        manager_header("schedule", "paused"),
+                        task.id
+                    )))
+                }
+                "resume" => {
+                    let task = store
+                        .set_status(id, crate::storage::ScheduledTaskStatus::Active)
+                        .map_err(|e| format!("Failed to resume task: {e}"))?;
+                    Ok(Some(format!(
+                        "{}\nid      {}",
+                        manager_header("schedule", "resumed"),
+                        task.id
+                    )))
+                }
+                "logs" => {
+                    let task = store
+                        .load(id)
+                        .map_err(|e| format!("Failed to load task: {e}"))?;
+                    let mut lines = vec![
+                        manager_header("schedule", "logs"),
+                        format!("id      {}", task.id),
+                        format!("kind    {}", task.kind.as_str()),
+                        format!("status  {}", task.status.as_str()),
+                        format!("root    {}", task.project_root.display()),
+                        format!("prompt  {}", task.prompt),
+                        format!("last    {}", task.last_status.as_deref().unwrap_or("never run")),
+                    ];
+                    if let Some(path) = task.last_log_path {
+                        lines.push(format!("log     {}", path.display()));
+                    } else {
+                        lines.push(
+                            "log     use `ds resume` to inspect session event logs".to_string(),
+                        );
+                    }
+                    Ok(Some(lines.join("\n")))
+                }
+                "run" => Ok(Some(
+                    [
+                        manager_header("schedule", "manual-run"),
+                        format!("id      {id}"),
+                        "next    run `ds task run <id>` from the shell".to_string(),
+                        "note    TUI slash commands stay synchronous to avoid hidden side effects"
+                            .to_string(),
+                    ]
+                    .join("\n"),
+                )),
+                _ => {
+                    let task = store
+                        .remove(id)
+                        .map_err(|e| format!("Failed to remove task: {e}"))?;
+                    Ok(Some(format!(
+                        "{}\nid      {}",
+                        manager_header("schedule", "removed"),
+                        task.id
+                    )))
+                }
+            }
+        }
+        _ => Err(
+            "Usage: /schedule list | add heartbeat|standalone <task> | pause|resume|run|logs|rm <id>"
+                .to_string(),
+        ),
+    }
+}
+
+fn cmd_swarm(args: &str, ctx: &mut CommandContext) -> CommandResult {
+    let action = args.trim();
+    let config = crate::storage::Config::load(Some(ctx.project_root)).unwrap_or_default();
+    match action {
+        "" | "status" => {
+            let running = ctx
+                .app
+                .subagents
+                .iter()
+                .filter(|card| {
+                    card.status == crate::tui::subagent_cards::SubagentCardStatus::Running
+                })
+                .count();
+            let mut lines = vec![
+                manager_header(
+                    "swarm",
+                    if config.subagent.swarm_enabled {
+                        "on"
+                    } else {
+                        "off"
+                    },
+                ),
+                format!("max_parallel {}", config.subagent.max_parallel),
+                format!(
+                    "write_requires_approval {}",
+                    on_off(config.subagent.write_requires_approval)
+                ),
+                format!(
+                    "command_requires_approval {}",
+                    on_off(config.subagent.command_requires_approval)
+                ),
+                format!("running_agents {}", running),
+            ];
+            if let Some(swarm) = ctx.app.active_swarm.as_ref() {
+                lines.extend([
+                    format!("run_id   {}", swarm.run_id),
+                    format!("summary  {}", swarm.summary),
+                    format!("status   {}", swarm.status),
+                    format!(
+                        "tasks    running {} · done {} · failed {} · cancelled {} · total {}",
+                        swarm.running, swarm.done, swarm.failed, swarm.cancelled, swarm.total
+                    ),
+                    format!("cancel_requested {}", on_off(swarm.cancel_requested)),
+                ]);
+            }
+            lines.push(
+                "usage     /swarm on | /swarm off | /swarm status | /swarm cancel".to_string(),
+            );
+            Ok(Some(lines.join("\n")))
+        }
+        "on" | "off" => {
+            let enabled = action == "on";
+            write_project_swarm_override(ctx.project_root, enabled)?;
+            Ok(Some(format!(
+                "{}\nswarm_enabled {}",
+                manager_header("swarm", action),
+                on_off(enabled)
+            )))
+        }
+        "cancel" => {
+            ctx.app.request_swarm_cancel();
+            Ok(Some(
+                [
+                    manager_header("swarm", "cancel-requested"),
+                    "running swarm will stop before the next task batch".to_string(),
+                    "already-started commands are not force killed; use Esc for a hard interrupt"
+                        .to_string(),
+                ]
+                .join("\n"),
+            ))
+        }
+        _ => Err("Usage: /swarm on | /swarm off | /swarm status | /swarm cancel".into()),
+    }
+}
+
+fn write_project_swarm_override(
+    project_root: &std::path::Path,
+    enabled: bool,
+) -> Result<(), String> {
+    let dir = project_root.join(".deepseek-code");
+    let path = dir.join("local.toml");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create config dir: {e}"))?;
+    let mut table = if path.exists() {
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read local.toml: {e}"))?;
+        toml::from_str::<toml::Value>(&content)
+            .ok()
+            .and_then(|value| value.as_table().cloned())
+            .unwrap_or_default()
+    } else {
+        toml::map::Map::new()
+    };
+    let subagent = table
+        .entry("subagent".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    let subagent_table = subagent
+        .as_table_mut()
+        .ok_or_else(|| "local.toml [subagent] is not a table".to_string())?;
+    subagent_table.insert("swarm_enabled".to_string(), toml::Value::Boolean(enabled));
+    let rendered = toml::to_string_pretty(&toml::Value::Table(table))
+        .map_err(|e| format!("Failed to render local.toml: {e}"))?;
+    std::fs::write(&path, rendered).map_err(|e| format!("Failed to write local.toml: {e}"))?;
+    Ok(())
+}
+
+fn write_project_ui_string_override(
+    project_root: &std::path::Path,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    let dir = project_root.join(".deepseek-code");
+    let path = dir.join("local.toml");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create config dir: {e}"))?;
+    let mut table = if path.exists() {
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read local.toml: {e}"))?;
+        toml::from_str::<toml::Value>(&content)
+            .ok()
+            .and_then(|value| value.as_table().cloned())
+            .unwrap_or_default()
+    } else {
+        toml::map::Map::new()
+    };
+    let ui = table
+        .entry("ui".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    let ui_table = ui
+        .as_table_mut()
+        .ok_or_else(|| "local.toml [ui] is not a table".to_string())?;
+    ui_table.insert(key.to_string(), toml::Value::String(value.to_string()));
+    let rendered = toml::to_string_pretty(&toml::Value::Table(table))
+        .map_err(|e| format!("Failed to render local.toml: {e}"))?;
+    std::fs::write(&path, rendered).map_err(|e| format!("Failed to write local.toml: {e}"))?;
+    Ok(())
+}
+
 fn on_off(value: bool) -> &'static str {
     if value {
         "on"
@@ -1281,8 +1567,15 @@ impl CommandRegistry {
             name: "/theme",
             aliases: &["/themes"],
             description: "Show or switch the UI theme",
-            usage: "/theme [light|dark|toggle]",
+            usage: "/theme [light|dark|high-contrast|toggle]",
             handler: cmd_theme,
+        });
+        self.register(&SlashCommand {
+            name: "/tui",
+            aliases: &["/renderer"],
+            description: "Show or switch the terminal renderer",
+            usage: "/tui [classic|fullscreen]",
+            handler: cmd_tui,
         });
         self.register(&SlashCommand {
             name: "/settings",
@@ -1353,6 +1646,20 @@ impl CommandRegistry {
             description: "List built-in and configured subagents",
             usage: "/agents",
             handler: cmd_agents,
+        });
+        self.register(&SlashCommand {
+            name: "/swarm",
+            aliases: &["/cluster"],
+            description: "Control automatic local swarm agents",
+            usage: "/swarm on|off|status|cancel",
+            handler: cmd_swarm,
+        });
+        self.register(&SlashCommand {
+            name: "/schedule",
+            aliases: &[],
+            description: "Manage local planned tasks",
+            usage: "/schedule list|add|pause|resume|run|logs|rm",
+            handler: cmd_schedule,
         });
         self.register(&SlashCommand {
             name: "/tasks",
@@ -1704,6 +2011,41 @@ mod tests {
 
         assert!(output.contains("dark"));
         assert_eq!(ctx.app.theme_mode, crate::tui::theme::ThemeMode::Dark);
+    }
+
+    #[test]
+    fn tui_command_writes_renderer_override() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reg = CommandRegistry::new();
+        let mut app = crate::tui::app::TuiApp::new(
+            crate::deepseek::DeepSeekModel::Flash,
+            crate::deepseek::ThinkingMode::Auto,
+            None,
+            temp.path().to_path_buf(),
+        );
+        let mut yolo = false;
+        let mut ctx = CommandContext {
+            app: &mut app,
+            project_root: temp.path(),
+            yolo_mode: &mut yolo,
+            mcp_status: "MCP: not initialized",
+            background_tasks: &[],
+        };
+
+        let output = reg
+            .execute("/tui fullscreen", &mut ctx)
+            .expect("command should be handled")
+            .expect("tui should run")
+            .expect("tui should show output");
+
+        assert!(output.contains("fullscreen"));
+        assert_eq!(
+            ctx.app.renderer_mode,
+            crate::tui::app::RendererMode::Fullscreen
+        );
+        let local = std::fs::read_to_string(temp.path().join(".deepseek-code/local.toml"))
+            .expect("local config");
+        assert!(local.contains("renderer = \"fullscreen\""));
     }
 
     #[test]

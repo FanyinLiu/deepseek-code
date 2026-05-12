@@ -17,7 +17,12 @@ pub fn to_chat_messages(
     let mut chat_msgs: Vec<ChatMessage> = Vec::new();
 
     for msg in protocol_messages {
-        if msg.visibility == MessageVisibility::InternalProtocolState {
+        let is_active_tool_protocol = msg.visibility == MessageVisibility::InternalProtocolState
+            && (msg.role == Role::Tool
+                || reasoning_state
+                    .preserved_assistant_messages
+                    .contains(&msg.id));
+        if msg.visibility == MessageVisibility::InternalProtocolState && !is_active_tool_protocol {
             continue;
         }
 

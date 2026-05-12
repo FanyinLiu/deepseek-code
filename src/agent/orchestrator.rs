@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::path::{Component, Path};
+use std::sync::{atomic::AtomicBool, Arc};
 
 use chrono::Utc;
 use tokio::sync::mpsc;
@@ -9,19 +10,22 @@ use crate::deepseek::{
     thinking_config_for_lane, CacheUsage, ChatRequest, DeepSeekModel, ExecutionLane, FinishReason,
     MessageContent, MessageId, MessageVisibility, ModelCapability, ProtocolMessage,
     ReasoningEffort, ReasoningState, Role, Session, SessionId, StreamResult, SubTurnId,
-    ThinkingConfig, ToolCall, ToolDefinition, ToolResultRecord, TurnId, Usage,
+    ThinkingConfig, ToolCall, ToolCallFunction, ToolDefinition, ToolResultRecord, TurnId, Usage,
 };
 use crate::plan;
 use crate::plan::schema::{Plan, RiskLevel};
 use crate::policy;
 use crate::search::{self, SearchMatch};
+use crate::storage::{EventLogStore, SessionEvent, SessionEventKind};
 
 use super::background::{BackgroundQueue, BackgroundTaskSnapshot};
+use super::event_sink::EventSink;
 use super::lanes::{classify_task, TaskClass};
 use super::prompt_builder::{load_project_rules, PromptBuilder};
 use super::reasoning::ReasoningManager;
 use super::router::{ComplexityAssessment, ComplexityRouter, ReasonCode, Route};
 use super::subagent::SubagentToolArgs;
+use super::swarm::{SwarmCoordinator, SwarmRunOptions, SwarmTaskStatus};
 use super::task_tool::TaskToolHandler;
 use super::tool_loop::ToolLoop;
 
@@ -82,6 +86,26 @@ pub enum AgentEvent {
         arguments: String,
         respond: tokio::sync::oneshot::Sender<bool>,
     },
+    /// A local swarm run has started.
+    SwarmStarted {
+        run_id: String,
+        summary: String,
+        total: usize,
+    },
+    /// A swarm task changed status.
+    SwarmTaskUpdated {
+        run_id: String,
+        task_id: String,
+        role: String,
+        status: String,
+        description: String,
+    },
+    /// A local swarm run has finished.
+    SwarmFinished {
+        run_id: String,
+        success: bool,
+        summary: String,
+    },
     /// Plan step status update for visual progress tracking.
     PlanStepUpdate {
         index: usize,
@@ -108,10 +132,25 @@ pub enum AgentEvent {
     },
     /// Present multiple options to the user after thinking / planning.
     OptionsNeeded {
+        kind: DecisionKind,
         title: String,
         options: Vec<String>,
         respond: tokio::sync::oneshot::Sender<usize>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecisionKind {
+    PlanAction,
+    Clarification,
+    Conflict,
+}
+
+#[derive(Debug, Clone)]
+struct PatchHandlingReport {
+    text: String,
+    validation_failed: bool,
+    changed_files: Vec<String>,
 }
 
 /// Execution mode chosen by the user for a plan.
@@ -245,6 +284,21 @@ fn generate_plan_options(plan: &Plan, use_chinese: bool) -> Vec<PlanOption> {
     options
 }
 
+fn plan_execution_prompt(use_chinese: bool) -> &'static str {
+    if use_chinese {
+        "请按上面的计划逐步执行。只调用工具和更新计划状态，不要输出逐步说明、思考过程或中英混杂的执行旁白；最终结果由系统整理给用户。"
+    } else {
+        "Execute the plan step by step. Use tools and plan status updates only; do not stream narration, step-by-step commentary, or reasoning prose. The system will summarize the final result for the user."
+    }
+}
+
+fn plan_execution_context(plan_json: &str, execution_prompt: &str) -> Vec<String> {
+    vec![
+        format!("Current approved execution plan JSON:\n{plan_json}"),
+        execution_prompt.to_string(),
+    ]
+}
+
 fn plan_uses_chinese(plan: &Plan) -> bool {
     contains_cjk(&plan.summary)
         || plan.steps.iter().any(|step| contains_cjk(step))
@@ -256,6 +310,10 @@ fn plan_uses_chinese(plan: &Plan) -> bool {
             .verification
             .iter()
             .any(|verification| contains_cjk(verification))
+}
+
+fn plan_or_input_uses_chinese(plan: &Plan, user_input: &str) -> bool {
+    contains_cjk(user_input) || plan_uses_chinese(plan)
 }
 
 fn contains_cjk(value: &str) -> bool {
@@ -369,11 +427,15 @@ pub struct Orchestrator {
     plan_execution: Option<PlanExecutionState>,
     mcp_registry: Option<crate::mcp::McpRegistry>,
     mcp_initialized: bool,
+    event_log_store: Option<EventLogStore>,
+    swarm_cancel_token: Option<Arc<AtomicBool>>,
 }
 
 impl Orchestrator {
     #[must_use]
     pub fn new(client: DeepSeekClient, project_root: std::path::PathBuf, session: Session) -> Self {
+        let event_log_store =
+            dirs::home_dir().map(|home| EventLogStore::new(home.join(".deepseek-code")));
         Self {
             client,
             project_root,
@@ -383,7 +445,552 @@ impl Orchestrator {
             plan_execution: None,
             mcp_registry: None,
             mcp_initialized: false,
+            event_log_store,
+            swarm_cancel_token: None,
         }
+    }
+
+    pub fn set_swarm_cancel_token(&mut self, token: Arc<AtomicBool>) {
+        self.swarm_cancel_token = Some(token);
+    }
+
+    fn record_event(&self, turn_id: Option<TurnId>, kind: SessionEventKind) {
+        if let Some(store) = &self.event_log_store {
+            let event = SessionEvent::new(self.session.id, turn_id, kind);
+            if let Err(err) = store.append(&self.project_root, &event) {
+                tracing::warn!("failed to append session event: {err}");
+            }
+        }
+    }
+
+    fn write_artifact(&self, slug: &str, content: &str) {
+        if let Some(store) = &self.event_log_store {
+            match store.write_artifact(&self.project_root, &self.session.id, slug, content) {
+                Ok(path) => tracing::info!("wrote DS artifact: {}", path.display()),
+                Err(err) => tracing::warn!("failed to write DS artifact: {err}"),
+            }
+        }
+    }
+
+    fn emit_event(
+        &self,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+        turn_id: Option<TurnId>,
+        event: AgentEvent,
+    ) {
+        EventSink::new(
+            event_tx,
+            self.event_log_store.clone(),
+            &self.project_root,
+            self.session.id,
+            turn_id,
+        )
+        .emit(event);
+    }
+
+    fn should_run_swarm(
+        &self,
+        user_input: &str,
+        assessment: Option<&ComplexityAssessment>,
+        forced: bool,
+    ) -> bool {
+        let config = crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
+        if !config.subagent.enabled || !config.subagent.swarm_enabled {
+            return false;
+        }
+        if forced {
+            return true;
+        }
+        let lower = user_input.to_lowercase();
+        let multi_file_hint = lower.matches("src/").count() + lower.matches(".rs").count() >= 2;
+        let complex_hint = contains_any(
+            &lower,
+            &[
+                "架构",
+                "审查",
+                "review",
+                "多文件",
+                "debug",
+                "修复测试",
+                "测试修复",
+                "并行",
+                "多 agent",
+                "multi-agent",
+            ],
+        );
+        let router_complex = assessment.is_some_and(|a| a.route == Route::PlanReview);
+        config.subagent.auto_decompose && (multi_file_hint || (router_complex && complex_hint))
+    }
+
+    async fn run_swarm_mode(
+        &mut self,
+        user_input: &str,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+        turn_id: TurnId,
+    ) -> Result<(), anyhow::Error> {
+        let config = crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
+        let coordinator = SwarmCoordinator::new(
+            Arc::new(self.client.clone()),
+            self.project_root.clone(),
+            config.subagent.max_parallel,
+        );
+        let plan = coordinator.plan_hybrid(user_input, user_input, &[]).await;
+        let use_chinese = contains_cjk(user_input);
+        self.write_artifact(
+            "swarm-plan",
+            &format_swarm_plan_artifact(user_input, &plan, use_chinese),
+        );
+        self.emit_event(
+            event_tx,
+            Some(turn_id),
+            AgentEvent::PlanStarted {
+                summary: plan.summary.clone(),
+                total: plan.tasks.len(),
+            },
+        );
+        for (index, task) in plan.tasks.iter().enumerate() {
+            self.emit_event(
+                event_tx,
+                Some(turn_id),
+                AgentEvent::PlanStepUpdate {
+                    index,
+                    total: plan.tasks.len(),
+                    description: if task.focus_files.is_empty() {
+                        format!("agent {} · {}", task.role.as_str(), task.description)
+                    } else {
+                        format!(
+                            "agent {} · {} · 文件 {}",
+                            task.role.as_str(),
+                            task.description,
+                            task.focus_files.join(", ")
+                        )
+                    },
+                    status: PlanStepStatus::Pending,
+                },
+            );
+        }
+
+        self.record_event(
+            Some(turn_id),
+            SessionEventKind::SwarmStarted {
+                run_id: plan.run_id.clone(),
+                summary: plan.summary.clone(),
+                total: plan.tasks.len(),
+            },
+        );
+        for task in &plan.tasks {
+            self.record_event(
+                Some(turn_id),
+                SessionEventKind::SwarmTaskUpdated {
+                    run_id: plan.run_id.clone(),
+                    task_id: task.id.clone(),
+                    role: task.role.as_str().to_string(),
+                    status: SwarmTaskStatus::Pending.as_str().to_string(),
+                    description: task.description.clone(),
+                },
+            );
+        }
+
+        let mut result = coordinator
+            .run_with_options(
+                plan,
+                event_tx,
+                SwarmRunOptions {
+                    command_requires_approval: config.subagent.command_requires_approval,
+                    cancel_token: self.swarm_cancel_token.clone(),
+                    emit_finished: false,
+                },
+            )
+            .await;
+        let patch_report = self
+            .handle_swarm_pending_patches(
+                &result,
+                event_tx,
+                turn_id,
+                config.subagent.write_requires_approval,
+                use_chinese,
+            )
+            .await;
+        if patch_report
+            .as_ref()
+            .is_some_and(|report| report.validation_failed)
+        {
+            result.success = false;
+        }
+        if let Some(report) = &patch_report {
+            result.files_written.extend(report.changed_files.clone());
+            result.files_written.sort();
+            result.files_written.dedup();
+        }
+        let final_output = result.format_for_user(
+            patch_report.as_ref().map(|report| report.text.as_str()),
+            use_chinese,
+        );
+        self.emit_event(
+            event_tx,
+            Some(turn_id),
+            AgentEvent::SwarmFinished {
+                run_id: result.run_id.clone(),
+                success: result.success,
+                summary: result.summary.clone(),
+            },
+        );
+        let assistant_msg =
+            ReasoningManager::new_assistant_message(&final_output, None, &[], turn_id, None, false);
+        self.session.messages.push(assistant_msg);
+        self.record_event(
+            Some(turn_id),
+            SessionEventKind::SwarmFinished {
+                run_id: result.run_id.clone(),
+                success: result.success,
+                summary: result.summary.clone(),
+            },
+        );
+        self.record_event(
+            Some(turn_id),
+            SessionEventKind::AssistantVisible {
+                content: final_output.clone(),
+            },
+        );
+        self.record_event(
+            Some(turn_id),
+            SessionEventKind::TurnFinished { total_tokens: 0 },
+        );
+        send_event(event_tx, AgentEvent::ContentDelta(final_output));
+        send_event(
+            event_tx,
+            AgentEvent::TurnComplete {
+                session_id: self.session.id,
+                total_tokens: self.session.metadata.total_tokens,
+            },
+        );
+        Ok(())
+    }
+
+    async fn handle_swarm_pending_patches(
+        &self,
+        result: &crate::agent::swarm::SwarmResult,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+        turn_id: TurnId,
+        write_requires_approval: bool,
+        use_chinese: bool,
+    ) -> Option<PatchHandlingReport> {
+        if result.pending_patches.is_empty() {
+            return None;
+        }
+        for patch in &result.pending_patches {
+            self.record_event(
+                Some(turn_id),
+                SessionEventKind::SwarmPatchPending {
+                    run_id: result.run_id.clone(),
+                    task_id: patch.task_id.clone(),
+                    summary: patch.summary.clone(),
+                    changed_files: patch.changed_files.clone(),
+                    conflict: patch.conflict,
+                },
+            );
+        }
+        if result.cancelled || result.tasks_failed > 0 {
+            return Some(PatchHandlingReport {
+                text: if use_chinese {
+                    format!(
+                        "未自动写入：蜂群任务没有全部完成（失败 {} / 总计 {}）。为避免应用不完整补丁，已保留 pending patch 到事件日志。",
+                        result.tasks_failed, result.tasks_total
+                    )
+                } else {
+                    format!(
+                        "Pending patch not applied: swarm did not complete cleanly ({} failed / {} total). The patch was kept in the event log.",
+                        result.tasks_failed, result.tasks_total
+                    )
+                },
+                validation_failed: true,
+                changed_files: Vec::new(),
+            });
+        }
+        if !result.patch_conflicts.is_empty() {
+            return Some(PatchHandlingReport {
+                text: if use_chinese {
+                    format!(
+                        "未自动写入：pending patch 存在文件冲突：{}。没有修改文件。",
+                        result.patch_conflicts.join(", ")
+                    )
+                } else {
+                    format!(
+                        "Pending patch blocked: conflicting files {}. No files were modified.",
+                        result.patch_conflicts.join(", ")
+                    )
+                },
+                validation_failed: true,
+                changed_files: Vec::new(),
+            });
+        }
+
+        let combined_patch = result
+            .pending_patches
+            .iter()
+            .map(|patch| patch.patch.trim())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let changed_files = result
+            .pending_patches
+            .iter()
+            .flat_map(|patch| patch.changed_files.clone())
+            .collect::<Vec<_>>();
+
+        if let Err(error) =
+            validate_swarm_patch_for_auto_apply(&self.project_root, &combined_patch, &changed_files)
+        {
+            return Some(PatchHandlingReport {
+                text: if use_chinese {
+                    format!("未自动写入：安全检查未通过：{error}。没有修改文件。")
+                } else {
+                    format!(
+                        "Pending patch blocked by safety check: {error}. No files were modified."
+                    )
+                },
+                validation_failed: true,
+                changed_files: Vec::new(),
+            });
+        }
+
+        if write_requires_approval {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            self.emit_event(
+                event_tx,
+                Some(turn_id),
+                AgentEvent::ToolApprovalNeeded {
+                    tool_name: "apply_patch".to_string(),
+                    display: policy::ApprovalDisplay {
+                        title: if use_chinese {
+                            "应用蜂群 pending patch".to_string()
+                        } else {
+                            "Apply swarm pending patch".to_string()
+                        },
+                        description: if use_chinese {
+                            format!(
+                                "{} 个 pending patch，{} 个文件",
+                                result.pending_patches.len(),
+                                changed_files.len()
+                            )
+                        } else {
+                            format!(
+                                "{} pending patch(es), {} file(s)",
+                                result.pending_patches.len(),
+                                changed_files.len()
+                            )
+                        },
+                        risk_level: policy::RiskLevel::WriteProject,
+                        details: swarm_patch_approval_details(
+                            result,
+                            &changed_files,
+                            &combined_patch,
+                            use_chinese,
+                        ),
+                    },
+                    respond: tx,
+                },
+            );
+            let approved = matches!(
+                tokio::time::timeout(std::time::Duration::from_mins(5), rx).await,
+                Ok(Ok(true))
+            );
+            if !approved {
+                return Some(PatchHandlingReport {
+                    text: if use_chinese {
+                        "未写入 pending patch：用户取消或确认超时。".into()
+                    } else {
+                        "Pending patch was not applied: user denied or approval timed out.".into()
+                    },
+                    validation_failed: true,
+                    changed_files: Vec::new(),
+                });
+            }
+        }
+
+        let call = ToolCall {
+            id: format!("swarm-patch-{}", uuid::Uuid::new_v4()),
+            call_type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "apply_patch".to_string(),
+                arguments: serde_json::json!({ "patch": combined_patch }).to_string(),
+            },
+        };
+        self.record_event(
+            Some(turn_id),
+            SessionEventKind::ToolCallStarted {
+                tool_call_id: call.id.clone(),
+                name: call.function.name.clone(),
+                arguments: call.function.arguments.clone(),
+            },
+        );
+        let policy_config = crate::storage::Config::load(Some(&self.project_root))
+            .map(|c| c.policy)
+            .unwrap_or_default();
+        let backend = crate::tools::backend::LocalToolBackend;
+        let execution = crate::tools::backend::ToolBackend::execute(
+            &backend,
+            &call,
+            &crate::tools::backend::ToolExecutionContext {
+                project_root: self.project_root.clone(),
+                dispatch_config: crate::tools::dispatch::ToolDispatchConfig::from_policy(
+                    &policy_config,
+                ),
+            },
+        )
+        .await;
+        self.record_event(
+            Some(turn_id),
+            SessionEventKind::ToolCallFinished {
+                tool_call_id: call.id,
+                name: call.function.name,
+                success: execution.success,
+                summary: execution.summary.clone(),
+                duration_ms: execution.duration_ms,
+                changed_files: execution.changed_files.clone(),
+            },
+        );
+        for path in &execution.changed_files {
+            self.record_event(
+                Some(turn_id),
+                SessionEventKind::FileChanged {
+                    path: path.clone(),
+                    stats: "swarm pending patch applied".to_string(),
+                },
+            );
+        }
+        self.record_event(
+            Some(turn_id),
+            SessionEventKind::SwarmPatchApplied {
+                run_id: result.run_id.clone(),
+                success: execution.success,
+                summary: execution.summary.clone(),
+                changed_files: execution.changed_files.clone(),
+            },
+        );
+        let validation_report = if execution.success {
+            self.run_swarm_post_apply_validation(result, turn_id, use_chinese)
+                .await
+        } else {
+            None
+        };
+        let mut report = if use_chinese {
+            format!(
+                "pending patch 写入{}：{}",
+                if execution.success {
+                    "成功"
+                } else {
+                    "失败"
+                },
+                execution.summary
+            )
+        } else {
+            format!(
+                "Pending patch apply {}: {}",
+                if execution.success {
+                    "succeeded"
+                } else {
+                    "failed"
+                },
+                execution.summary
+            )
+        };
+        let mut validation_failed = !execution.success;
+        if let Some((validation, failed)) = validation_report {
+            validation_failed |= failed;
+            if use_chinese {
+                report.push_str("\n\n写入后验证：\n");
+            } else {
+                report.push_str("\n\nPost-apply validation:\n");
+            }
+            report.push_str(&validation);
+        }
+        Some(PatchHandlingReport {
+            text: report,
+            validation_failed,
+            changed_files: execution.changed_files,
+        })
+    }
+
+    async fn run_swarm_post_apply_validation(
+        &self,
+        result: &crate::agent::swarm::SwarmResult,
+        turn_id: TurnId,
+        use_chinese: bool,
+    ) -> Option<(String, bool)> {
+        if result.validation_commands.is_empty() {
+            return None;
+        }
+        let policy_config = crate::storage::Config::load(Some(&self.project_root))
+            .map(|c| c.policy)
+            .unwrap_or_default();
+        let backend = crate::tools::backend::LocalToolBackend;
+        let mut lines = Vec::new();
+        let mut failed = false;
+        for command in result.validation_commands.iter().take(3) {
+            let call = ToolCall {
+                id: format!("swarm-verify-{}", uuid::Uuid::new_v4()),
+                call_type: "function".to_string(),
+                function: ToolCallFunction {
+                    name: "run_command".to_string(),
+                    arguments: serde_json::json!({ "command": command }).to_string(),
+                },
+            };
+            self.record_event(
+                Some(turn_id),
+                SessionEventKind::ToolCallStarted {
+                    tool_call_id: call.id.clone(),
+                    name: call.function.name.clone(),
+                    arguments: call.function.arguments.clone(),
+                },
+            );
+            let execution = crate::tools::backend::ToolBackend::execute(
+                &backend,
+                &call,
+                &crate::tools::backend::ToolExecutionContext {
+                    project_root: self.project_root.clone(),
+                    dispatch_config: crate::tools::dispatch::ToolDispatchConfig::from_policy(
+                        &policy_config,
+                    ),
+                },
+            )
+            .await;
+            self.record_event(
+                Some(turn_id),
+                SessionEventKind::ToolCallFinished {
+                    tool_call_id: call.id,
+                    name: call.function.name,
+                    success: execution.success,
+                    summary: execution.summary.clone(),
+                    duration_ms: execution.duration_ms,
+                    changed_files: execution.changed_files,
+                },
+            );
+            failed |= !execution.success;
+            let status_label = if use_chinese {
+                if execution.success {
+                    "通过"
+                } else {
+                    "失败"
+                }
+            } else if execution.success {
+                "passed"
+            } else {
+                "failed"
+            };
+            lines.push(format!(
+                "- `{command}`: {} - {}",
+                status_label,
+                first_line(&execution.summary)
+            ));
+        }
+        (!lines.is_empty()).then(|| (lines.join("\n"), failed))
+    }
+
+    fn load_session_events(&self) -> Vec<SessionEvent> {
+        self.event_log_store
+            .as_ref()
+            .and_then(|store| store.load(&self.project_root, &self.session.id).ok())
+            .unwrap_or_default()
     }
 
     /// Initialize MCP registry from config and connect to all configured servers.
@@ -530,6 +1137,7 @@ impl Orchestrator {
     ) -> Result<(), anyhow::Error> {
         // Load project rules once and reuse throughout the turn.
         let project_rules = load_project_rules(&self.project_root);
+        let force_swarm = should_force_swarm(user_input);
 
         // 1. Legacy classify (for search / explicit triggers)
         let task = classify_task(user_input);
@@ -565,7 +1173,7 @@ impl Orchestrator {
 
         // 3. Route decision
         if let Some(ref a) = assessment {
-            let route = if shadow_mode {
+            let route = if shadow_mode || force_swarm {
                 // In shadow mode the router still assesses and emits telemetry,
                 // but never overrides the actual execution path.
                 Route::DirectExecute
@@ -581,7 +1189,9 @@ impl Orchestrator {
                 Route::PlanReview => {
                     // Override into plan mode even if not explicitly requested
                     let search_ctx = self.run_search_phase(user_input, event_tx).await;
-                    return self.run_plan_mode(user_input, &search_ctx, event_tx).await;
+                    return self
+                        .run_plan_mode(user_input, &search_ctx, event_tx, None)
+                        .await;
                 }
                 Route::DirectExecute => {
                     // Continue below; lane will be chosen conservatively
@@ -606,6 +1216,7 @@ impl Orchestrator {
         } else {
             format!("{mention_context}{user_input}")
         };
+        let event_user_content = enriched_input.clone();
         let content = if images.is_empty() {
             MessageContent::from(enriched_input.as_str())
         } else {
@@ -634,6 +1245,16 @@ impl Orchestrator {
             sub_turn_id: None,
             visibility: MessageVisibility::UserVisible,
         });
+        self.record_event(
+            Some(turn_id),
+            SessionEventKind::UserMessage {
+                content: event_user_content,
+            },
+        );
+
+        if self.should_run_swarm(user_input, assessment.as_ref(), force_swarm) {
+            return self.run_swarm_mode(user_input, event_tx, turn_id).await;
+        }
 
         // 6. Search if needed
         let search_ctx = if matches!(task, TaskClass::Search | TaskClass::Plan) {
@@ -644,7 +1265,9 @@ impl Orchestrator {
 
         // 7. Plan mode (explicit / router-overridden already handled above)
         if task == TaskClass::Plan {
-            return self.run_plan_mode(user_input, &search_ctx, event_tx).await;
+            return self
+                .run_plan_mode(user_input, &search_ctx, event_tx, Some(turn_id))
+                .await;
         }
 
         // Determine execution lane
@@ -665,12 +1288,15 @@ impl Orchestrator {
         ) || has_forced_lane;
         let effective_tools: Vec<ToolDefinition> = if send_tools { tool_defs } else { Vec::new() };
 
-        let (_, messages) = PromptBuilder::new(cap.model.clone(), lane.clone(), true).build(
-            &self.session,
-            project_rules.as_deref(),
-            search_ctx.as_deref(),
-            &effective_tools,
-        );
+        let session_events = self.load_session_events();
+        let (_, messages) = PromptBuilder::new(cap.model.clone(), lane.clone(), true)
+            .build_with_events(
+                &self.session,
+                Some(&session_events),
+                project_rules.as_deref(),
+                search_ctx.as_deref(),
+                &effective_tools,
+            );
 
         let request = ChatRequest {
             model: cap.model.to_string(),
@@ -707,6 +1333,22 @@ impl Orchestrator {
                         false,
                     );
                     self.session.messages.push(msg);
+                    if !stream_result.reasoning_content.trim().is_empty() {
+                        self.record_event(
+                            Some(turn_id),
+                            SessionEventKind::ReasoningInternal {
+                                content: stream_result.reasoning_content.clone(),
+                            },
+                        );
+                    }
+                    if !stream_result.content.trim().is_empty() {
+                        self.record_event(
+                            Some(turn_id),
+                            SessionEventKind::AssistantVisible {
+                                content: stream_result.content.clone(),
+                            },
+                        );
+                    }
                     if !emitted.reasoning {
                         send_reasoning_delta(event_tx, &stream_result.reasoning_content);
                     }
@@ -733,6 +1375,22 @@ impl Orchestrator {
                         );
                     }
                 } else {
+                    if !stream_result.reasoning_content.trim().is_empty() {
+                        self.record_event(
+                            Some(turn_id),
+                            SessionEventKind::ReasoningInternal {
+                                content: stream_result.reasoning_content.clone(),
+                            },
+                        );
+                    }
+                    if !stream_result.content.trim().is_empty() {
+                        self.record_event(
+                            Some(turn_id),
+                            SessionEventKind::AssistantInternal {
+                                content: stream_result.content.clone(),
+                            },
+                        );
+                    }
                     if !emitted.reasoning {
                         send_reasoning_delta(event_tx, &stream_result.reasoning_content);
                     }
@@ -746,8 +1404,9 @@ impl Orchestrator {
                         .await?;
                 }
                 self.session.updated_at = Utc::now();
-                send_event(
+                self.emit_event(
                     event_tx,
+                    Some(turn_id),
                     AgentEvent::TurnComplete {
                         session_id: self.session.id,
                         total_tokens: self.session.metadata.total_tokens,
@@ -755,7 +1414,7 @@ impl Orchestrator {
                 );
             }
             Err(e) => {
-                send_event(event_tx, AgentEvent::Error(e.to_string()));
+                self.emit_event(event_tx, Some(turn_id), AgentEvent::Error(e.to_string()));
             }
         }
         Ok(())
@@ -781,7 +1440,35 @@ impl Orchestrator {
         user_input: &str,
         search_ctx: &Option<String>,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
+        existing_turn_id: Option<TurnId>,
     ) -> Result<(), anyhow::Error> {
+        let turn_id = existing_turn_id.unwrap_or_else(TurnId::new_v4);
+        if existing_turn_id.is_none() {
+            crate::workspace::apply::set_current_turn_id(&turn_id.to_string());
+            ReasoningManager::begin_user_turn(
+                &mut self.session.reasoning_state,
+                &mut self.session.messages,
+                turn_id,
+            );
+            self.session.messages.push(ProtocolMessage {
+                id: MessageId::new_v4(),
+                role: Role::User,
+                content: MessageContent::from(user_input),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                tool_results: Vec::new(),
+                turn_id,
+                sub_turn_id: None,
+                visibility: MessageVisibility::UserVisible,
+            });
+            self.record_event(
+                Some(turn_id),
+                SessionEventKind::UserMessage {
+                    content: user_input.to_string(),
+                },
+            );
+        }
+
         let plan = plan::generate_plan(
             &self.client,
             &DeepSeekModel::Pro,
@@ -794,8 +1481,16 @@ impl Orchestrator {
             Ok(p) => {
                 if let Err(errors) = p.validate() {
                     for e in &errors {
-                        send_event(event_tx, AgentEvent::Error(e.clone()));
+                        self.emit_event(event_tx, Some(turn_id), AgentEvent::Error(e.clone()));
                     }
+                    self.emit_event(
+                        event_tx,
+                        Some(turn_id),
+                        AgentEvent::TurnComplete {
+                            session_id: self.session.id,
+                            total_tokens: self.session.metadata.total_tokens,
+                        },
+                    );
                     return Ok(());
                 }
                 let review = plan::review_plan(&p);
@@ -808,22 +1503,41 @@ impl Orchestrator {
                     );
                 }
 
+                let use_chinese = plan_or_input_uses_chinese(&p, user_input);
+
                 // Convert plan to concrete steps and emit to TUI tracker
                 let steps = plan::executor::plan_to_steps(&p);
-                send_event(
+                let step_lines = steps
+                    .iter()
+                    .map(|step| step.display_with_language(use_chinese))
+                    .collect::<Vec<_>>();
+                self.write_artifact(
+                    "execution-plan",
+                    &format_plan_artifact(
+                        user_input,
+                        &p,
+                        &step_lines,
+                        &review.warnings,
+                        use_chinese,
+                    ),
+                );
+                self.emit_event(
                     event_tx,
+                    Some(turn_id),
                     AgentEvent::PlanStarted {
                         summary: p.summary.clone(),
                         total: steps.len(),
                     },
                 );
-                for (i, step) in steps.iter().enumerate() {
-                    send_event(
+                for i in 0..steps.len() {
+                    let description = step_lines[i].clone();
+                    self.emit_event(
                         event_tx,
+                        Some(turn_id),
                         AgentEvent::PlanStepUpdate {
                             index: i,
                             total: steps.len(),
-                            description: step.display(),
+                            description,
                             status: PlanStepStatus::Pending,
                         },
                     );
@@ -831,12 +1545,12 @@ impl Orchestrator {
 
                 // Present execution-mode options to the user (unless yolo mode)
                 if !self.yolo_mode {
-                    let use_chinese = plan_uses_chinese(&p);
                     let options = generate_plan_options(&p, use_chinese);
                     let (opts_tx, opts_rx) = tokio::sync::oneshot::channel();
                     send_event(
                         event_tx,
                         AgentEvent::OptionsNeeded {
+                            kind: DecisionKind::PlanAction,
                             title: if use_chinese {
                                 format!("计划执行：{}", p.summary)
                             } else {
@@ -849,14 +1563,16 @@ impl Orchestrator {
                     let choice = match opts_rx.await {
                         Ok(v) => v,
                         Err(_) => {
-                            send_event(
+                            self.emit_event(
                                 event_tx,
+                                Some(turn_id),
                                 AgentEvent::Error("Options channel closed".into()),
                             );
-                            send_event(event_tx, AgentEvent::PlanCleared);
+                            self.emit_event(event_tx, Some(turn_id), AgentEvent::PlanCleared);
                             self.session.updated_at = Utc::now();
-                            send_event(
+                            self.emit_event(
                                 event_tx,
+                                Some(turn_id),
                                 AgentEvent::TurnComplete {
                                     session_id: self.session.id,
                                     total_tokens: 0,
@@ -867,14 +1583,23 @@ impl Orchestrator {
                     };
                     if choice >= options.len() {
                         // Cancel (or invalid choice)
-                        send_event(
+                        self.emit_event(
                             event_tx,
-                            AgentEvent::ContentDelta("Plan cancelled by user.\n".into()),
+                            Some(turn_id),
+                            AgentEvent::ContentDelta(
+                                if use_chinese {
+                                    "计划已取消。\n"
+                                } else {
+                                    "Plan cancelled by user.\n"
+                                }
+                                .into(),
+                            ),
                         );
-                        send_event(event_tx, AgentEvent::PlanCleared);
+                        self.emit_event(event_tx, Some(turn_id), AgentEvent::PlanCleared);
                         self.session.updated_at = Utc::now();
-                        send_event(
+                        self.emit_event(
                             event_tx,
+                            Some(turn_id),
                             AgentEvent::TurnComplete {
                                 session_id: self.session.id,
                                 total_tokens: 0,
@@ -888,16 +1613,23 @@ impl Orchestrator {
                         }
                         PlanExecutionMode::Confirm => { /* normal mode */ }
                         PlanExecutionMode::Preview => {
-                            send_event(
+                            self.emit_event(
                                 event_tx,
+                                Some(turn_id),
                                 AgentEvent::ContentDelta(
-                                    "Preview mode selected — plan shown but not executed.\n".into(),
+                                    if use_chinese {
+                                        "已选择预览模式 - 只显示计划，不执行。\n"
+                                    } else {
+                                        "Preview mode selected — plan shown but not executed.\n"
+                                    }
+                                    .into(),
                                 ),
                             );
-                            send_event(event_tx, AgentEvent::PlanCleared);
+                            self.emit_event(event_tx, Some(turn_id), AgentEvent::PlanCleared);
                             self.session.updated_at = Utc::now();
-                            send_event(
+                            self.emit_event(
                                 event_tx,
+                                Some(turn_id),
                                 AgentEvent::TurnComplete {
                                     session_id: self.session.id,
                                     total_tokens: 0,
@@ -906,14 +1638,23 @@ impl Orchestrator {
                             return Ok(());
                         }
                         PlanExecutionMode::Cancel => {
-                            send_event(
+                            self.emit_event(
                                 event_tx,
-                                AgentEvent::ContentDelta("Plan cancelled by user.\n".into()),
+                                Some(turn_id),
+                                AgentEvent::ContentDelta(
+                                    if use_chinese {
+                                        "计划已取消。\n"
+                                    } else {
+                                        "Plan cancelled by user.\n"
+                                    }
+                                    .into(),
+                                ),
                             );
-                            send_event(event_tx, AgentEvent::PlanCleared);
+                            self.emit_event(event_tx, Some(turn_id), AgentEvent::PlanCleared);
                             self.session.updated_at = Utc::now();
-                            send_event(
+                            self.emit_event(
                                 event_tx,
+                                Some(turn_id),
                                 AgentEvent::TurnComplete {
                                     session_id: self.session.id,
                                     total_tokens: 0,
@@ -927,17 +1668,25 @@ impl Orchestrator {
                 // Store plan execution state for step tracking during tool calls
                 let plan_state = PlanExecutionState::new(steps);
                 if let Some(update) = plan_state.current_update(PlanStepStatus::Running) {
-                    send_plan_update(event_tx, update);
+                    self.emit_event(
+                        event_tx,
+                        Some(turn_id),
+                        AgentEvent::PlanStepUpdate {
+                            index: update.index,
+                            total: update.total,
+                            description: update.description,
+                            status: update.status,
+                        },
+                    );
                 }
                 self.plan_execution = Some(plan_state);
 
                 let plan_json = serde_json::to_string_pretty(&p).unwrap_or_default();
-                let turn_id = TurnId::new_v4();
                 crate::workspace::apply::set_current_turn_id(&turn_id.to_string());
                 self.session.messages.push(ProtocolMessage {
                     id: MessageId::new_v4(),
                     role: Role::Assistant,
-                    content: MessageContent::from(plan_json),
+                    content: MessageContent::from(plan_json.clone()),
                     reasoning_content: None,
                     tool_calls: Vec::new(),
                     tool_results: Vec::new(),
@@ -946,8 +1695,10 @@ impl Orchestrator {
                     visibility: MessageVisibility::AuditOnly,
                 });
 
-                // Add execution instruction as a synthetic user turn
-                let execution_prompt = "Execute the above plan step by step. Use the available tools to complete each step.";
+                // Add execution instruction as a synthetic user turn. Plan-mode prose is
+                // rendered by the tracker, so model narration stays internal.
+                let execution_prompt = plan_execution_prompt(use_chinese);
+                let plan_context = plan_execution_context(&plan_json, &execution_prompt);
                 self.session.messages.push(ProtocolMessage {
                     id: MessageId::new_v4(),
                     role: Role::User,
@@ -969,13 +1720,16 @@ impl Orchestrator {
                     &self.session.reasoning_state.effort,
                 );
 
+                let session_events = self.load_session_events();
                 let (_, messages) =
                     PromptBuilder::new(cap.model.clone(), ExecutionLane::ToolLoopThinking, true)
-                        .build(
+                        .build_with_events_and_context(
                             &self.session,
+                            Some(&session_events),
                             load_project_rules(&self.project_root).as_deref(),
                             search_ctx.as_deref(),
                             &tool_defs,
+                            &plan_context,
                         );
 
                 let request = ChatRequest {
@@ -989,12 +1743,9 @@ impl Orchestrator {
                 };
 
                 let mut plan_execution_failed = false;
-                let mut emitted = EmittedStreamDeltas::default();
                 match self
                     .client
-                    .chat_stream_accumulated_with_deltas(&request, |chunk| {
-                        emitted.merge(emit_stream_chunk_deltas(event_tx, chunk));
-                    })
+                    .chat_stream_accumulated_with_deltas(&request, |_| {})
                     .await
                 {
                     Ok(stream_result) => {
@@ -1012,15 +1763,6 @@ impl Orchestrator {
                                 false,
                             );
                             self.session.messages.push(msg);
-                            if !emitted.reasoning {
-                                send_reasoning_delta(event_tx, &stream_result.reasoning_content);
-                            }
-                            if !emitted.content {
-                                send_event(
-                                    event_tx,
-                                    AgentEvent::ContentDelta(stream_result.content),
-                                );
-                            }
                             if let Some(ref usage) = stream_result.usage {
                                 self.session.metadata.total_tokens += u64::from(usage.total_tokens);
                                 self.session.metadata.total_cost_estimate += usage
@@ -1040,32 +1782,22 @@ impl Orchestrator {
                                 );
                             }
                         } else {
-                            if !emitted.reasoning {
-                                send_reasoning_delta(event_tx, &stream_result.reasoning_content);
-                            }
-                            if !emitted.content && !stream_result.content.is_empty() {
-                                send_event(
-                                    event_tx,
-                                    AgentEvent::ContentDelta(format!(
-                                        "{}\n",
-                                        stream_result.content
-                                    )),
-                                );
-                            }
                             if let Err(e) = self
                                 .handle_tool_calls(&stream_result, turn_id, event_tx, 0)
                                 .await
                             {
                                 plan_execution_failed = true;
-                                send_event(
+                                self.emit_event(
                                     event_tx,
+                                    Some(turn_id),
                                     AgentEvent::Error(format!("Plan tool execution failed: {e}")),
                                 );
                             }
                         }
                         self.session.updated_at = Utc::now();
-                        send_event(
+                        self.emit_event(
                             event_tx,
+                            Some(turn_id),
                             AgentEvent::TurnComplete {
                                 session_id: self.session.id,
                                 total_tokens: self.session.metadata.total_tokens,
@@ -1074,9 +1806,18 @@ impl Orchestrator {
                     }
                     Err(e) => {
                         plan_execution_failed = true;
-                        send_event(
+                        self.emit_event(
                             event_tx,
+                            Some(turn_id),
                             AgentEvent::Error(format!("Plan execution failed: {e}")),
+                        );
+                        self.emit_event(
+                            event_tx,
+                            Some(turn_id),
+                            AgentEvent::TurnComplete {
+                                session_id: self.session.id,
+                                total_tokens: self.session.metadata.total_tokens,
+                            },
                         );
                     }
                 }
@@ -1084,14 +1825,34 @@ impl Orchestrator {
                 // Finish any steps that did not map cleanly to a tool batch before clearing UI state.
                 if let Some(mut plan_execution) = self.plan_execution.take() {
                     let updates = plan_execution.finish_remaining(!plan_execution_failed);
-                    send_plan_updates(event_tx, updates);
+                    for update in updates {
+                        self.emit_event(
+                            event_tx,
+                            Some(turn_id),
+                            AgentEvent::PlanStepUpdate {
+                                index: update.index,
+                                total: update.total,
+                                description: update.description,
+                                status: update.status,
+                            },
+                        );
+                    }
                 }
-                send_event(event_tx, AgentEvent::PlanCleared);
+                self.emit_event(event_tx, Some(turn_id), AgentEvent::PlanCleared);
             }
             Err(e) => {
-                send_event(
+                self.emit_event(
                     event_tx,
+                    Some(turn_id),
                     AgentEvent::Error(format!("Plan generation failed: {e}")),
+                );
+                self.emit_event(
+                    event_tx,
+                    Some(turn_id),
+                    AgentEvent::TurnComplete {
+                        session_id: self.session.id,
+                        total_tokens: self.session.metadata.total_tokens,
+                    },
                 );
             }
         }
@@ -1120,6 +1881,16 @@ impl Orchestrator {
         );
         self.session.messages.push(assistant_msg);
         send_reasoning_delta(event_tx, &stream_result.reasoning_content);
+        for tc in &stream_result.tool_calls {
+            self.record_event(
+                Some(turn_id),
+                SessionEventKind::ToolCallStarted {
+                    tool_call_id: tc.id.clone(),
+                    name: tc.function.name.clone(),
+                    arguments: tc.function.arguments.clone(),
+                },
+            );
+        }
         if let Some(last_msg) = self.session.messages.last() {
             ReasoningManager::begin_tool_turn(&mut self.session.reasoning_state, last_msg);
         }
@@ -1366,6 +2137,18 @@ impl Orchestrator {
         }
 
         for (tc, result) in &results {
+            let changed_files = changed_files_for_tool_call(tc);
+            self.record_event(
+                Some(turn_id),
+                SessionEventKind::ToolCallFinished {
+                    tool_call_id: result.tool_call_id.clone(),
+                    name: result.name.clone(),
+                    success: !result.is_error,
+                    summary: crate::agent::utils::truncate_for_summary(&result.result, 200),
+                    duration_ms: 0,
+                    changed_files: changed_files.clone(),
+                },
+            );
             let tool_msg = ReasoningManager::new_tool_result_message(
                 &result.tool_call_id,
                 &result.name,
@@ -1392,8 +2175,9 @@ impl Orchestrator {
                 {
                     if let Some(path) = args["path"].as_str() {
                         let stats = crate::workspace::diff::diff_stats(&result.result);
-                        send_event(
+                        self.emit_event(
                             event_tx,
+                            Some(turn_id),
                             AgentEvent::FileDiff {
                                 path: path.to_string(),
                                 diff: result.result.clone(),
@@ -1401,6 +2185,16 @@ impl Orchestrator {
                             },
                         );
                     }
+                }
+            } else if !result.is_error {
+                for path in &changed_files {
+                    self.record_event(
+                        Some(turn_id),
+                        SessionEventKind::FileChanged {
+                            path: path.clone(),
+                            stats: format!("changed by {}", tc.function.name),
+                        },
+                    );
                 }
             }
         }
@@ -1443,17 +2237,35 @@ impl Orchestrator {
         if let Some(ref mut plan_exec) = self.plan_execution {
             let had_error = results.iter().any(|(_, r)| r.is_error);
             let updates = plan_exec.updates_after_tool_batch(had_error);
-            send_plan_updates(event_tx, updates);
+            for update in updates {
+                self.emit_event(
+                    event_tx,
+                    Some(turn_id),
+                    AgentEvent::PlanStepUpdate {
+                        index: update.index,
+                        total: update.total,
+                        description: update.description,
+                        status: update.status,
+                    },
+                );
+            }
         }
 
         let tool_defs = self.get_all_tools();
         let project_rules = load_project_rules(&self.project_root);
+        let session_events = self.load_session_events();
         let (_, messages) = PromptBuilder::new(
             self.session.reasoning_state.mode_to_model(),
             ExecutionLane::ToolLoopThinking,
             true,
         )
-        .build(&self.session, project_rules.as_deref(), None, &tool_defs);
+        .build_with_events(
+            &self.session,
+            Some(&session_events),
+            project_rules.as_deref(),
+            None,
+            &tool_defs,
+        );
 
         let followup_request = ChatRequest {
             model: self.session.reasoning_state.mode_to_model().to_string(),
@@ -1634,25 +2446,266 @@ fn emit_stream_chunk_deltas(
     emitted
 }
 
-fn send_plan_updates(
-    tx: &mpsc::UnboundedSender<AgentEvent>,
-    updates: impl IntoIterator<Item = PlanProgressUpdate>,
-) {
-    for update in updates {
-        send_plan_update(tx, update);
+fn changed_files_for_tool_call(tc: &ToolCall) -> Vec<String> {
+    crate::tools::backend::changed_files_for_call(tc)
+}
+
+fn should_force_swarm(user_input: &str) -> bool {
+    let lower = user_input.to_lowercase();
+    contains_any(
+        &lower,
+        &[
+            "开蜂群",
+            "蜂群",
+            "集群",
+            "并行",
+            "多 agent",
+            "多agent",
+            "多智能体",
+            "swarm",
+            "multi-agent",
+            "parallel agents",
+        ],
+    )
+}
+
+fn swarm_patch_approval_details(
+    result: &crate::agent::swarm::SwarmResult,
+    changed_files: &[String],
+    patch: &str,
+    use_chinese: bool,
+) -> String {
+    let patch_lines = patch.lines().count();
+    let files = if changed_files.is_empty() {
+        "none".to_string()
+    } else {
+        changed_files.join(", ")
+    };
+    if use_chinese {
+        format!(
+            "来源: swarm coordinator {}\n文件: {}\n摘要: {} 个 pending patch，{} 行 diff 已隐藏\n风险: 将写入工作区文件",
+            result.run_id,
+            files,
+            result.pending_patches.len(),
+            patch_lines
+        )
+    } else {
+        format!(
+            "Source: swarm coordinator {}\nFiles: {}\nSummary: {} pending patch(es), {} diff lines hidden\nRisk: writes workspace files",
+            result.run_id,
+            files,
+            result.pending_patches.len(),
+            patch_lines
+        )
     }
 }
 
-fn send_plan_update(tx: &mpsc::UnboundedSender<AgentEvent>, update: PlanProgressUpdate) {
-    send_event(
-        tx,
-        AgentEvent::PlanStepUpdate {
-            index: update.index,
-            total: update.total,
-            description: update.description,
-            status: update.status,
-        },
-    );
+fn format_swarm_plan_artifact(
+    user_input: &str,
+    plan: &crate::agent::swarm::SwarmPlan,
+    use_chinese: bool,
+) -> String {
+    if use_chinese {
+        let team = plan.team_plan();
+        let mut out = format!(
+            "# 团队计划\n\n## 目标\n{}\n\n## 用户请求\n{}\n\n## 里程碑\n",
+            team.goal, user_input
+        );
+        for (index, milestone) in team.milestones.iter().enumerate() {
+            out.push_str(&format!("{}. {}\n", index + 1, milestone.title));
+        }
+        if !team.acceptance_criteria.is_empty() {
+            out.push_str("\n## 验收标准\n");
+            for item in &team.acceptance_criteria {
+                out.push_str(&format!("- {item}\n"));
+            }
+        }
+        out.push_str("\n## Agent 分工\n");
+        for (index, task) in plan.tasks.iter().enumerate() {
+            let files = if task.focus_files.is_empty() {
+                "无指定文件".to_string()
+            } else {
+                task.focus_files.join(", ")
+            };
+            out.push_str(&format!(
+                "{}. {} - {}。关注文件：{}\n",
+                index + 1,
+                task.role.as_str(),
+                task.description,
+                files
+            ));
+        }
+        if !team.risks.is_empty() {
+            out.push_str("\n## 风险点\n");
+            for risk in &team.risks {
+                out.push_str(&format!("- {risk}\n"));
+            }
+        }
+        if !plan.validation_commands.is_empty() {
+            out.push_str("\n## 验证命令\n");
+            for command in &plan.validation_commands {
+                out.push_str(&format!("- `{command}`\n"));
+            }
+        }
+        out.push_str("\n## 确认点\n- 写入、命令、冲突和恢复决策按 policy 触发审批；明确只读蜂群不弹执行确认。\n");
+        out
+    } else {
+        let team = plan.team_plan();
+        let mut out = format!(
+            "# Team Plan\n\n## Goal\n{}\n\n## User Request\n{}\n\n## Milestones\n",
+            team.goal, user_input
+        );
+        for (index, milestone) in team.milestones.iter().enumerate() {
+            out.push_str(&format!("{}. {}\n", index + 1, milestone.title));
+        }
+        if !team.acceptance_criteria.is_empty() {
+            out.push_str("\n## Acceptance Criteria\n");
+            for item in &team.acceptance_criteria {
+                out.push_str(&format!("- {item}\n"));
+            }
+        }
+        out.push_str("\n## Agents\n");
+        for (index, task) in plan.tasks.iter().enumerate() {
+            let files = if task.focus_files.is_empty() {
+                "none".to_string()
+            } else {
+                task.focus_files.join(", ")
+            };
+            out.push_str(&format!(
+                "{}. {} - {}. Focus files: {}\n",
+                index + 1,
+                task.role.as_str(),
+                task.description,
+                files
+            ));
+        }
+        if !team.risks.is_empty() {
+            out.push_str("\n## Risks\n");
+            for risk in &team.risks {
+                out.push_str(&format!("- {risk}\n"));
+            }
+        }
+        if !plan.validation_commands.is_empty() {
+            out.push_str("\n## Validation Commands\n");
+            for command in &plan.validation_commands {
+                out.push_str(&format!("- `{command}`\n"));
+            }
+        }
+        out.push_str("\n## Confirmation Points\n- Writes, commands, conflicts, and resume decisions follow policy approvals; clear read-only swarms do not ask for execution confirmation.\n");
+        out
+    }
+}
+
+fn format_plan_artifact(
+    user_input: &str,
+    plan: &Plan,
+    step_lines: &[String],
+    warnings: &[String],
+    use_chinese: bool,
+) -> String {
+    if use_chinese {
+        let mut out = format!(
+            "# 执行计划\n\n## 目标\n{}\n\n## 用户请求\n{}\n\n## 步骤\n",
+            plan.summary, user_input
+        );
+        for (index, step) in step_lines.iter().enumerate() {
+            out.push_str(&format!("{}. {}\n", index + 1, step));
+        }
+        if !warnings.is_empty() {
+            out.push_str("\n## 风险提示\n");
+            for warning in warnings {
+                out.push_str(&format!("- {warning}\n"));
+            }
+        }
+        out.push_str("\n## 交互策略\n- 默认智能打断：计划动作显示在计划区；歧义、风险、命令、写入、冲突才打断用户。\n");
+        out
+    } else {
+        let mut out = format!(
+            "# Execution Plan\n\n## Goal\n{}\n\n## User Request\n{}\n\n## Steps\n",
+            plan.summary, user_input
+        );
+        for (index, step) in step_lines.iter().enumerate() {
+            out.push_str(&format!("{}. {}\n", index + 1, step));
+        }
+        if !warnings.is_empty() {
+            out.push_str("\n## Warnings\n");
+            for warning in warnings {
+                out.push_str(&format!("- {warning}\n"));
+            }
+        }
+        out.push_str("\n## Interaction Policy\n- Smart interruptions by default: plan actions stay attached to the plan; ambiguity, risky commands, writes, conflicts, and resume decisions interrupt the user.\n");
+        out
+    }
+}
+
+fn first_line(value: &str) -> &str {
+    value.lines().next().unwrap_or(value).trim()
+}
+
+fn validate_swarm_patch_for_auto_apply(
+    project_root: &Path,
+    patch: &str,
+    changed_files: &[String],
+) -> Result<(), String> {
+    if patch.trim().is_empty() {
+        return Err("empty patch".into());
+    }
+    let parsed_paths = crate::workspace::apply::parse_patch_paths(patch);
+    if parsed_paths.is_empty() {
+        return Err("patch does not declare changed paths".into());
+    }
+    let paths = if changed_files.is_empty() {
+        parsed_paths
+    } else {
+        changed_files.to_vec()
+    };
+    for path in paths {
+        let path_obj = Path::new(&path);
+        if path_obj.is_absolute() {
+            return Err(format!("absolute path is not allowed: {path}"));
+        }
+        if path_obj
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+        {
+            return Err(format!("path escapes workspace: {path}"));
+        }
+        let resolved = project_root.join(path_obj);
+        if crate::policy::paths::is_blocked_path(&resolved, project_root) {
+            return Err(format!("protected path: {path}"));
+        }
+    }
+    validate_patch_applies_cleanly(project_root, patch)?;
+    Ok(())
+}
+
+fn validate_patch_applies_cleanly(project_root: &Path, patch: &str) -> Result<(), String> {
+    let mut child = std::process::Command::new("git")
+        .args(["apply", "--check"])
+        .current_dir(project_root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to start git apply --check: {e}"))?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        use std::io::Write;
+        stdin
+            .write_all(patch.as_bytes())
+            .map_err(|e| format!("failed to write patch to git apply --check: {e}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("git apply --check failed to run: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("patch does not apply cleanly: {}", stderr.trim()));
+    }
+    Ok(())
+}
+
+fn contains_any(value: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| value.contains(needle))
 }
 
 fn is_unavailable_self_verification(output: &str) -> bool {
@@ -1703,10 +2756,13 @@ fn summarize_parent_context(session: &Session) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        emit_stream_chunk_deltas, generate_plan_options, plan_uses_chinese, AgentEvent,
-        PlanExecutionState, PlanStepStatus,
+        changed_files_for_tool_call, emit_stream_chunk_deltas, generate_plan_options,
+        plan_execution_context, plan_execution_prompt, plan_or_input_uses_chinese,
+        plan_uses_chinese, swarm_patch_approval_details, validate_swarm_patch_for_auto_apply,
+        AgentEvent, PlanExecutionState, PlanStepStatus,
     };
-    use crate::deepseek::models::StreamChunk;
+    use crate::agent::swarm::{SwarmAgentRole, SwarmPendingPatch, SwarmResult};
+    use crate::deepseek::models::{StreamChunk, ToolCall, ToolCallFunction};
     use crate::plan::executor::PlanStep;
     use crate::plan::schema::{Plan, Risk, RiskLevel};
 
@@ -1740,6 +2796,54 @@ mod tests {
     }
 
     #[test]
+    fn swarm_auto_apply_rejects_protected_patch_paths() {
+        let root = std::path::Path::new("/tmp/project");
+        let patch = "diff --git a/.env b/.env\n--- a/.env\n+++ b/.env\n@@ -1 +1 @@\n-a\n+b\n";
+
+        let err = validate_swarm_patch_for_auto_apply(root, patch, &[".env".to_string()])
+            .expect_err("protected path should be rejected");
+
+        assert!(err.contains("protected path"));
+    }
+
+    #[test]
+    fn swarm_patch_approval_summary_hides_full_diff() {
+        let patch = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-secret old line\n+secret new line\n";
+        let result = SwarmResult {
+            run_id: "swarm-1".into(),
+            success: true,
+            summary: "ok".into(),
+            tasks_total: 1,
+            tasks_done: 1,
+            tasks_failed: 0,
+            outputs: Vec::new(),
+            files_read: Vec::new(),
+            files_written: Vec::new(),
+            pending_patches: vec![SwarmPendingPatch {
+                task_id: "task-1".into(),
+                role: SwarmAgentRole::Worker,
+                summary: "update a".into(),
+                patch: patch.into(),
+                changed_files: vec!["src/a.rs".into()],
+                conflict: false,
+            }],
+            patch_conflicts: Vec::new(),
+            validation_commands: Vec::new(),
+            validation_report: None,
+            cancelled: false,
+            duration_ms: 10,
+        };
+
+        let details = swarm_patch_approval_details(&result, &["src/a.rs".into()], patch, true);
+
+        assert!(details.contains("来源: swarm coordinator swarm-1"));
+        assert!(details.contains("文件: src/a.rs"));
+        assert!(details.contains("diff 已隐藏"));
+        assert!(!details.contains("secret old line"));
+        assert!(!details.contains("secret new line"));
+    }
+
+    #[test]
     fn chinese_plan_gets_chinese_execution_options() {
         let plan = sample_plan("创建任务并逐步展示执行计划");
 
@@ -1752,6 +2856,74 @@ mod tests {
         assert!(labels.iter().any(|label| label.contains("自动执行")));
         assert!(labels.iter().any(|label| label.contains("需要确认后执行")));
         assert!(labels.iter().any(|label| label == "取消"));
+    }
+
+    #[test]
+    fn chinese_user_input_controls_plan_option_language() {
+        let mut plan = sample_plan("Test the CLI environment");
+        plan.steps = vec!["Read input history".to_string()];
+
+        assert!(!plan_uses_chinese(&plan));
+        assert!(plan_or_input_uses_chinese(&plan, "测试一下这个 CLI"));
+
+        let labels =
+            generate_plan_options(&plan, plan_or_input_uses_chinese(&plan, "测试一下这个 CLI"))
+                .into_iter()
+                .map(|option| option.label)
+                .collect::<Vec<_>>();
+
+        assert!(labels.iter().any(|label| label.contains("自动执行")));
+        assert!(labels.iter().any(|label| label == "取消"));
+        assert!(!labels.iter().any(|label| label.contains("Execute")));
+    }
+
+    #[test]
+    fn plan_execution_prompt_keeps_process_narration_internal() {
+        let prompt = plan_execution_prompt(true);
+
+        assert!(prompt.contains("不要输出逐步说明"));
+        assert!(prompt.contains("思考过程"));
+        assert!(prompt.contains("最终结果由系统整理"));
+
+        let prompt = plan_execution_prompt(false);
+        assert!(prompt.contains("do not stream narration"));
+        assert!(prompt.contains("reasoning prose"));
+    }
+
+    #[test]
+    fn plan_execution_context_carries_plan_and_instruction() {
+        let context = plan_execution_context(
+            r#"{"summary":"修复 managed agent 链路"}"#,
+            "请按上面的计划逐步执行。",
+        );
+
+        assert_eq!(context.len(), 2);
+        assert!(context[0].contains("Current approved execution plan JSON"));
+        assert!(context[0].contains("managed agent"));
+        assert!(context[1].contains("请按上面的计划逐步执行"));
+    }
+
+    #[test]
+    fn changed_files_for_tool_call_extracts_apply_patch_paths() {
+        let call = ToolCall {
+            id: "call-1".into(),
+            call_type: "function".into(),
+            function: ToolCallFunction {
+                name: "apply_patch".into(),
+                arguments: serde_json::json!({
+                    "patch": "*** Begin Patch\n*** Update File: src/agent/orchestrator.rs\n*** Add File: tests/session_resume_tests.rs\n*** End Patch\n"
+                })
+                .to_string(),
+            },
+        };
+
+        assert_eq!(
+            changed_files_for_tool_call(&call),
+            vec![
+                "src/agent/orchestrator.rs".to_string(),
+                "tests/session_resume_tests.rs".to_string()
+            ]
+        );
     }
 
     #[test]

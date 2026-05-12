@@ -32,8 +32,8 @@ impl ViewStatus {
     pub fn icon(self) -> &'static str {
         match self {
             Self::Queued => "○",
-            Self::Running => "◈",
-            Self::Done => "◆",
+            Self::Running => "●",
+            Self::Done => "●",
             Self::Failed => "✗",
             Self::Denied => "!",
             Self::Cancelled => "×",
@@ -45,7 +45,7 @@ impl ViewStatus {
         let p = theme::palette();
         match self {
             Self::Queued => p.muted,
-            Self::Running => p.accent,
+            Self::Running => p.success,
             Self::Done => p.success,
             Self::Failed | Self::Denied => p.danger,
             Self::Cancelled => p.dim,

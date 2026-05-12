@@ -52,6 +52,8 @@ pub async fn run_command(
         .arg(shell_arg)
         .arg(command)
         .current_dir(&working_dir)
+        .env_clear()
+        .envs(sanitized_command_env())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -124,6 +126,50 @@ pub async fn run_command(
     }
 }
 
+fn sanitized_command_env() -> Vec<(String, String)> {
+    sanitized_command_env_from(std::env::vars())
+}
+
+pub(crate) fn sanitized_command_env_from<I, K, V>(vars: I) -> Vec<(String, String)>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<String>,
+    V: Into<String>,
+{
+    vars.into_iter()
+        .filter_map(|(key, value)| {
+            let key = key.into();
+            let value = value.into();
+            (!is_sensitive_command_env_key(&key)).then_some((key, value))
+        })
+        .collect()
+}
+
+fn is_sensitive_command_env_key(key: &str) -> bool {
+    let normalized = key.to_ascii_uppercase();
+    const SENSITIVE_PATTERNS: &[&str] = &[
+        "API_KEY",
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "CREDENTIAL",
+        "AUTH",
+        "PRIVATE_KEY",
+        "ACCESS_KEY",
+        "SESSION_KEY",
+        "OPENAI",
+        "DEEPSEEK",
+        "GITHUB",
+        "ANTHROPIC",
+        "MCP",
+    ];
+
+    SENSITIVE_PATTERNS
+        .iter()
+        .any(|pattern| normalized.contains(pattern))
+}
+
 #[derive(Debug, Clone)]
 pub struct CommandResult {
     pub stdout: String,
@@ -186,5 +232,27 @@ mod tests {
             .unwrap();
         assert!(result.is_success());
         assert!(result.stdout.contains("hello"));
+    }
+
+    #[test]
+    fn command_env_drops_sensitive_tokens() {
+        let env = sanitized_command_env_from([
+            ("PATH", "/usr/bin"),
+            ("OPENAI_API_KEY", "sk-secret"),
+            ("GITHUB_TOKEN", "ghp-secret"),
+            ("DEEPSEEK_API_KEY", "ds-secret"),
+            ("HOME", "/tmp/home"),
+            ("SDKROOT", "/Applications/Xcode.app/SDKs/MacOSX.sdk"),
+            ("PKG_CONFIG_PATH", "/opt/homebrew/lib/pkgconfig"),
+            ("HTTPS_PROXY", "http://proxy.local:8080"),
+        ]);
+
+        assert!(env.iter().any(|(key, _)| key == "PATH"));
+        assert!(env.iter().any(|(key, _)| key == "HOME"));
+        assert!(env.iter().any(|(key, _)| key == "SDKROOT"));
+        assert!(env.iter().any(|(key, _)| key == "PKG_CONFIG_PATH"));
+        assert!(env.iter().any(|(key, _)| key == "HTTPS_PROXY"));
+        assert!(!env.iter().any(|(key, _)| key.contains("TOKEN")));
+        assert!(!env.iter().any(|(key, _)| key.contains("API_KEY")));
     }
 }

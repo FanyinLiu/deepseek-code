@@ -28,7 +28,6 @@ pub struct WelcomeDashboardData {
     pub mcp_servers: Vec<McpServerItem>,
     pub agents_md: AgentsMdInfo,
     pub detected_language: String,
-    pub mascot_lines: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,18 +170,6 @@ fn load_agents_md(root: &Path) -> AgentsMdInfo {
     }
 }
 
-fn load_project_mascot(root: &Path) -> Option<Vec<String>> {
-    let path = root.join(".deepseek-code").join("mascot.txt");
-    let content = std::fs::read_to_string(path).ok()?;
-    let lines = content
-        .lines()
-        .map(str::trim_end)
-        .filter(|line| !line.trim().is_empty())
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    (!lines.is_empty()).then_some(lines)
-}
-
 impl WelcomeDashboardData {
     pub fn load(root: &Path, model: DeepSeekModel, thinking: ThinkingMode) -> Self {
         let api_key = storage::get_effective_api_key(Some(root));
@@ -308,7 +295,6 @@ impl WelcomeDashboardData {
 
         let (mcp_servers, _mcp_available) = load_mcp_status(root);
         let agents_md = load_agents_md(root);
-        let mascot_lines = load_project_mascot(root);
 
         Self {
             workspace_name: root
@@ -327,7 +313,6 @@ impl WelcomeDashboardData {
             mcp_servers,
             agents_md,
             detected_language,
-            mascot_lines,
         }
     }
 }
@@ -347,7 +332,7 @@ pub fn suggested_prompt(index: usize) -> Option<&'static str> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub fn render_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
-    if area.width < 70 || area.height < 18 {
+    if area.width < 54 || area.height < 14 {
         render_compact_welcome(f, area, data);
         return;
     }
@@ -355,53 +340,105 @@ pub fn render_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
     f.render_widget(Paragraph::new("").style(welcome_bg()), area);
 
     let inner = area.inner(Margin {
-        horizontal: 4,
-        vertical: 1,
+        horizontal: welcome_horizontal_margin(area.width),
+        vertical: u16::from(area.height >= 22),
     });
 
+    if inner.width < 96 || inner.height < 22 {
+        render_stacked_welcome(f, inner, data);
+        return;
+    }
+
+    render_split_welcome(f, inner, data);
+}
+
+fn welcome_horizontal_margin(width: u16) -> u16 {
+    match width {
+        0..=72 => 1,
+        73..=110 => 2,
+        _ => 3,
+    }
+}
+
+fn render_split_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(55),
+            Constraint::Percentage(54),
             Constraint::Length(1),
-            Constraint::Percentage(45),
+            Constraint::Percentage(46),
         ])
-        .split(inner);
+        .split(area);
 
     render_identity(f, columns[0], data);
     render_divider(f, columns[1]);
     render_actions(f, columns[2], data);
 }
 
-// ── Left: Identity ──
-fn render_identity(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
-    let logo_height = data
-        .mascot_lines
-        .as_ref()
-        .map_or(ascii_art::WELCOME_WORDMARK.len(), Vec::len) as u16;
-
+fn render_stacked_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
+    let identity_height = if area.height >= 20 { 8 } else { 7 }.min(area.height);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(2),
-            Constraint::Length(logo_height.saturating_add(1)),
-            Constraint::Length(2),
-            Constraint::Length(4),
+            Constraint::Length(identity_height),
+            Constraint::Length(u16::from(area.height >= 22)),
             Constraint::Min(1),
         ])
         .split(area);
 
-    let lines = if let Some(mascot_lines) = &data.mascot_lines {
-        mascot_lines
-            .iter()
-            .map(|line| Line::from(Span::styled(line.clone(), welcome_logo())))
-            .collect::<Vec<_>>()
-    } else {
-        ascii_art::WELCOME_WORDMARK
-            .iter()
-            .map(|line| Line::from(Span::styled(*line, welcome_logo())))
-            .collect::<Vec<_>>()
-    };
+    render_stacked_identity(f, chunks[0], data);
+    if chunks[1].height > 0 {
+        render_horizontal_divider(f, chunks[1]);
+    }
+    render_actions(f, chunks[2], data);
+}
+
+// ── Left: Identity ──
+fn render_stacked_identity(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
+    let mut lines = ascii_art::WELCOME_WORDMARK
+        .iter()
+        .map(|line| Line::from(Span::styled(*line, welcome_logo())))
+        .collect::<Vec<_>>();
+    lines.push(Line::from(vec![
+        Span::styled("Tip: ", welcome_label().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Use /init to teach DeepSeek Code this workspace",
+            welcome_text().add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(capability_line(data));
+
+    f.render_widget(
+        Paragraph::new(Text::from(lines))
+            .style(welcome_bg())
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
+fn render_identity(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
+    let logo_height = ascii_art::WELCOME_WORDMARK.len() as u16;
+    let top_pad = if area.height >= 24 { 2 } else { 0 };
+    let shortcut_height = if area.height >= 14 { 3 } else { 2 };
+    let capability_height = if area.height >= 11 { 2 } else { 1 };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(top_pad),
+            Constraint::Length(logo_height.saturating_add(1)),
+            Constraint::Length(2),
+            Constraint::Length(shortcut_height),
+            Constraint::Length(capability_height),
+            Constraint::Min(0),
+        ])
+        .split(area);
+
+    let lines = ascii_art::WELCOME_WORDMARK
+        .iter()
+        .map(|line| Line::from(Span::styled(*line, welcome_logo())))
+        .collect::<Vec<_>>();
 
     let paragraph = Paragraph::new(Text::from(lines))
         .alignment(Alignment::Center)
@@ -445,24 +482,26 @@ fn render_identity(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
 
 // ── Right: Actions ──
 fn render_actions(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Length(7),
-            Constraint::Length(5),
-            Constraint::Min(1),
-        ])
-        .split(area);
-
-    render_release_header(f, chunks[0]);
     if data.api_key_status == "missing" {
-        render_api_key_setup(f, chunks[1]);
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(5),
+                Constraint::Length(5),
+                Constraint::Min(1),
+            ])
+            .split(area);
+        render_api_key_setup(f, chunks[0]);
+        render_context(f, chunks[1], data);
+        render_invitation_and_footer(f, chunks[2], data);
     } else {
-        render_changelog(f, chunks[1]);
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(5), Constraint::Min(1)])
+            .split(area);
+        render_context(f, chunks[0], data);
+        render_invitation_and_footer(f, chunks[1], data);
     }
-    render_context(f, chunks[2], data);
-    render_invitation_and_footer(f, chunks[3], data);
 }
 
 fn render_divider(f: &mut Frame, area: Rect) {
@@ -472,46 +511,17 @@ fn render_divider(f: &mut Frame, area: Rect) {
     f.render_widget(Paragraph::new(Text::from(lines)).style(welcome_bg()), area);
 }
 
-fn render_release_header(f: &mut Frame, area: Rect) {
-    let lines = vec![Line::from(vec![
-        Span::styled("Changelog ", welcome_accent().add_modifier(Modifier::BOLD)),
-        Span::styled("v0.1.0", welcome_text().add_modifier(Modifier::BOLD)),
-        Span::styled("        Ctrl+J close", welcome_text()),
-    ])];
+fn render_horizontal_divider(f: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let line = "─".repeat(area.width as usize);
     f.render_widget(
-        Paragraph::new(Text::from(lines))
-            .style(welcome_bg())
-            .wrap(Wrap { trim: true }),
-        area,
-    );
-}
-
-fn render_changelog(f: &mut Frame, area: Rect) {
-    let lines = vec![
-        Line::from(Span::styled(
-            "New",
-            welcome_accent().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![
-            Span::styled("* ", welcome_text()),
-            Span::styled("Clean welcome", welcome_text().add_modifier(Modifier::BOLD)),
-            Span::styled(" - quiet startup surface", welcome_muted()),
-        ]),
-        Line::from(vec![
-            Span::styled("* ", welcome_text()),
-            Span::styled("Plan UI", welcome_text().add_modifier(Modifier::BOLD)),
-            Span::styled(" - steps, workers, progress", welcome_muted()),
-        ]),
-        Line::from(vec![
-            Span::styled("* ", welcome_text()),
-            Span::styled("API setup", welcome_text().add_modifier(Modifier::BOLD)),
-            Span::styled(" - saved after first entry", welcome_muted()),
-        ]),
-    ];
-    f.render_widget(
-        Paragraph::new(Text::from(lines))
-            .style(welcome_bg())
-            .wrap(Wrap { trim: true }),
+        Paragraph::new(Text::from(vec![Line::from(Span::styled(
+            line,
+            welcome_accent(),
+        ))]))
+        .style(welcome_bg()),
         area,
     );
 }
@@ -552,12 +562,12 @@ fn render_invitation_and_footer(f: &mut Frame, area: Rect, data: &WelcomeDashboa
 fn render_api_key_setup(f: &mut Frame, area: Rect) {
     let lines = vec![
         Line::from(vec![Span::styled(
-            "API setup",
+            "API setup required",
             welcome_accent().add_modifier(Modifier::BOLD),
         )]),
         Line::from(vec![
             Span::styled("1 ", welcome_accent().add_modifier(Modifier::BOLD)),
-            Span::styled("Paste API key in the input line", welcome_text()),
+            Span::styled("Paste your API key in the input line", welcome_text()),
         ]),
         Line::from(vec![
             Span::styled("2 ", welcome_accent().add_modifier(Modifier::BOLD)),
@@ -638,14 +648,6 @@ fn render_compact_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData
         action_span(" send"),
     ];
     let mut lines = Vec::new();
-    if let Some(mascot_lines) = &data.mascot_lines {
-        lines.extend(
-            mascot_lines
-                .iter()
-                .take(3)
-                .map(|line| Line::from(Span::styled(line.clone(), welcome_logo()))),
-        );
-    }
     lines.extend([
         Line::from(vec![Span::styled(
             "DeepSeek Code",
@@ -736,10 +738,20 @@ fn action_span(text: &str) -> Span<'static> {
 }
 
 fn render_capability_line(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
+    let lines = vec![capability_line(data)];
+    f.render_widget(
+        Paragraph::new(Text::from(lines))
+            .style(welcome_bg())
+            .alignment(Alignment::Center),
+        area,
+    );
+}
+
+fn capability_line(data: &WelcomeDashboardData) -> Line<'static> {
     let skills_available = data.skills.iter().filter(|skill| skill.available).count();
     let mcp_count = data.mcp_servers.len();
     let agents_mark = if data.agents_md.loaded { "+" } else { "x" };
-    let lines = vec![Line::from(vec![
+    Line::from(vec![
         Span::styled("skills ", welcome_muted()),
         Span::styled(
             format!("({skills_available}) "),
@@ -761,13 +773,7 @@ fn render_capability_line(f: &mut Frame, area: Rect, data: &WelcomeDashboardData
                 welcome_warn()
             },
         ),
-    ])];
-    f.render_widget(
-        Paragraph::new(Text::from(lines))
-            .style(welcome_bg())
-            .alignment(Alignment::Center),
-        area,
-    );
+    ])
 }
 
 fn welcome_bg() -> Style {
@@ -864,22 +870,6 @@ mod tests {
     }
 
     #[test]
-    fn project_mascot_loads_from_fixed_text_file_without_scaling() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let config_dir = root.path().join(".deepseek-code");
-        std::fs::create_dir_all(&config_dir).expect("create config dir");
-        std::fs::write(config_dir.join("mascot.txt"), "  ██  \n ████ \n").expect("write mascot");
-
-        let data =
-            WelcomeDashboardData::load(root.path(), DeepSeekModel::Flash, ThinkingMode::Auto);
-
-        assert_eq!(
-            data.mascot_lines,
-            Some(vec!["  ██".to_string(), " ████".to_string()])
-        );
-    }
-
-    #[test]
     fn wide_render_contains_quiet_welcome_sections() {
         let data = test_data(Vec::new(), true);
         let mut terminal = Terminal::new(TestBackend::new(120, 28)).expect("create test terminal");
@@ -896,6 +886,20 @@ mod tests {
     }
 
     #[test]
+    fn medium_render_stacks_without_losing_welcome_actions() {
+        let data = test_data(Vec::new(), true);
+        let mut terminal = Terminal::new(TestBackend::new(90, 24)).expect("create test terminal");
+        terminal
+            .draw(|f| render_welcome(f, f.area(), &data))
+            .expect("draw welcome");
+        let rendered = buffer_text(terminal.backend());
+        assert!(rendered.contains("DeepSeek Code"));
+        assert!(rendered.contains("What are we changing today?"));
+        assert!(rendered.contains("workspace"));
+        assert!(rendered.contains("starters"));
+    }
+
+    #[test]
     fn missing_api_key_render_shows_setup_instead_of_starters() {
         let data = test_data(Vec::new(), false);
         let mut terminal = Terminal::new(TestBackend::new(120, 28)).expect("create test terminal");
@@ -903,10 +907,11 @@ mod tests {
             .draw(|f| render_welcome(f, f.area(), &data))
             .expect("draw welcome");
         let rendered = buffer_text(terminal.backend());
+        assert!(rendered.contains("DeepSeek Code"));
         assert!(rendered.contains("Connect DeepSeek first"));
-        assert!(rendered.contains("Paste API key"));
+        assert!(rendered.contains("Paste your API key"));
         assert!(rendered.contains("enter"));
-        assert!(!rendered.contains("What are we changing today?"));
+        assert!(!rendered.contains("Type below, or press 1-3"));
     }
 
     #[test]

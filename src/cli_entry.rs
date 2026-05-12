@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{io::IsTerminal, path::PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -118,6 +118,12 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
+    /// Manage local planned tasks
+    Task {
+        #[command(subcommand)]
+        command: TaskCommands,
+    },
+
     /// Start the interactive TUI
     Tui {
         /// Enable thinking mode
@@ -174,12 +180,42 @@ enum PreviewScenario {
 enum PreviewTheme {
     Light,
     Dark,
+    HighContrast,
+}
+
+#[derive(Subcommand)]
+enum TaskCommands {
+    /// List local planned tasks
+    List,
+    /// Add a local planned task
+    Add {
+        /// Task kind: heartbeat or standalone
+        kind: String,
+        /// Prompt to run
+        prompt: String,
+    },
+    /// Pause a task
+    Pause { id: String },
+    /// Resume a paused task
+    Resume { id: String },
+    /// Run a task now
+    Run { id: String },
+    /// Show task logs and metadata
+    Logs { id: String },
+    /// Remove a task
+    Rm { id: String },
 }
 
 pub async fn run() -> Result<(), anyhow::Error> {
-    init_tracing();
-
     let cli = Cli::parse();
+    let launch_bare_tui =
+        cli.command.is_none() && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    init_tracing(
+        matches!(
+            cli.command,
+            Some(Commands::Tui { .. } | Commands::PreviewTui { .. })
+        ) || launch_bare_tui,
+    );
 
     match cli.command {
         Some(Commands::Doctor) => cli::doctor(cli.project_root).await,
@@ -227,6 +263,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
             let theme = match theme {
                 PreviewTheme::Light => tui::theme::ThemeMode::Light,
                 PreviewTheme::Dark => tui::theme::ThemeMode::Dark,
+                PreviewTheme::HighContrast => tui::theme::ThemeMode::HighContrast,
             };
             let snapshot = tui::app::render_preview_snapshot(
                 root,
@@ -245,15 +282,32 @@ pub async fn run() -> Result<(), anyhow::Error> {
             max_turns,
             output,
         }) => cli::review(cli.project_root, parallel, max_turns, output).await,
+        Some(Commands::Task { command }) => {
+            let command = match command {
+                TaskCommands::List => cli::task::TaskCommand::List,
+                TaskCommands::Add { kind, prompt } => cli::task::TaskCommand::Add {
+                    kind: kind.parse().map_err(anyhow::Error::msg)?,
+                    prompt,
+                },
+                TaskCommands::Pause { id } => cli::task::TaskCommand::Pause { id },
+                TaskCommands::Resume { id } => cli::task::TaskCommand::Resume { id },
+                TaskCommands::Run { id } => cli::task::TaskCommand::Run { id },
+                TaskCommands::Logs { id } => cli::task::TaskCommand::Logs { id },
+                TaskCommands::Rm { id } => cli::task::TaskCommand::Remove { id },
+            };
+            cli::task(command, cli.project_root).await
+        }
+        None if launch_bare_tui => tui::run_tui(cli.project_root, false, None, None).await,
         None => cli::welcome(cli.project_root, false, None, None).await,
     }
 }
 
-fn init_tracing() {
+fn init_tracing(quiet_terminal: bool) {
+    let default_filter = if quiet_terminal { "error" } else { "info" };
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter)),
         )
         .with_target(false)
         .try_init();

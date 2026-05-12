@@ -9,6 +9,7 @@ pub mod resume;
 pub mod review;
 pub mod run;
 pub mod search;
+pub mod task;
 pub mod welcome;
 
 pub use ask::ask;
@@ -21,4 +22,5 @@ pub use resume::{export, resume};
 pub use review::review;
 pub use run::run;
 pub use search::search;
+pub use task::task;
 pub use welcome::welcome;

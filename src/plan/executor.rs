@@ -17,7 +17,24 @@ impl PlanStep {
     /// Human-readable one-line description for UI display.
     #[must_use]
     pub fn display(&self) -> String {
+        self.display_with_language(false)
+    }
+
+    /// Human-readable one-line description localized for UI display.
+    #[must_use]
+    pub fn display_with_language(&self, use_chinese: bool) -> String {
         match self {
+            Self::ReadFile { path, reason } if use_chinese => format!("读取 `{path}` - {reason}"),
+            Self::SearchCode { pattern, reason } if use_chinese => {
+                format!("搜索 `{pattern}` - {reason}")
+            }
+            Self::EditFile { path, description } if use_chinese => {
+                format!("修改 `{path}` - {description}")
+            }
+            Self::RunCommand { command, reason } if use_chinese => {
+                format!("运行 `{command}` - {reason}")
+            }
+            Self::Verify { description } if use_chinese => format!("验证 - {description}"),
             Self::ReadFile { path, reason } => format!("Read `{path}` — {reason}"),
             Self::SearchCode { pattern, reason } => format!("Search `{pattern}` — {reason}"),
             Self::EditFile { path, description } => format!("Edit `{path}` — {description}"),
@@ -85,6 +102,11 @@ fn classify_step(step: &str, target_files: &[super::schema::TargetFile]) -> Plan
             "ensure",
             "validate",
             "test that",
+            "验证",
+            "检查",
+            "确认",
+            "确保",
+            "测试",
         ],
     ) {
         return PlanStep::Verify {
@@ -96,7 +118,8 @@ fn classify_step(step: &str, target_files: &[super::schema::TargetFile]) -> Plan
     if starts_with_any(
         &lower,
         &[
-            "search", "find", "look", "explore", "grep", "scan", "locate",
+            "search", "find", "look", "explore", "grep", "scan", "locate", "搜索", "查找", "查看",
+            "扫描", "定位", "阅读",
         ],
     ) {
         return PlanStep::SearchCode {
@@ -112,7 +135,14 @@ fn classify_step(step: &str, target_files: &[super::schema::TargetFile]) -> Plan
         || lower.contains("write")
         || lower.contains("refactor")
         || lower.contains("rename")
-        || lower.contains("delete");
+        || lower.contains("delete")
+        || lower.contains("修改")
+        || lower.contains("更新")
+        || lower.contains("实现")
+        || lower.contains("写入")
+        || lower.contains("重构")
+        || lower.contains("删除")
+        || lower.contains("新增");
     if has_write_verb {
         if let Some(path) = find_file_in_step(step, target_files) {
             return PlanStep::EditFile {
@@ -140,7 +170,12 @@ fn has_backtick_command(lower: &str) -> bool {
 }
 
 fn starts_with_run_verb(lower: &str) -> bool {
-    starts_with_any(lower, &["run ", "execute ", "build ", "compile "])
+    starts_with_any(
+        lower,
+        &[
+            "run ", "execute ", "build ", "compile ", "运行", "执行", "构建", "编译",
+        ],
+    )
 }
 
 fn starts_with_any(text: &str, prefixes: &[&str]) -> bool {
@@ -168,6 +203,10 @@ fn extract_command(step: &str) -> String {
         {
             return part.trim().to_string();
         }
+    }
+    let backticked = step.split('`').collect::<Vec<_>>();
+    if backticked.len() >= 3 {
+        return backticked[1].trim().to_string();
     }
     step.to_string()
 }
@@ -239,5 +278,37 @@ mod tests {
             "run the test suite to confirm no regressions",
         ));
         assert!(matches!(steps[1], PlanStep::RunCommand { .. }));
+    }
+
+    #[test]
+    fn chinese_prefixes_are_classified() {
+        let steps = plan_to_steps(&plan_with_step("运行 `echo hello` 确认 CLI 可用"));
+        assert!(matches!(
+            &steps[1],
+            PlanStep::RunCommand { command, .. } if command == "echo hello"
+        ));
+
+        let steps = plan_to_steps(&plan_with_step("验证输出没有错误"));
+        assert!(matches!(&steps[1], PlanStep::Verify { .. }));
+
+        let steps = plan_to_steps(&plan_with_step("搜索 CLI 入口文件"));
+        assert!(matches!(&steps[1], PlanStep::SearchCode { .. }));
+    }
+
+    #[test]
+    fn display_can_follow_chinese_ui_language() {
+        let step = PlanStep::RunCommand {
+            command: "cargo test".to_string(),
+            reason: "确认没有回归".to_string(),
+        };
+
+        assert_eq!(
+            step.display_with_language(true),
+            "运行 `cargo test` - 确认没有回归"
+        );
+        assert_eq!(
+            step.display_with_language(false),
+            "Run `cargo test` — 确认没有回归"
+        );
     }
 }

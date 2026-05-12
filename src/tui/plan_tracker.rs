@@ -6,6 +6,8 @@ use ratatui::{
     Frame,
 };
 
+use crate::agent::orchestrator::DecisionKind;
+
 use super::theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,9 +118,9 @@ fn duration_label(step: &PlanStepItem) -> String {
 fn status_icon(status: PlanStepStatus) -> &'static str {
     match status {
         PlanStepStatus::Pending => "○",
-        PlanStepStatus::Running => "◈",
-        PlanStepStatus::Done => "◆",
-        PlanStepStatus::Failed => "✗",
+        PlanStepStatus::Running => "●",
+        PlanStepStatus::Done => "●",
+        PlanStepStatus::Failed => "●",
     }
 }
 
@@ -126,7 +128,7 @@ fn status_color(status: PlanStepStatus) -> Color {
     let p = theme::palette();
     match status {
         PlanStepStatus::Pending => p.muted,
-        PlanStepStatus::Running => p.accent,
+        PlanStepStatus::Running => p.success,
         PlanStepStatus::Done => p.success,
         PlanStepStatus::Failed => p.danger,
     }
@@ -260,6 +262,7 @@ pub fn render_plan_tracker_with_warnings(
 pub fn render_options_panel(
     f: &mut Frame,
     area: Rect,
+    kind: DecisionKind,
     title: &str,
     options: &[String],
     selected_index: usize,
@@ -272,40 +275,51 @@ pub fn render_options_panel(
     let selected_bg = match theme::active_theme() {
         theme::ThemeMode::Light => Color::Rgb(58, 56, 48),
         theme::ThemeMode::Dark => p.surface_alt,
+        theme::ThemeMode::HighContrast => p.surface_alt,
     };
     let mut lines = Vec::new();
     let use_chinese = option_panel_uses_chinese(title, options);
     let prompt = questionnaire_prompt(title);
     let topic = questionnaire_topic(title, use_chinese);
+    let labels = decision_labels(kind, use_chinese);
 
     lines.push(Line::from(vec![
         Span::styled(
-            if use_chinese {
-                "询问用户"
-            } else {
-                "Ask User"
-            },
+            labels.header,
             Style::default()
-                .fg(p.accent)
+                .fg(labels.color(&p))
                 .bg(p.canvas)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" questionnaire: ", Style::default().fg(p.text).bg(p.canvas)),
+        Span::styled(labels.prefix, Style::default().fg(p.text).bg(p.canvas)),
         Span::styled(
-            format!("\"1. [question]\" {prompt}"),
+            match kind {
+                DecisionKind::PlanAction => prompt,
+                DecisionKind::Clarification if use_chinese => format!("\"1. [问题]\" {prompt}"),
+                DecisionKind::Clarification => format!("\"1. [question]\" {prompt}"),
+                DecisionKind::Conflict if use_chinese => format!("[处理] {prompt}"),
+                DecisionKind::Conflict => format!("[resolve] {prompt}"),
+            },
             Style::default().fg(p.dim).bg(p.canvas),
         ),
     ]));
     lines.push(Line::from(vec![
         Span::styled("          ", Style::default().bg(p.canvas)),
         Span::styled(
-            format!("[topic] {topic}"),
+            if use_chinese {
+                format!("[主题] {topic}")
+            } else {
+                format!("[topic] {topic}")
+            },
             Style::default().fg(p.secondary).bg(p.canvas),
         ),
     ]));
     lines.push(Line::from(vec![
         Span::styled("          ", Style::default().bg(p.canvas)),
-        Span::styled("[optio...", Style::default().fg(p.muted).bg(p.canvas)),
+        Span::styled(
+            labels.options_hint,
+            Style::default().fg(p.muted).bg(p.canvas),
+        ),
     ]));
 
     for (i, option) in options.iter().enumerate() {
@@ -318,7 +332,10 @@ pub fn render_options_panel(
         let row_width = area.width.saturating_sub(4) as usize;
         let desc = truncate(option, row_width.saturating_sub(10));
         let marker = if selected { "▶" } else { " " };
-        let row_text = pad_to_width(&format!(" {marker} {key}. [Q] {desc}"), row_width);
+        let row_text = pad_to_width(
+            &format!(" {marker} {key}. [{}] {desc}", labels.row_tag),
+            row_width,
+        );
         let row_style = if selected {
             Style::default()
                 .fg(p.inverse_text)
@@ -353,23 +370,9 @@ pub fn render_options_panel(
                 .bg(p.canvas)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            if use_chinese {
-                " 发送所选   "
-            } else {
-                " send selected   "
-            },
-            Style::default().fg(p.dim).bg(p.canvas),
-        ),
+        Span::styled(labels.enter_hint, Style::default().fg(p.dim).bg(p.canvas)),
         Span::styled("Esc", Style::default().fg(p.muted).bg(p.canvas)),
-        Span::styled(
-            if use_chinese {
-                " 取消   "
-            } else {
-                " dismiss   "
-            },
-            Style::default().fg(p.dim).bg(p.canvas),
-        ),
+        Span::styled(labels.cancel_hint, Style::default().fg(p.dim).bg(p.canvas)),
         Span::styled("1-9", Style::default().fg(p.muted).bg(p.canvas)),
         Span::styled(
             if use_chinese {
@@ -386,6 +389,91 @@ pub fn render_options_panel(
         .wrap(Wrap { trim: false });
 
     f.render_widget(paragraph, area);
+}
+
+struct DecisionLabels {
+    header: &'static str,
+    prefix: &'static str,
+    options_hint: &'static str,
+    row_tag: &'static str,
+    enter_hint: &'static str,
+    cancel_hint: &'static str,
+    severity: DecisionSeverity,
+}
+
+enum DecisionSeverity {
+    Accent,
+    Warning,
+    Danger,
+}
+
+impl DecisionLabels {
+    fn color(&self, p: &theme::ThemePalette) -> Color {
+        match self.severity {
+            DecisionSeverity::Accent => p.accent,
+            DecisionSeverity::Warning => p.warning,
+            DecisionSeverity::Danger => p.danger,
+        }
+    }
+}
+
+fn decision_labels(kind: DecisionKind, use_chinese: bool) -> DecisionLabels {
+    match (kind, use_chinese) {
+        (DecisionKind::PlanAction, true) => DecisionLabels {
+            header: "计划操作",
+            prefix: " 动作: ",
+            options_hint: "[执行选项...]",
+            row_tag: "执行",
+            enter_hint: " 执行所选   ",
+            cancel_hint: " 取消计划   ",
+            severity: DecisionSeverity::Accent,
+        },
+        (DecisionKind::PlanAction, false) => DecisionLabels {
+            header: "Plan Action",
+            prefix: " action: ",
+            options_hint: "[actions...]",
+            row_tag: "act",
+            enter_hint: " run selected   ",
+            cancel_hint: " cancel plan   ",
+            severity: DecisionSeverity::Accent,
+        },
+        (DecisionKind::Clarification, true) => DecisionLabels {
+            header: "需要补充",
+            prefix: " 问题: ",
+            options_hint: "[选项...]",
+            row_tag: "选",
+            enter_hint: " 发送所选   ",
+            cancel_hint: " 取消   ",
+            severity: DecisionSeverity::Warning,
+        },
+        (DecisionKind::Clarification, false) => DecisionLabels {
+            header: "Need Input",
+            prefix: " question: ",
+            options_hint: "[options...]",
+            row_tag: "Q",
+            enter_hint: " send selected   ",
+            cancel_hint: " dismiss   ",
+            severity: DecisionSeverity::Warning,
+        },
+        (DecisionKind::Conflict, true) => DecisionLabels {
+            header: "需要处理",
+            prefix: " 阻断: ",
+            options_hint: "[处理选项...]",
+            row_tag: "处理",
+            enter_hint: " 处理所选   ",
+            cancel_hint: " 暂停   ",
+            severity: DecisionSeverity::Danger,
+        },
+        (DecisionKind::Conflict, false) => DecisionLabels {
+            header: "Action Needed",
+            prefix: " blocked: ",
+            options_hint: "[resolutions...]",
+            row_tag: "fix",
+            enter_hint: " resolve selected   ",
+            cancel_hint: " pause   ",
+            severity: DecisionSeverity::Danger,
+        },
+    }
 }
 
 fn questionnaire_prompt(title: &str) -> String {
@@ -445,6 +533,7 @@ pub fn render_slash_command_panel(
     let selected_bg = match theme::active_theme() {
         theme::ThemeMode::Light => Color::Rgb(58, 56, 48),
         theme::ThemeMode::Dark => p.surface_alt,
+        theme::ThemeMode::HighContrast => p.surface_alt,
     };
     let mut lines = vec![Line::from(vec![
         Span::styled(
@@ -543,7 +632,9 @@ fn progress_bar(steps: &[PlanStepItem], total_steps: usize, width: usize) -> Str
 }
 
 fn step_kind(description: &str) -> &'static str {
-    if description.starts_with("Read `") {
+    if description.starts_with("agent ") {
+        "agent"
+    } else if description.starts_with("Read `") {
         "read"
     } else if description.starts_with("Search `") {
         "search"
@@ -581,6 +672,7 @@ mod tests {
         assert_eq!(step_kind("Edit `src/main.rs` — fix"), "edit");
         assert_eq!(step_kind("Run `cargo test` — verify"), "run");
         assert_eq!(step_kind("Verify — run checks"), "verify");
+        assert_eq!(step_kind("agent reviewer · 审查关键风险"), "agent");
         assert_eq!(step_kind("Discuss next step"), "task");
     }
 
@@ -619,6 +711,7 @@ mod tests {
                 render_options_panel(
                     f,
                     f.area(),
+                    DecisionKind::Clarification,
                     "Tell me more:",
                     &[
                         "Use Python subprocess".to_string(),
@@ -637,12 +730,79 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect();
-        assert!(rendered.contains("Ask User"));
-        assert!(rendered.contains("questionnaire"));
+        assert!(rendered.contains("Need Input"));
+        assert!(rendered.contains("question:"));
         assert!(rendered.contains("[topic] decision"));
         assert!(rendered.contains("▶ 2"));
         assert!(rendered.contains("Enter"));
         assert!(rendered.contains("send selected"));
+    }
+
+    #[test]
+    fn options_panel_uses_chinese_when_title_is_chinese() {
+        theme::set_active_theme(theme::ThemeMode::Light);
+        let mut terminal = Terminal::new(TestBackend::new(80, 8)).expect("terminal");
+        terminal
+            .draw(|f| {
+                render_options_panel(
+                    f,
+                    f.area(),
+                    DecisionKind::PlanAction,
+                    "计划执行：测试 CLI",
+                    &[
+                        "自动执行（包含命令）".to_string(),
+                        "需要确认后执行".to_string(),
+                        "取消".to_string(),
+                    ],
+                    0,
+                );
+            })
+            .expect("draw");
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        let compact = rendered.replace(' ', "");
+        assert!(compact.contains("计划操作"));
+        assert!(compact.contains("动作"));
+        assert!(compact.contains("[主题]计划执行"));
+        assert!(compact.contains("[执行]自动执行"));
+        assert!(!rendered.contains("Ask User"));
+        assert!(!rendered.contains("questionnaire"));
+    }
+
+    #[test]
+    fn clarification_panel_is_the_only_question_style_decision() {
+        theme::set_active_theme(theme::ThemeMode::Light);
+        let mut terminal = Terminal::new(TestBackend::new(80, 8)).expect("terminal");
+        terminal
+            .draw(|f| {
+                render_options_panel(
+                    f,
+                    f.area(),
+                    DecisionKind::Clarification,
+                    "需要更多信息：选择测试范围",
+                    &["只跑单元测试".to_string(), "跑全部测试".to_string()],
+                    0,
+                );
+            })
+            .expect("draw");
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        let compact = rendered.replace(' ', "");
+        assert!(compact.contains("需要补充"));
+        assert!(compact.contains("问题"));
+        assert!(compact.contains("[选]只跑单元测试"));
     }
 
     #[test]

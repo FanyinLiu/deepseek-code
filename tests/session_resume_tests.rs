@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use chrono::Utc;
 
 use deepseek_code::deepseek::*;
-use deepseek_code::storage::SessionStore;
+use deepseek_code::storage::{EventLogStore, SessionEvent, SessionEventKind, SessionStore};
 
 fn make_test_session(name: &str, project_root: &std::path::Path) -> Session {
     let turn_id = TurnId::new_v4();
@@ -181,4 +181,48 @@ fn test_empty_session_list() {
         .list(PathBuf::from("/nonexistent").as_path())
         .expect("list nonexistent");
     assert!(summaries.is_empty());
+}
+
+#[test]
+fn test_event_log_marks_unfinished_session_without_replaying_commands() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let project_root = tmp.path().join("project");
+    std::fs::create_dir_all(&project_root).expect("create project root");
+    let session = make_test_session("unfinished", &project_root);
+    let event_store = EventLogStore::new(tmp.path().to_path_buf());
+    let turn_id = TurnId::new_v4();
+
+    event_store
+        .append(
+            &project_root,
+            &SessionEvent::new(
+                session.id,
+                Some(turn_id),
+                SessionEventKind::UserMessage {
+                    content: "run tests".into(),
+                },
+            ),
+        )
+        .expect("append user event");
+    event_store
+        .append(
+            &project_root,
+            &SessionEvent::new(
+                session.id,
+                Some(turn_id),
+                SessionEventKind::ToolCallStarted {
+                    tool_call_id: "call-1".into(),
+                    name: "run_command".into(),
+                    arguments: r#"{"command":"cargo test"}"#.into(),
+                },
+            ),
+        )
+        .expect("append tool event");
+
+    assert_eq!(
+        event_store
+            .unfinished_turn(&project_root, &session.id)
+            .expect("unfinished turn"),
+        Some(turn_id)
+    );
 }

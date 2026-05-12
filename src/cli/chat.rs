@@ -215,10 +215,30 @@ pub async fn chat(
                         eprintln!("⚠ {w}");
                     }
                 }
+                AgentEvent::SwarmStarted { summary, total, .. } => {
+                    println!("\n[Swarm] {summary} ({total} agents)");
+                }
+                AgentEvent::SwarmTaskUpdated {
+                    role,
+                    status,
+                    description,
+                    ..
+                } => {
+                    println!("\n[Swarm {role}] {status}: {description}");
+                }
+                AgentEvent::SwarmFinished {
+                    success, summary, ..
+                } => {
+                    println!(
+                        "\n[Swarm complete: {}] {summary}",
+                        if success { "ok" } else { "error" }
+                    );
+                }
                 AgentEvent::FileDiff { path, stats, .. } => {
                     println!("\n[Diff: {path}] {stats}");
                 }
                 AgentEvent::OptionsNeeded {
+                    kind: _,
                     title,
                     options,
                     respond,
@@ -448,10 +468,30 @@ pub async fn chat(
                             eprintln!("⚠ {w}");
                         }
                     }
+                    AgentEvent::SwarmStarted { summary, total, .. } => {
+                        println!("\n[Swarm] {summary} ({total} agents)");
+                    }
+                    AgentEvent::SwarmTaskUpdated {
+                        role,
+                        status,
+                        description,
+                        ..
+                    } => {
+                        println!("\n[Swarm {role}] {status}: {description}");
+                    }
+                    AgentEvent::SwarmFinished {
+                        success, summary, ..
+                    } => {
+                        println!(
+                            "\n[Swarm complete: {}] {summary}",
+                            if success { "ok" } else { "error" }
+                        );
+                    }
                     AgentEvent::FileDiff { path, stats, .. } => {
                         println!("\n[Diff: {path}] {stats}");
                     }
                     AgentEvent::OptionsNeeded {
+                        kind: _,
                         title,
                         options,
                         respond,
