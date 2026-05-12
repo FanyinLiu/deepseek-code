@@ -35,6 +35,19 @@ const CTRL_C_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_sec
 const PAGE_SCROLL_LINES: usize = 20;
 const MOUSE_SCROLL_LINES: usize = 5;
 
+fn animated_token_count(target: u64, elapsed_ms: u64) -> u64 {
+    if target == 0 {
+        return 0;
+    }
+    let duration_ms = target.clamp(1_200, 12_000);
+    if elapsed_ms >= duration_ms {
+        return target;
+    }
+    let frame_ms = elapsed_ms.saturating_add(80);
+    let shown = target.saturating_mul(frame_ms).saturating_div(duration_ms);
+    shown.clamp(1, target)
+}
+
 use crate::agent::orchestrator::{AgentEvent, DecisionKind, Orchestrator};
 use crate::deepseek::{
     CacheUsage, DeepSeekModel, MessageContent, MessageVisibility, ProtocolMessage, ReasoningState,
@@ -2261,15 +2274,31 @@ impl TuiApp {
     }
 
     fn activity_input_tokens(&self) -> u64 {
-        self.current_turn_input_tokens
+        self.animated_input_tokens()
     }
 
     fn visible_input_tokens(&self) -> u64 {
-        if self.is_streaming || self.current_turn_usage_finalized {
+        if self.current_turn_usage_finalized {
             self.current_turn_input_tokens
+        } else if self.is_streaming {
+            self.animated_input_tokens()
         } else {
             0
         }
+    }
+
+    fn animated_input_tokens(&self) -> u64 {
+        let target = self.current_turn_input_tokens;
+        if target == 0 {
+            return 0;
+        }
+        if !self.is_streaming || self.current_turn_usage_finalized {
+            return target;
+        }
+        let elapsed_ms = self
+            .stream_start
+            .map_or(0, |started| started.elapsed().as_millis() as u64);
+        animated_token_count(target, elapsed_ms)
     }
 
     fn live_agent_tokens(&self) -> u64 {
@@ -4079,6 +4108,12 @@ mod tests {
         });
 
         assert_eq!(app.current_turn_input_tokens, 240);
+        assert!(app.activity_input_tokens() > 0);
+        assert!(app.activity_input_tokens() < 240);
+        assert!(app.visible_input_tokens() > 0);
+        assert!(app.visible_input_tokens() < 240);
+
+        app.stream_start = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
         assert_eq!(app.activity_input_tokens(), 240);
         assert_eq!(app.visible_input_tokens(), 240);
 
@@ -4101,6 +4136,14 @@ mod tests {
         assert_eq!(app.visible_input_tokens(), 240);
         assert_eq!(app.total_tokens, 5_123);
         assert!(app.total_cost > 0.0);
+    }
+
+    #[test]
+    fn input_token_activity_counts_up_before_output_arrives() {
+        assert_eq!(animated_token_count(0, 0), 0);
+        assert_eq!(animated_token_count(7_200, 0), 80);
+        assert!(animated_token_count(7_200, 2_000) < 7_200);
+        assert_eq!(animated_token_count(7_200, 8_000), 7_200);
     }
 
     #[test]
