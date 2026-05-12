@@ -9,13 +9,31 @@ use ratatui::{
 use crate::policy::{ApprovalDisplay, RiskLevel};
 use crate::tui::theme;
 
-/// Render a Droid-style approval popup: top/bottom dividers, flat rows, accent action keys.
+/// Render a Droid-style approval sheet anchored above the input area.
 pub fn render_approval_popup(f: &mut Frame, area: Rect, approval: &ApprovalDisplay) {
     let p = theme::palette();
     let use_chinese = approval_uses_chinese(approval);
+
+    // Collect owned pairs so temporaries outlive the lines vec.
+    let detail_pairs: Vec<(String, String)> = approval
+        .details
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|line| {
+            let t = line.trim();
+            t.split_once(':').map(|(label, value)| {
+                (
+                    format!(" {}", label.trim().to_ascii_lowercase()),
+                    value.trim().to_string(),
+                )
+            })
+        })
+        .collect();
+
     let popup_width = std::cmp::min(80, area.width.saturating_sub(4));
-    let popup_height = std::cmp::min(14, area.height.saturating_sub(4));
-    let popup_area = centered_rect(area, popup_width, popup_height);
+    let requested_height = (6 + detail_pairs.len() as u16).clamp(8, 14);
+    let popup_height = std::cmp::min(requested_height, area.height.saturating_sub(4));
+    let popup_area = bottom_sheet_rect(area, popup_width, popup_height);
 
     f.render_widget(Clear, popup_area);
 
@@ -61,22 +79,6 @@ pub fn render_approval_popup(f: &mut Frame, area: Rect, approval: &ApprovalDispl
     ]));
 
     // ── Detail rows ──
-    // Collect owned pairs so temporaries outlive the lines vec.
-    let detail_pairs: Vec<(String, String)> = approval
-        .details
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|line| {
-            let t = line.trim();
-            t.split_once(':').map(|(label, value)| {
-                (
-                    format!(" {}", label.trim().to_ascii_lowercase()),
-                    value.trim().to_string(),
-                )
-            })
-        })
-        .collect();
-
     lines.push(kv(
         if use_chinese { " 工具" } else { " tool" },
         &approval.title,
@@ -196,9 +198,17 @@ fn kv<'a>(
     ])
 }
 
-fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+fn bottom_sheet_rect(area: Rect, width: u16, height: u16) -> Rect {
     let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let bottom_margin = if area.height > height.saturating_add(4) {
+        4
+    } else {
+        0
+    };
+    let y = area.y
+        + area
+            .height
+            .saturating_sub(height.saturating_add(bottom_margin));
     Rect::new(x, y, width, height)
 }
 
@@ -261,5 +271,12 @@ mod tests {
         assert!(compact_text.contains("拒绝"));
         assert!(!text.contains("approve once"));
         assert!(!text.contains("approve session"));
+    }
+
+    #[test]
+    fn approval_dialog_is_bottom_anchored() {
+        let rect = bottom_sheet_rect(Rect::new(0, 0, 100, 30), 80, 9);
+        assert_eq!(rect.x, 10);
+        assert_eq!(rect.y, 17);
     }
 }
