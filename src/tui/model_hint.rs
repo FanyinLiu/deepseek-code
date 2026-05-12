@@ -210,9 +210,8 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect();
-        assert!(
-            rendered.contains("⠴ Fix input colors... (2s · ↑ 41 tokens · ↓ 578 tokens · thinking")
-        );
+        assert!(rendered.contains("⠴ Fix input colors... (2s · ↓ 578 tokens · thinking"));
+        assert!(!rendered.contains("↑ 41 tokens"));
         assert!(rendered.contains("DeepSeek V4 Flash (on)"));
     }
 }

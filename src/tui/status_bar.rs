@@ -73,17 +73,16 @@ pub(crate) fn activity_hint_text(activity: &StatusActivity<'_>, thinking: &Think
 }
 
 fn activity_token_label(input_tokens: u64, output_tokens: u64, agent_tokens: u64) -> String {
-    let mut parts = Vec::new();
-    if input_tokens > 0 {
-        parts.push(format!("↑ {}", token_count_label(input_tokens)));
-    }
     if output_tokens > 0 {
-        parts.push(format!("↓ {}", token_count_label(output_tokens)));
+        return format!("↓ {}", token_count_label(output_tokens));
+    }
+    if input_tokens > 0 {
+        return format!("↑ {}", token_count_label(input_tokens));
     }
     if agent_tokens > 0 {
-        parts.push(format!("agent {}", token_count_label(agent_tokens)));
+        return format!("agent {}", token_count_label(agent_tokens));
     }
-    parts.join(" · ")
+    String::new()
 }
 
 fn token_count_label(tokens: u64) -> String {
@@ -184,7 +183,7 @@ mod tests {
 
         assert_eq!(
             hint,
-            "⠴ Fix input colors... (6s · ↑ 42 tokens · ↓ 578 tokens · thinking with auto effort)"
+            "⠴ Fix input colors... (6s · ↓ 578 tokens · thinking with auto effort)"
         );
     }
 
@@ -204,8 +203,27 @@ mod tests {
 
         assert_eq!(
             hint,
-            "⠴ 修复输入颜色... (6s · ↑ 42 tokens · ↓ 578 tokens · thinking with auto effort)"
+            "⠴ 修复输入颜色... (6s · ↓ 578 tokens · thinking with auto effort)"
         );
+    }
+
+    #[test]
+    fn activity_hint_uses_one_directional_token_slot() {
+        let hint = activity_hint_text(
+            &StatusActivity {
+                title: "优化多智能体",
+                elapsed_ms: 16_000,
+                input_tokens: 7_200,
+                tokens: 572,
+                agent_tokens: 0,
+                thought_seconds: 0,
+            },
+            &ThinkingMode::Auto,
+        );
+
+        assert!(hint.contains("↓ 572 tokens"));
+        assert!(!hint.contains("↑ 7.2k tokens"));
+        assert!(!hint.contains("· ↑"));
     }
 
     #[test]
