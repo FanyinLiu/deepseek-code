@@ -34,6 +34,9 @@ use super::tool_loop::ToolLoop;
 pub enum AgentEvent {
     ContentDelta(String),
     ReasoningDelta(String),
+    TokenDelta {
+        output_tokens: u64,
+    },
     ToolApprovalNeeded {
         tool_name: String,
         display: policy::ApprovalDisplay,
@@ -2430,6 +2433,7 @@ fn emit_stream_chunk_deltas(
 ) -> EmittedStreamDeltas {
     let mut emitted = EmittedStreamDeltas::default();
     for choice in &chunk.choices {
+        let mut hidden_delta = String::new();
         if let Some(content) = &choice.delta.content {
             if !content.is_empty() {
                 send_event(tx, AgentEvent::ContentDelta(content.clone()));
@@ -2442,8 +2446,34 @@ fn emit_stream_chunk_deltas(
                 emitted.reasoning = true;
             }
         }
+        if let Some(tool_calls) = &choice.delta.tool_calls {
+            for tool_call in tool_calls {
+                if let Some(function) = &tool_call.function {
+                    if let Some(name) = &function.name {
+                        hidden_delta.push_str(name);
+                    }
+                    if let Some(arguments) = &function.arguments {
+                        hidden_delta.push_str(arguments);
+                    }
+                }
+            }
+        }
+        let output_tokens = estimate_stream_tokens(&hidden_delta);
+        if output_tokens > 0 {
+            send_event(tx, AgentEvent::TokenDelta { output_tokens });
+        }
     }
     emitted
+}
+
+fn estimate_stream_tokens(value: &str) -> u64 {
+    if value.trim().is_empty() {
+        return 0;
+    }
+    let chars = value.chars().count() as u64;
+    let non_ascii = value.chars().filter(|c| !c.is_ascii()).count() as u64;
+    let ascii = chars.saturating_sub(non_ascii);
+    ascii.div_ceil(4).saturating_add(non_ascii).max(1)
 }
 
 fn changed_files_for_tool_call(tc: &ToolCall) -> Vec<String> {
@@ -2968,7 +2998,7 @@ mod tests {
     #[test]
     fn stream_chunk_deltas_are_emitted_before_final_accumulation() {
         let chunk = serde_json::from_str::<StreamChunk>(
-            r#"{"choices":[{"index":0,"delta":{"reasoning_content":"thinking","content":"hello"},"finish_reason":null}],"usage":null}"#,
+            r#"{"choices":[{"index":0,"delta":{"reasoning_content":"thinking","content":"hello","tool_calls":[{"index":0,"function":{"name":"read_file","arguments":"{\"path\":\"src/main.rs\"}"}}]},"finish_reason":null}],"usage":null}"#,
         )
         .expect("valid stream chunk");
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2984,6 +3014,10 @@ mod tests {
         assert!(matches!(
             rx.try_recv().expect("reasoning delta"),
             AgentEvent::ReasoningDelta(text) if text == "thinking"
+        ));
+        assert!(matches!(
+            rx.try_recv().expect("hidden tool token delta"),
+            AgentEvent::TokenDelta { output_tokens } if output_tokens > 0
         ));
     }
 }

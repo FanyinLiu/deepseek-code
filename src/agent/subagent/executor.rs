@@ -679,6 +679,7 @@ fn emit_subagent_chunk_delta(
     chunk: &StreamChunk,
 ) {
     for choice in &chunk.choices {
+        let mut hidden_delta = String::new();
         if let Some(content) = &choice.delta.content {
             if !content.trim().is_empty() {
                 send_event(
@@ -690,8 +691,37 @@ fn emit_subagent_chunk_delta(
                 );
             }
         }
+        if let Some(reasoning) = &choice.delta.reasoning_content {
+            hidden_delta.push_str(reasoning);
+        }
+        if let Some(tool_calls) = &choice.delta.tool_calls {
+            for tool_call in tool_calls {
+                if let Some(function) = &tool_call.function {
+                    if let Some(name) = &function.name {
+                        hidden_delta.push_str(name);
+                    }
+                    if let Some(arguments) = &function.arguments {
+                        hidden_delta.push_str(arguments);
+                    }
+                }
+            }
+        }
+        let output_tokens = estimate_stream_tokens(&hidden_delta);
+        if output_tokens > 0 {
+            send_event(tx, AgentEvent::TokenDelta { output_tokens });
+        }
         // Reasoning chunks are internal. Subagent cards show progress and results only.
     }
+}
+
+fn estimate_stream_tokens(value: &str) -> u64 {
+    if value.trim().is_empty() {
+        return 0;
+    }
+    let chars = value.chars().count() as u64;
+    let non_ascii = value.chars().filter(|c| !c.is_ascii()).count() as u64;
+    let ascii = chars.saturating_sub(non_ascii);
+    ascii.div_ceil(4).saturating_add(non_ascii).max(1)
 }
 
 fn dedupe_preserving_order(values: Vec<String>) -> Vec<String> {
@@ -731,7 +761,7 @@ mod tests {
     #[test]
     fn subagent_stream_chunks_emit_card_updates() {
         let chunk = serde_json::from_str::<StreamChunk>(
-            r#"{"choices":[{"index":0,"delta":{"content":"working"},"finish_reason":null}],"usage":null}"#,
+            r#"{"choices":[{"index":0,"delta":{"content":"working","reasoning_content":"hidden","tool_calls":[{"index":0,"function":{"name":"read_file","arguments":"{\"path\":\"src/lib.rs\"}"}}]},"finish_reason":null}],"usage":null}"#,
         )
         .expect("valid stream chunk");
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -742,6 +772,10 @@ mod tests {
             rx.try_recv().expect("subagent delta"),
             AgentEvent::SubagentDelta { agent_id, content }
                 if agent_id == "agent-1" && content == "working"
+        ));
+        assert!(matches!(
+            rx.try_recv().expect("subagent hidden token delta"),
+            AgentEvent::TokenDelta { output_tokens } if output_tokens > 0
         ));
     }
 

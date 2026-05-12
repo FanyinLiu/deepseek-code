@@ -61,6 +61,7 @@ pub async fn run(
         match event {
             AgentEvent::ContentDelta(text) => print!("{text}"),
             AgentEvent::ReasoningDelta(_) => {}
+            AgentEvent::TokenDelta { .. } => {}
             AgentEvent::ToolApprovalNeeded {
                 tool_name,
                 display,

@@ -97,6 +97,7 @@ pub async fn chat(
             match event {
                 AgentEvent::ContentDelta(text) => print!("{text}"),
                 AgentEvent::ReasoningDelta(_) => {}
+                AgentEvent::TokenDelta { .. } => {}
                 AgentEvent::ToolApprovalNeeded {
                     tool_name,
                     display,
@@ -331,6 +332,7 @@ pub async fn chat(
             while let Some(event) = ev_rx.recv().await {
                 match event {
                     AgentEvent::ContentDelta(text) => print!("{text}"),
+                    AgentEvent::TokenDelta { .. } => {}
                     AgentEvent::ComplexityAssessed { assessment } => {
                         println!("\n[Complexity] {}", assessment.display_summary());
                     }

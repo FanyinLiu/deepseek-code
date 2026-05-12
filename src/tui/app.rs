@@ -1579,6 +1579,9 @@ impl TuiApp {
                 self.add_output_token_estimate(&text);
                 self.reasoning_buffer.push_str(&text);
             }
+            AgentEvent::TokenDelta { output_tokens } => {
+                self.add_output_tokens(output_tokens);
+            }
             AgentEvent::ToolApprovalNeeded {
                 tool_name,
                 display,
@@ -2145,7 +2148,7 @@ impl TuiApp {
                     .stream_start
                     .map_or(0, |started| started.elapsed().as_millis() as u64),
                 input_tokens: self.activity_input_tokens(),
-                tokens: self.activity_output_tokens(),
+                tokens: self.current_turn_output_tokens,
                 agent_tokens: self.live_agent_tokens(),
                 thought_seconds: self.stream_start.map_or(0, |started| {
                     thought_seconds_from_reasoning(
@@ -2227,7 +2230,7 @@ impl TuiApp {
                 status,
                 tokens: self.visible_context_tokens(),
                 input_tokens: self.visible_input_tokens(),
-                output_tokens: self.activity_output_tokens(),
+                output_tokens: self.current_turn_output_tokens,
                 agent_tokens: self.live_agent_tokens(),
                 cost: self.total_cost,
                 cache: self.cache.as_ref(),
@@ -2246,17 +2249,6 @@ impl TuiApp {
         } else {
             0
         }
-    }
-
-    fn activity_output_tokens(&self) -> u64 {
-        if self.current_turn_usage_finalized || !self.is_streaming {
-            return self.current_turn_output_tokens;
-        }
-        let elapsed_estimate = self
-            .stream_start
-            .map(|started| started.elapsed().as_millis() as u64 / 120)
-            .unwrap_or(0);
-        self.current_turn_output_tokens.max(elapsed_estimate)
     }
 
     fn live_agent_tokens(&self) -> u64 {
@@ -4101,16 +4093,6 @@ mod tests {
     }
 
     #[test]
-    fn activity_output_tokens_tick_while_stream_is_waiting() {
-        let mut app = test_app();
-        app.begin_running_turn("开蜂群，审查代码");
-        app.stream_start = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
-
-        assert_eq!(app.current_turn_output_tokens, 0);
-        assert!(app.activity_output_tokens() > 0);
-    }
-
-    #[test]
     fn subagent_usage_does_not_pollute_live_activity_tokens() {
         let mut app = test_app();
         app.begin_running_turn("开蜂群，审查代码");
@@ -4153,6 +4135,18 @@ mod tests {
         let card = app.subagents.iter().find(|card| card.agent_id == "agent-1");
         assert_eq!(card.map(|card| card.token_usage), Some(16_160));
         assert_eq!(app.live_agent_tokens(), 16_160);
+    }
+
+    #[test]
+    fn token_delta_updates_live_output_without_visible_text() {
+        let mut app = test_app();
+        app.begin_running_turn("开蜂群，审查代码");
+
+        app.apply_agent_event(AgentEvent::TokenDelta { output_tokens: 24 });
+
+        assert_eq!(app.current_turn_output_tokens, 24);
+        assert_eq!(app.current_turn_tokens, app.current_turn_input_tokens + 24);
+        assert!(app.stream_buffer.is_empty());
     }
 
     #[test]
