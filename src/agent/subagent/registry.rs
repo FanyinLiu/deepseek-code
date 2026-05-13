@@ -3,6 +3,27 @@ use std::path::Path;
 
 use super::types::{SubagentConfig, SubagentType};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentParseError {
+    pub message: String,
+}
+
+impl AgentParseError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for AgentParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for AgentParseError {}
+
 /// Registry of subagent configurations.
 ///
 /// Built-in agents are always available. Project-specific agents can be
@@ -50,10 +71,13 @@ impl SubagentRegistry {
 
     /// List all available agent names.
     pub fn list(&self) -> Vec<&str> {
-        self.agents
+        let mut names: Vec<&str> = self
+            .agents
             .keys()
             .map(std::string::String::as_str)
-            .collect()
+            .collect();
+        names.sort_unstable();
+        names
     }
 
     /// Resolve a subagent type to its config.
@@ -105,7 +129,7 @@ impl SubagentRegistry {
     // ------------------------------------------------------------------
 
     fn discover_project_agents(&mut self, project_root: &Path) {
-        let agents_dir = project_root.join(".deepseek-code").join("agents");
+        let agents_dir = Self::agents_dir(project_root);
         if !agents_dir.is_dir() {
             return;
         }
@@ -129,9 +153,9 @@ impl SubagentRegistry {
                     }
                 }
             } else if path.extension().and_then(|s| s.to_str()) == Some("md") {
-                // Markdown files with YAML frontmatter
+                // Markdown files with TOML frontmatter
                 if let Ok(content) = std::fs::read_to_string(&path) {
-                    if let Some(config) = Self::parse_markdown_agent(&content) {
+                    if let Ok(config) = Self::parse_markdown_agent(&content) {
                         self.agents.insert(name.to_string(), config);
                     }
                 }
@@ -139,7 +163,19 @@ impl SubagentRegistry {
         }
     }
 
-    /// Parse a markdown agent file with YAML frontmatter.
+    #[must_use]
+    pub fn agents_dir(project_root: &Path) -> std::path::PathBuf {
+        project_root.join(".deepseek-code").join("agents")
+    }
+
+    pub fn load_markdown_agent_file(path: &Path) -> Result<SubagentConfig, AgentParseError> {
+        let content = std::fs::read_to_string(path).map_err(|error| {
+            AgentParseError::new(format!("failed to read {}: {error}", path.display()))
+        })?;
+        Self::parse_markdown_agent(&content)
+    }
+
+    /// Parse a markdown agent file with TOML frontmatter.
     ///
     /// Format:
     /// ```markdown
@@ -153,21 +189,25 @@ impl SubagentRegistry {
     ///
     /// You are a specialized agent for ...
     /// ```
-    fn parse_markdown_agent(content: &str) -> Option<SubagentConfig> {
+    pub fn parse_markdown_agent(content: &str) -> Result<SubagentConfig, AgentParseError> {
         let content = content.trim_start();
         if !content.starts_with("---") {
-            return None;
+            return Err(AgentParseError::new("missing frontmatter block"));
         }
 
-        let end = content[3..].find("---")? + 3;
+        let end = content[3..]
+            .find("---")
+            .ok_or_else(|| AgentParseError::new("unterminated frontmatter block"))?
+            + 3;
         let frontmatter = &content[3..end];
         let body = content[end + 3..].trim();
 
-        let mut config: SubagentConfig = toml::from_str(frontmatter).ok()?;
+        let mut config: SubagentConfig = toml::from_str(frontmatter)
+            .map_err(|error| AgentParseError::new(format!("invalid frontmatter: {error}")))?;
         if !body.is_empty() {
             config.system_prompt = Some(body.to_string());
         }
-        Some(config)
+        Ok(config)
     }
 }
 
@@ -205,7 +245,22 @@ mod tests {
             super::super::types::PermissionMode::ReadOnly
         );
         assert_eq!(config.model, Some(crate::deepseek::DeepSeekModel::Pro));
-        assert!(config.effective_system_prompt().contains("VETO power"));
+        assert_eq!(
+            config.allowed_tools,
+            vec![
+                "read_file".to_string(),
+                "list_dir".to_string(),
+                "search_files".to_string(),
+                "search_code".to_string(),
+                "git_status".to_string(),
+                "git_diff".to_string()
+            ]
+        );
+        let prompt = config.effective_system_prompt();
+        assert!(prompt.contains("VETO"));
+        assert!(prompt.contains(".gitignore"));
+        assert!(prompt.contains("credential leakage"));
+        assert!(prompt.contains("policy bypass"));
     }
 
     #[test]
@@ -246,6 +301,6 @@ You are a security auditor. Focus on finding vulnerabilities.
     #[test]
     fn test_parse_markdown_agent_no_frontmatter() {
         let md = "Just plain markdown without frontmatter.";
-        assert!(SubagentRegistry::parse_markdown_agent(md).is_none());
+        assert!(SubagentRegistry::parse_markdown_agent(md).is_err());
     }
 }

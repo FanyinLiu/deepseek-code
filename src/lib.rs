@@ -8,6 +8,7 @@ pub mod deepseek;
 pub mod defense;
 pub mod lsp;
 pub mod mcp;
+pub mod mission;
 pub mod plan;
 pub mod policy;
 pub mod search;

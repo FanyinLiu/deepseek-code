@@ -118,6 +118,24 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
+    /// Discover available features and recommended operating modes
+    Features {
+        #[command(subcommand)]
+        command: FeaturesCommands,
+    },
+
+    /// Manage built-in and project custom agents
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommands,
+    },
+
+    /// Record and inspect long-running mission dry-runs
+    Mission {
+        #[command(subcommand)]
+        command: MissionCommands,
+    },
+
     /// Manage local planned tasks
     Task {
         #[command(subcommand)]
@@ -206,6 +224,141 @@ enum TaskCommands {
     Rm { id: String },
 }
 
+#[derive(Subcommand)]
+enum FeaturesCommands {
+    /// Show the competitive feature matrix summary
+    Matrix {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show local capability and configuration status
+    Status {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Recommend an operating mode for a task
+    Recommend {
+        /// Task description
+        task: String,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentCommands {
+    /// List built-in and project custom agents
+    List {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one agent's configuration and prompt
+    Show {
+        /// Agent name
+        name: String,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run one named agent on a task
+    Run {
+        /// Agent name
+        name: String,
+        /// Task description
+        task: String,
+        /// Focus path for the agent
+        #[arg(long)]
+        focus: Option<PathBuf>,
+        /// Max tool-call turns
+        #[arg(long)]
+        max_turns: Option<u32>,
+        /// Model override (pro, flash)
+        #[arg(long)]
+        model: Option<String>,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a custom markdown agent from a template
+    Create {
+        /// New agent name
+        name: String,
+        /// Template name
+        #[arg(long)]
+        template: AgentTemplateArg,
+    },
+    /// Validate custom agent files or built-ins
+    Validate {
+        /// Agent name to validate
+        name: Option<String>,
+        /// Validate every built-in and custom agent
+        #[arg(long)]
+        all: bool,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum AgentTemplateArg {
+    Explorer,
+    Reviewer,
+    Auditor,
+    Tester,
+    Planner,
+    Writer,
+}
+
+#[derive(Subcommand)]
+enum MissionCommands {
+    /// Create a new dry-run mission record
+    New {
+        /// Task or mission goal
+        task: String,
+        /// Create a dry-run mission plan
+        #[arg(long)]
+        dry_run: bool,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show mission state
+    Status {
+        /// Mission id, id prefix, or latest
+        target: Option<String>,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect mission, plan, and optionally events
+    Inspect {
+        /// Mission id, id prefix, or latest
+        target: Option<String>,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+        /// Include events
+        #[arg(long)]
+        events: bool,
+    },
+    /// Replay mission events and reconstruct state
+    Replay {
+        /// Mission id, id prefix, or latest
+        target: Option<String>,
+    },
+    /// List local mission records
+    List {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 pub async fn run() -> Result<(), anyhow::Error> {
     let cli = Cli::parse();
     let launch_bare_tui =
@@ -282,6 +435,100 @@ pub async fn run() -> Result<(), anyhow::Error> {
             max_turns,
             output,
         }) => cli::review(cli.project_root, parallel, max_turns, output).await,
+        Some(Commands::Features { command }) => {
+            let command = match command {
+                FeaturesCommands::Matrix { json } => {
+                    cli::features::FeaturesCommand::Matrix { json }
+                }
+                FeaturesCommands::Status { json } => {
+                    cli::features::FeaturesCommand::Status { json }
+                }
+                FeaturesCommands::Recommend { task, json } => {
+                    cli::features::FeaturesCommand::Recommend { task, json }
+                }
+            };
+            cli::features(command, cli.project_root).await
+        }
+        Some(Commands::Agent { command }) => {
+            let command = match command {
+                AgentCommands::List { json } => cli::agent::AgentCommand::List { json },
+                AgentCommands::Show { name, json } => cli::agent::AgentCommand::Show { name, json },
+                AgentCommands::Run {
+                    name,
+                    task,
+                    focus,
+                    max_turns,
+                    model,
+                    json,
+                } => cli::agent::AgentCommand::Run {
+                    name,
+                    task,
+                    focus,
+                    max_turns,
+                    model,
+                    json,
+                },
+                AgentCommands::Create { name, template } => cli::agent::AgentCommand::Create {
+                    name,
+                    template: match template {
+                        AgentTemplateArg::Explorer => cli::agent::AgentTemplate::Explorer,
+                        AgentTemplateArg::Reviewer => cli::agent::AgentTemplate::Reviewer,
+                        AgentTemplateArg::Auditor => cli::agent::AgentTemplate::Auditor,
+                        AgentTemplateArg::Tester => cli::agent::AgentTemplate::Tester,
+                        AgentTemplateArg::Planner => cli::agent::AgentTemplate::Planner,
+                        AgentTemplateArg::Writer => cli::agent::AgentTemplate::Writer,
+                    },
+                },
+                AgentCommands::Validate { name, all, json } => {
+                    if all && name.is_some() {
+                        return Err(anyhow::anyhow!(
+                            "use either an agent name or --all, not both"
+                        ));
+                    }
+                    let target = match name {
+                        Some(name) => cli::agent::AgentValidateTarget::One(name),
+                        None => {
+                            if !all {
+                                return Err(anyhow::anyhow!("provide an agent name or pass --all"));
+                            }
+                            cli::agent::AgentValidateTarget::All
+                        }
+                    };
+                    cli::agent::AgentCommand::Validate { target, json }
+                }
+            };
+            cli::agent(command, cli.project_root).await
+        }
+        Some(Commands::Mission { command }) => {
+            let command = match command {
+                MissionCommands::New {
+                    task,
+                    dry_run,
+                    json,
+                } => cli::mission::MissionCommand::New {
+                    task,
+                    dry_run,
+                    json,
+                },
+                MissionCommands::Status { target, json } => {
+                    cli::mission::MissionCommand::Status { target, json }
+                }
+                MissionCommands::Inspect {
+                    target,
+                    json,
+                    events,
+                } => cli::mission::MissionCommand::Inspect {
+                    target,
+                    json,
+                    events,
+                },
+                MissionCommands::Replay { target } => {
+                    cli::mission::MissionCommand::Replay { target }
+                }
+                MissionCommands::List { json } => cli::mission::MissionCommand::List { json },
+            };
+            cli::mission(command, cli.project_root).await
+        }
         Some(Commands::Task { command }) => {
             let command = match command {
                 TaskCommands::List => cli::task::TaskCommand::List,

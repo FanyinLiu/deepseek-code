@@ -61,6 +61,89 @@ deepseek-code export <session-id>
 `ds` 是面向日常使用的短命令，`dscode` 保留为兼容长别名。如果 PowerShell 提示找不到
 `ds`，请确认 Cargo 的 bin 目录在 PATH 中，通常是 `%USERPROFILE%\.cargo\bin`。
 
+## Feature Discovery
+
+`ds features` 用来查看本地能力、竞争特性矩阵，以及根据任务描述推荐工作模式。
+
+```bash
+ds features status
+ds features matrix
+ds features matrix --json
+ds features recommend "review src/agent/orchestrator.rs"
+```
+
+推荐模式只使用本地规则，不需要网络或 API key。可返回 `direct`、`plan`、
+`agent-run`、`swarm` 或 `mission-dry-run`。
+
+## Agent Commands
+
+`ds agent` 暴露内置 subagent 和项目自定义 agent。
+
+```bash
+ds agent list
+ds agent list --json
+ds agent show code-reviewer
+ds agent show security-auditor
+ds agent run code-explorer "explain src/agent" --focus src/agent
+```
+
+内置 agent 包括 `code-explorer`、`code-reviewer`、`planner`、`test-runner`、
+`architect`、`security-auditor` 和 `general-purpose`。
+
+## Custom Agents
+
+项目自定义 agent 存放在：
+
+```text
+.deepseek-code/agents/<name>.md
+```
+
+可以从模板创建，并在提交前验证：
+
+```bash
+ds agent create my-auditor --template auditor
+ds agent validate --all
+ds agent validate my-auditor --json
+```
+
+模板使用 markdown 文件和 TOML frontmatter，支持 `explorer`、`reviewer`、
+`auditor`、`tester`、`planner`、`writer`。
+
+## Mission Dry-Run Runtime
+
+`ds mission` 是长任务的最小 dry-run 记录系统。它不会执行真实改动，而是生成本地规则计划，
+写入 mission 状态和事件，方便后续检查、恢复和回放。
+
+```bash
+ds mission new "refactor src/agent safely" --dry-run
+ds mission status latest
+ds mission inspect latest --json
+ds mission inspect latest --events
+ds mission replay latest
+ds mission list
+```
+
+每个 mission 保存在：
+
+```text
+.deepseek-code/missions/<mission-id>/
+  mission.json
+  events.jsonl
+  state.json
+  plan.json
+```
+
+## Safety and Policy Model
+
+DeepSeek-Code 默认通过本地 policy 系统评估工具风险：读文件、写文件、shell 命令、网络请求、
+Git 操作和受保护路径会走不同的审批路径。`security-auditor` 是只读 agent，默认只允许：
+
+```text
+read_file, list_dir, search_files, search_code, git_status, git_diff
+```
+
+Mission dry-run、feature recommendation 和 agent validation 都是本地操作，不会访问网络。
+
 ## 核心能力
 
 - **DeepSeek-native**: thinking/reasoning_content 生命周期、工具调用、上下文缓存、FIM

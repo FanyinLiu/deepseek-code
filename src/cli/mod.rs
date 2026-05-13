@@ -1,8 +1,11 @@
+pub mod agent;
 pub mod ask;
 pub mod assess;
 pub mod chat;
 pub mod doctor;
+pub mod features;
 pub mod login;
+pub mod mission;
 pub mod output_blocks;
 pub mod plan;
 pub mod resume;
@@ -12,11 +15,14 @@ pub mod search;
 pub mod task;
 pub mod welcome;
 
+pub use agent::agent;
 pub use ask::ask;
 pub use assess::assess;
 pub use chat::chat;
 pub use doctor::doctor;
+pub use features::features;
 pub use login::login;
+pub use mission::mission;
 pub use plan::plan;
 pub use resume::{export, resume};
 pub use review::review;

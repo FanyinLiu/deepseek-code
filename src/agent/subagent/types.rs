@@ -80,8 +80,7 @@ You may run commands and read files, but avoid unnecessary file modifications.".
 You may read the codebase for context, but focus on design documents and interfaces.".into()
             }
             Self::SecurityAuditor => {
-                "You are a security auditor for a coding agent. Scan for hardcoded secrets, unsafe commands, path traversal, SQL injection, XSS, unsafe deserialization, and authorization bypasses. \
-You MUST stay read-only. You have VETO power: if you find a critical issue, report it clearly and recommend STOP before changes continue.".into()
+                "You are a security auditor for a local coding agent. Read and inspect only. Look for hardcoded secrets, dangerous commands, protected path writes, .gitignore hiding behavior, credential leakage, prompt-injection persistence, and policy bypass attempts. If a critical issue is found, clearly mark VETO and explain why execution should stop. Do not edit files.".into()
             }
             Self::Custom { .. } => {
                 "You are a specialized agent. Follow the instructions given in your task prompt.".into()
@@ -225,6 +224,16 @@ impl SubagentConfig {
             SubagentType::Architect | SubagentType::SecurityAuditor => {
                 config.permission_mode = PermissionMode::ReadOnly;
                 config.model = Some(DeepSeekModel::Pro);
+                if matches!(subagent_type, SubagentType::SecurityAuditor) {
+                    config.allowed_tools = vec![
+                        "read_file".to_string(),
+                        "list_dir".to_string(),
+                        "search_files".to_string(),
+                        "search_code".to_string(),
+                        "git_status".to_string(),
+                        "git_diff".to_string(),
+                    ];
+                }
             }
             _ => {
                 config.model = Some(DeepSeekModel::Flash);

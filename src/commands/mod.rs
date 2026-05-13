@@ -420,6 +420,7 @@ fn cmd_status(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     } else {
         parts.push("\nGit: clean".to_string());
     }
+    parts.push("\nCLI: ds features status | ds agent list | ds mission list".to_string());
     Ok(Some(parts.join(" | ")))
 }
 
@@ -1362,6 +1363,10 @@ fn cmd_help(_args: &str, _ctx: &mut CommandContext) -> CommandResult {
         lines.push(format!("    usage: {}", cmd.usage));
         lines.push(String::new());
     }
+    lines.push("CLI discovery:".to_string());
+    lines.push("  ds features status".to_string());
+    lines.push("  ds agent list".to_string());
+    lines.push("  ds mission list".to_string());
     Ok(Some(lines.join("\n")))
 }
 
