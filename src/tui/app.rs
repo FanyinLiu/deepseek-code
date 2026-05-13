@@ -2295,6 +2295,10 @@ impl TuiApp {
         };
         let show_exit_prompt = self.ctrl_c_exit_prompt_active_at(std::time::Instant::now());
         let activity_h = u16::from(self.is_streaming || show_exit_prompt);
+        let approval_h = self
+            .approval
+            .as_ref()
+            .map_or(0, |(a, _)| approval_popup::inline_height(a));
         let inner = area.inner(Margin {
             horizontal: u16::from(area.width >= 60),
             vertical: 0,
@@ -2305,13 +2309,15 @@ impl TuiApp {
                 Constraint::Min(3),
                 Constraint::Length(options_h),
                 Constraint::Length(activity_h),
+                Constraint::Length(approval_h),
                 Constraint::Length(input_h),
             ])
             .split(inner);
         let content_area = chunks[0];
         let options_area = chunks[1];
         let activity_area = chunks[2];
-        let input_area = chunks[3];
+        let approval_area = chunks[3];
+        let input_area = chunks[4];
 
         let showing_welcome = self.is_showing_welcome();
         if self.settings_open {
@@ -2433,6 +2439,10 @@ impl TuiApp {
             );
         }
 
+        if let Some((ref approval, _)) = self.approval {
+            approval_popup::render_approval_inline(f, approval_area, approval);
+        }
+
         let opts_for_input = self.pending_options.as_ref().map(|(_, o)| o.as_slice());
         if self.api_key_entry.is_some() {
             input::render_api_key_input(f, input_area, &self.input_text, self.cursor_pos);
@@ -2453,10 +2463,6 @@ impl TuiApp {
             self.api_key_entry.is_some(),
         );
         f.set_cursor_position((cursor_x, cursor_y));
-
-        if let Some((ref approval, _)) = self.approval {
-            approval_popup::render_approval_popup(f, area, approval);
-        }
     }
 
     fn render_powerline_footer(&self, f: &mut Frame, area: ratatui::layout::Rect) {
