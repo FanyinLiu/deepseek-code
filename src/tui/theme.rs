@@ -85,10 +85,10 @@ pub struct ThemePalette {
 }
 
 pub const LIGHT_PALETTE: ThemePalette = ThemePalette {
-    canvas: DROID_CANVAS_BG,
-    surface: DROID_CANVAS_BG,
+    canvas: Color::Reset,
+    surface: Color::Reset,
     surface_alt: Color::Rgb(228, 219, 190),
-    input: DROID_CANVAS_BG,
+    input: Color::Reset,
     text: DROID_INK,
     secondary: Color::Rgb(54, 54, 48),
     dim: DROID_MUTED,
@@ -103,10 +103,10 @@ pub const LIGHT_PALETTE: ThemePalette = ThemePalette {
 };
 
 pub const DARK_PALETTE: ThemePalette = ThemePalette {
-    canvas: BG_DEEP,
+    canvas: Color::Reset,
     surface: BG_CARD,
     surface_alt: BG_CARD_HOVER,
-    input: BG_INPUT,
+    input: Color::Reset,
     text: FG_PRIMARY,
     secondary: FG_SECONDARY,
     dim: FG_DIM,
@@ -121,10 +121,10 @@ pub const DARK_PALETTE: ThemePalette = ThemePalette {
 };
 
 pub const HIGH_CONTRAST_PALETTE: ThemePalette = ThemePalette {
-    canvas: Color::Rgb(0, 0, 0),
+    canvas: Color::Reset,
     surface: Color::Rgb(18, 18, 18),
     surface_alt: Color::Rgb(34, 34, 34),
-    input: Color::Rgb(0, 0, 0),
+    input: Color::Reset,
     text: Color::Rgb(255, 255, 255),
     secondary: Color::Rgb(226, 226, 226),
     dim: Color::Rgb(178, 178, 178),
@@ -384,13 +384,15 @@ mod tests {
     }
 
     #[test]
-    fn palettes_have_distinct_readable_surfaces() {
-        assert_ne!(LIGHT_PALETTE.canvas, DARK_PALETTE.canvas);
-        assert_ne!(LIGHT_PALETTE.text, LIGHT_PALETTE.canvas);
-        assert_ne!(DARK_PALETTE.text, DARK_PALETTE.canvas);
-        assert_ne!(HIGH_CONTRAST_PALETTE.text, HIGH_CONTRAST_PALETTE.canvas);
-        assert_ne!(LIGHT_PALETTE.accent, LIGHT_PALETTE.canvas);
-        assert_ne!(DARK_PALETTE.accent, DARK_PALETTE.canvas);
-        assert_ne!(HIGH_CONTRAST_PALETTE.accent, HIGH_CONTRAST_PALETTE.canvas);
+    fn palettes_use_terminal_background_and_keep_readable_foreground() {
+        assert_eq!(LIGHT_PALETTE.canvas, Color::Reset);
+        assert_eq!(DARK_PALETTE.canvas, Color::Reset);
+        assert_eq!(HIGH_CONTRAST_PALETTE.canvas, Color::Reset);
+        assert_ne!(LIGHT_PALETTE.text, Color::Reset);
+        assert_ne!(DARK_PALETTE.text, Color::Reset);
+        assert_ne!(HIGH_CONTRAST_PALETTE.text, Color::Reset);
+        assert_ne!(LIGHT_PALETTE.accent, Color::Reset);
+        assert_ne!(DARK_PALETTE.accent, Color::Reset);
+        assert_ne!(HIGH_CONTRAST_PALETTE.accent, Color::Reset);
     }
 }
