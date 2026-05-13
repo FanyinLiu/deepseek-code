@@ -9,7 +9,7 @@ use std::{
 };
 
 use crossterm::{
-    cursor::{Hide, MoveTo, Show},
+    cursor::{position as cursor_position, Hide, MoveTo, Show},
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
@@ -39,7 +39,7 @@ fn animated_token_count(target: u64, elapsed_ms: u64) -> u64 {
     if target == 0 {
         return 0;
     }
-    let duration_ms = target.clamp(1_200, 12_000);
+    let duration_ms = target.saturating_mul(2).clamp(12_000, 45_000);
     if elapsed_ms >= duration_ms {
         return target;
     }
@@ -76,6 +76,7 @@ pub struct TuiApp {
     pub current_turn_input_tokens: u64,
     pub current_turn_output_tokens: u64,
     current_turn_usage_finalized: bool,
+    input_token_animation_started: Option<std::time::Instant>,
     pub total_cost: f64,
     pub session_name: Option<String>,
     pub welcome: welcome::WelcomeDashboardData,
@@ -288,6 +289,7 @@ impl TuiApp {
             current_turn_input_tokens: 0,
             current_turn_output_tokens: 0,
             current_turn_usage_finalized: false,
+            input_token_animation_started: None,
             total_cost: 0.0,
             session_name,
             welcome,
@@ -1496,6 +1498,7 @@ impl TuiApp {
         self.current_turn_output_tokens = 0;
         self.current_turn_tokens = 0;
         self.current_turn_usage_finalized = false;
+        self.input_token_animation_started = None;
         self.pending_user_message = Some(input.to_string());
         self.stream_buffer.clear();
         self.pending_options = None;
@@ -1512,6 +1515,9 @@ impl TuiApp {
     fn add_input_tokens(&mut self, delta: u64) {
         if delta == 0 {
             return;
+        }
+        if self.current_turn_input_tokens == 0 {
+            self.input_token_animation_started = Some(std::time::Instant::now());
         }
         self.current_turn_input_tokens = self.current_turn_input_tokens.saturating_add(delta);
         self.current_turn_tokens = self
@@ -1644,6 +1650,9 @@ impl TuiApp {
             AgentEvent::StreamDone { usage, cache, .. } => {
                 if let Some(u) = usage {
                     let turn_tokens = u64::from(u.total_tokens);
+                    if self.current_turn_input_tokens == 0 && u.prompt_tokens > 0 {
+                        self.input_token_animation_started = Some(std::time::Instant::now());
+                    }
                     self.current_turn_input_tokens = self
                         .current_turn_input_tokens
                         .max(u64::from(u.prompt_tokens));
@@ -2300,10 +2309,10 @@ impl TuiApp {
     }
 
     fn visible_input_tokens(&self) -> u64 {
-        if self.current_turn_usage_finalized {
-            self.current_turn_input_tokens
-        } else if self.is_streaming {
+        if self.is_streaming {
             self.animated_input_tokens()
+        } else if self.current_turn_usage_finalized {
+            self.current_turn_input_tokens
         } else {
             0
         }
@@ -2314,11 +2323,12 @@ impl TuiApp {
         if target == 0 {
             return 0;
         }
-        if !self.is_streaming || self.current_turn_usage_finalized {
+        if !self.is_streaming {
             return target;
         }
         let elapsed_ms = self
-            .stream_start
+            .input_token_animation_started
+            .or(self.stream_start)
             .map_or(0, |started| started.elapsed().as_millis() as u64);
         animated_token_count(target, elapsed_ms)
     }
@@ -2667,7 +2677,14 @@ fn classic_viewport_height() -> u16 {
     let terminal_height = crossterm::terminal::size()
         .map(|(_, height)| height)
         .unwrap_or(24);
-    terminal_height.clamp(14, 28)
+    classic_viewport_height_for_terminal(terminal_height)
+}
+
+fn classic_viewport_height_for_terminal(terminal_height: u16) -> u16 {
+    terminal_height
+        .saturating_div(2)
+        .saturating_add(2)
+        .clamp(12, 22)
 }
 
 fn tui_terminal(
@@ -2675,6 +2692,14 @@ fn tui_terminal(
 ) -> Result<Terminal<CrosstermBackend<std::io::Stdout>>, anyhow::Error> {
     let backend = CrosstermBackend::new(std::io::stdout());
     if renderer.uses_inline_viewport() {
+        if let Some(area) = classic_fixed_viewport_area() {
+            return Ok(Terminal::with_options(
+                backend,
+                TerminalOptions {
+                    viewport: Viewport::Fixed(area),
+                },
+            )?);
+        }
         Ok(Terminal::with_options(
             backend,
             TerminalOptions {
@@ -2684,6 +2709,25 @@ fn tui_terminal(
     } else {
         Ok(Terminal::new(backend)?)
     }
+}
+
+fn classic_fixed_viewport_area() -> Option<Rect> {
+    let (width, height) = crossterm::terminal::size().ok()?;
+    let (_, cursor_y) = cursor_position().ok()?;
+    classic_fixed_viewport_area_for_terminal(width, height, cursor_y)
+}
+
+fn classic_fixed_viewport_area_for_terminal(
+    width: u16,
+    height: u16,
+    cursor_y: u16,
+) -> Option<Rect> {
+    let y = cursor_y.min(height.saturating_sub(1));
+    let available = height.saturating_sub(y);
+    if available < 18 {
+        return None;
+    }
+    Some(Rect::new(0, y, width, available))
 }
 
 fn first_line(value: &str) -> &str {
@@ -3877,6 +3921,22 @@ mod tests {
     }
 
     #[test]
+    fn classic_viewport_stays_compact_in_tall_terminals() {
+        assert_eq!(classic_viewport_height_for_terminal(24), 14);
+        assert_eq!(classic_viewport_height_for_terminal(40), 22);
+        assert_eq!(classic_viewport_height_for_terminal(80), 22);
+    }
+
+    #[test]
+    fn classic_prefers_fixed_viewport_when_space_exists_below_prompt() {
+        assert_eq!(
+            classic_fixed_viewport_area_for_terminal(120, 40, 5),
+            Some(Rect::new(0, 5, 120, 35))
+        );
+        assert_eq!(classic_fixed_viewport_area_for_terminal(120, 40, 30), None);
+    }
+
+    #[test]
     fn release_key_events_do_not_duplicate_typing() {
         let mut app = test_app();
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -4226,7 +4286,9 @@ mod tests {
         assert!(app.visible_input_tokens() > 0);
         assert!(app.visible_input_tokens() < 240);
 
-        app.stream_start = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+        let old_enough = std::time::Instant::now() - std::time::Duration::from_secs(14);
+        app.stream_start = Some(old_enough);
+        app.input_token_animation_started = Some(old_enough);
         assert_eq!(app.activity_input_tokens(), 240);
         assert_eq!(app.visible_input_tokens(), 240);
 
@@ -4254,9 +4316,35 @@ mod tests {
     #[test]
     fn input_token_activity_counts_up_before_output_arrives() {
         assert_eq!(animated_token_count(0, 0), 0);
-        assert_eq!(animated_token_count(7_200, 0), 80);
+        assert_eq!(animated_token_count(7_200, 0), 40);
+        assert!(animated_token_count(213, 5_000) < 213);
         assert!(animated_token_count(7_200, 2_000) < 7_200);
-        assert_eq!(animated_token_count(7_200, 8_000), 7_200);
+        assert!(animated_token_count(7_200, 8_000) < 7_200);
+        assert_eq!(animated_token_count(7_200, 15_000), 7_200);
+    }
+
+    #[test]
+    fn finalized_input_usage_still_animates_while_turn_is_running() {
+        let mut app = test_app();
+        app.begin_running_turn("处理请求");
+
+        app.apply_agent_event(AgentEvent::StreamDone {
+            finish_reason: None,
+            usage: Some(crate::deepseek::Usage {
+                prompt_tokens: 213,
+                completion_tokens: 0,
+                total_tokens: 213,
+                prompt_cache_hit_tokens: None,
+                prompt_cache_miss_tokens: None,
+            }),
+            cache: None,
+        });
+
+        assert_eq!(app.current_turn_input_tokens, 213);
+        assert!(app.activity_input_tokens() > 0);
+        assert!(app.activity_input_tokens() < 213);
+        assert!(app.visible_input_tokens() > 0);
+        assert!(app.visible_input_tokens() < 213);
     }
 
     #[test]
