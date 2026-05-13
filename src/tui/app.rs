@@ -2186,15 +2186,9 @@ impl TuiApp {
         // Input
         let opts_for_input = self.pending_options.as_ref().map(|(_, o)| o.as_slice());
         if self.api_key_entry.is_some() {
-            input::render_api_key_input(f, input_area, &self.input_text, self.cursor_pos);
+            input::render_api_key_input(f, input_area, &self.input_text);
         } else {
-            input::render_input(
-                f,
-                input_area,
-                &self.input_text,
-                self.cursor_pos,
-                opts_for_input,
-            );
+            input::render_input(f, input_area, &self.input_text, opts_for_input);
         }
         let (cursor_x, cursor_y) = input::terminal_cursor_position(
             input_area,
@@ -2373,15 +2367,9 @@ impl TuiApp {
 
         let opts_for_input = self.pending_options.as_ref().map(|(_, o)| o.as_slice());
         if self.api_key_entry.is_some() {
-            input::render_api_key_input(f, input_area, &self.input_text, self.cursor_pos);
+            input::render_api_key_input(f, input_area, &self.input_text);
         } else {
-            input::render_input(
-                f,
-                input_area,
-                &self.input_text,
-                self.cursor_pos,
-                opts_for_input,
-            );
+            input::render_input(f, input_area, &self.input_text, opts_for_input);
         }
 
         let (cursor_x, cursor_y) = input::terminal_cursor_position(

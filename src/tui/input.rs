@@ -8,36 +8,23 @@ use ratatui::{
 
 use crate::tui::theme;
 
-/// Quiet terminal input: no border, just a clean prompt.
-pub fn render_input(
-    f: &mut Frame,
-    area: Rect,
-    input_text: &str,
-    cursor_position: usize,
-    _pending_options: Option<&[String]>,
-) {
+/// Quiet terminal input: no border, just a clean prompt. The visible cursor
+/// comes from the terminal itself (positioned by the caller via
+/// [`terminal_cursor_position`]); we never paint a glyph for it.
+pub fn render_input(f: &mut Frame, area: Rect, input_text: &str, _pending_options: Option<&[String]>) {
     let lines: Vec<Line> = if input_text.is_empty() {
-        vec![Line::from(vec![prompt_span(), cursor_span()])]
+        vec![Line::from(vec![prompt_span()])]
     } else {
-        let mut line_start = 0usize;
         input_text
             .split('\n')
             .enumerate()
             .map(|(i, line)| {
-                let line_len = line.chars().count();
-                let cursor_in_line =
-                    cursor_position >= line_start && cursor_position <= line_start + line_len;
-                let local_cursor =
-                    cursor_in_line.then_some(cursor_position.saturating_sub(line_start));
-                let mut spans = Vec::new();
-                if i == 0 {
-                    spans.push(prompt_span());
+                let leading = if i == 0 {
+                    prompt_span()
                 } else {
-                    spans.push(Span::styled("  ", input_style()));
-                }
-                spans.extend(edit_spans(line, local_cursor));
-                line_start += line_len + 1;
-                Line::from(spans)
+                    Span::styled("  ", input_style())
+                };
+                Line::from(vec![leading, Span::styled(line.to_string(), input_style())])
             })
             .collect()
     };
@@ -47,22 +34,18 @@ pub fn render_input(
     f.render_widget(input, area);
 }
 
-pub fn render_api_key_input(f: &mut Frame, area: Rect, input_text: &str, cursor_position: usize) {
+pub fn render_api_key_input(f: &mut Frame, area: Rect, input_text: &str) {
     let display = mask_secret(input_text);
-    let cursor = cursor_position.min(display.chars().count());
     let lines = if display.is_empty() {
         vec![Line::from(vec![
             prompt_span(),
-            cursor_span(),
-            Span::styled(" ", input_style()),
             Span::styled("paste API key...", muted_style()),
         ])]
     } else {
-        vec![Line::from({
-            let mut spans = vec![prompt_span()];
-            spans.extend(edit_spans(&display, Some(cursor)));
-            spans
-        })]
+        vec![Line::from(vec![
+            prompt_span(),
+            Span::styled(display, input_style()),
+        ])]
     };
 
     let p = theme::palette();
@@ -131,45 +114,6 @@ fn muted_style() -> Style {
     Style::default().fg(p.muted).bg(p.canvas)
 }
 
-fn edit_spans(line: &str, cursor: Option<usize>) -> Vec<Span<'static>> {
-    let Some(cursor) = cursor else {
-        return vec![Span::styled(line.to_string(), input_style())];
-    };
-
-    let mut spans = Vec::new();
-    let before: String = line.chars().take(cursor).collect();
-    let at = line.chars().nth(cursor);
-    let after: String = line
-        .chars()
-        .skip(cursor + usize::from(at.is_some()))
-        .collect();
-
-    if !before.is_empty() {
-        spans.push(Span::styled(before, input_style()));
-    }
-
-    spans.push(cursor_span());
-
-    if let Some(ch) = at {
-        spans.push(Span::styled(ch.to_string(), input_style()));
-    }
-
-    if !after.is_empty() {
-        spans.push(Span::styled(after, input_style()));
-    }
-
-    spans
-}
-
-fn cursor_span() -> Span<'static> {
-    Span::styled(
-        "▌",
-        Style::default()
-            .fg(theme::palette().accent)
-            .bg(theme::palette().canvas),
-    )
-}
-
 fn display_width(text: &str) -> usize {
     text.chars().map(char_display_width).sum()
 }
@@ -195,25 +139,27 @@ mod tests {
     use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
-    fn empty_normal_input_draws_visible_cursor() {
+    fn empty_input_renders_just_the_prompt_chevron() {
         let mut terminal = Terminal::new(TestBackend::new(20, 1)).expect("terminal");
         terminal
-            .draw(|f| render_input(f, f.area(), "", 0, None))
+            .draw(|f| render_input(f, f.area(), "", None))
             .expect("draw");
 
         let rendered = buffer_text(terminal.backend());
-        assert!(rendered.contains("› ▌"));
+        assert!(rendered.starts_with("› "));
+        assert!(!rendered.contains('▌'));
     }
 
     #[test]
-    fn typed_input_uses_inline_cursor_marker() {
+    fn typed_input_renders_without_visible_cursor_glyph() {
         let mut terminal = Terminal::new(TestBackend::new(20, 1)).expect("terminal");
         terminal
-            .draw(|f| render_input(f, f.area(), "ask", 3, None))
+            .draw(|f| render_input(f, f.area(), "ask", None))
             .expect("draw");
 
         let rendered = buffer_text(terminal.backend());
-        assert!(rendered.contains("› ask▌"));
+        assert!(rendered.contains("› ask"));
+        assert!(!rendered.contains('▌'));
     }
 
     #[test]
@@ -226,18 +172,19 @@ mod tests {
     fn api_key_input_empty_render_shows_setup_hint() {
         let mut terminal = Terminal::new(TestBackend::new(80, 1)).expect("terminal");
         terminal
-            .draw(|f| render_api_key_input(f, f.area(), "", 0))
+            .draw(|f| render_api_key_input(f, f.area(), ""))
             .expect("draw");
         let rendered = buffer_text(terminal.backend());
-        assert!(rendered.contains("› ▌"));
+        assert!(rendered.contains("› "));
         assert!(rendered.contains("paste API key"));
+        assert!(!rendered.contains('▌'));
     }
 
     #[test]
     fn api_key_input_masks_secret_render() {
         let mut terminal = Terminal::new(TestBackend::new(80, 1)).expect("terminal");
         terminal
-            .draw(|f| render_api_key_input(f, f.area(), "sk-secret", 9))
+            .draw(|f| render_api_key_input(f, f.area(), "sk-secret"))
             .expect("draw");
         let rendered = buffer_text(terminal.backend());
         assert!(rendered.contains("•••••••••"));
@@ -249,7 +196,7 @@ mod tests {
         theme::set_active_theme(theme::ThemeMode::Light);
         let mut terminal = Terminal::new(TestBackend::new(20, 1)).expect("terminal");
         terminal
-            .draw(|f| render_input(f, f.area(), "hello", 5, None))
+            .draw(|f| render_input(f, f.area(), "hello", None))
             .expect("draw");
         let cell = terminal.backend().buffer().cell((2, 0)).expect("cell");
         assert_eq!(cell.fg, theme::LIGHT_PALETTE.text);
@@ -261,7 +208,7 @@ mod tests {
         theme::set_active_theme(theme::ThemeMode::Light);
         let mut terminal = Terminal::new(TestBackend::new(20, 2)).expect("terminal");
         terminal
-            .draw(|f| render_input(f, f.area(), "hello\nworld", 11, None))
+            .draw(|f| render_input(f, f.area(), "hello\nworld", None))
             .expect("draw");
         let cell = terminal.backend().buffer().cell((2, 1)).expect("cell");
         assert_eq!(cell.fg, theme::LIGHT_PALETTE.text);
@@ -273,7 +220,7 @@ mod tests {
         theme::set_active_theme(theme::ThemeMode::Light);
         let mut terminal = Terminal::new(TestBackend::new(80, 1)).expect("terminal");
         terminal
-            .draw(|f| render_api_key_input(f, f.area(), "", 0))
+            .draw(|f| render_api_key_input(f, f.area(), ""))
             .expect("draw");
         let cell = terminal.backend().buffer().cell((4, 0)).expect("cell");
         assert!(
@@ -287,7 +234,7 @@ mod tests {
         theme::set_active_theme(theme::ThemeMode::Dark);
         let mut terminal = Terminal::new(TestBackend::new(20, 1)).expect("terminal");
         terminal
-            .draw(|f| render_input(f, f.area(), "hello", 5, None))
+            .draw(|f| render_input(f, f.area(), "hello", None))
             .expect("draw");
         let cell = terminal.backend().buffer().cell((2, 0)).expect("cell");
         assert_eq!(cell.fg, theme::DARK_PALETTE.text);
