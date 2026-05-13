@@ -57,8 +57,8 @@ use crate::policy::ApprovalDisplay;
 use crate::storage;
 
 use super::{
-    approval_popup, diff_viewer, file_tree, input, layout, model_hint, plan_tracker,
-    settings_panel, status_bar, statusline, subagent_cards, theme, transcript_view, welcome,
+    approval_popup, diff_viewer, file_tree, input, layout, model_hint, plan_tracker, status_bar,
+    statusline, subagent_cards, theme, transcript_view, welcome,
 };
 
 /// TUI application state.
@@ -122,9 +122,6 @@ pub struct TuiApp {
     pub mcp_status: String,
     pub theme_mode: theme::ThemeMode,
     pub renderer_mode: RendererMode,
-    pub settings_open: bool,
-    pub settings_tab: settings_panel::SettingsTab,
-    pub settings_selected: usize,
     ctrl_c_exit_deadline: Option<std::time::Instant>,
 }
 
@@ -337,9 +334,6 @@ impl TuiApp {
             mcp_status: String::new(),
             theme_mode,
             renderer_mode,
-            settings_open: false,
-            settings_tab: settings_panel::SettingsTab::SessionDefaults,
-            settings_selected: 0,
             ctrl_c_exit_deadline: None,
         }
     }
@@ -403,42 +397,6 @@ impl TuiApp {
             mode.label()
         );
         self.push_activity(format!("renderer: {}", mode.label()));
-    }
-
-    pub fn open_settings_panel(&mut self) {
-        self.settings_open = true;
-        self.settings_selected = self
-            .settings_selected
-            .min(settings_panel::row_count(self.settings_tab).saturating_sub(1));
-        self.status_message = "Settings are read-only in this build".into();
-    }
-
-    fn handle_settings_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
-                self.settings_open = false;
-                self.status_message = "Settings closed".into();
-            }
-            KeyCode::Tab => {
-                self.settings_tab = self.settings_tab.next();
-                self.settings_selected = 0;
-            }
-            KeyCode::BackTab => {
-                self.settings_tab = self.settings_tab.previous();
-                self.settings_selected = 0;
-            }
-            KeyCode::Up => {
-                self.settings_selected = self.settings_selected.saturating_sub(1);
-            }
-            KeyCode::Down => {
-                let max = settings_panel::row_count(self.settings_tab).saturating_sub(1);
-                self.settings_selected = (self.settings_selected + 1).min(max);
-            }
-            KeyCode::Enter => {
-                self.status_message = "Settings editing is coming later".into();
-            }
-            _ => {}
-        }
     }
 
     fn handle_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<TuiAction>) {
@@ -523,11 +481,6 @@ impl TuiApp {
                     self.approval = Some((approval, respond));
                 }
             }
-            return;
-        }
-
-        if self.settings_open {
-            self.handle_settings_key(key);
             return;
         }
 
@@ -958,7 +911,6 @@ impl TuiApp {
     fn slash_command_suggestions(&self) -> Vec<(String, String)> {
         let trimmed = self.input_text.trim();
         if self.api_key_entry.is_some()
-            || self.settings_open
             || !trimmed.starts_with('/')
             || trimmed.contains(char::is_whitespace)
         {
@@ -2114,19 +2066,7 @@ impl TuiApp {
         }
 
         // Welcome page: full body (only when empty)
-        if self.settings_open {
-            settings_panel::render_settings_panel(
-                f,
-                content_area,
-                settings_panel::SettingsPanelProps {
-                    selected_tab: self.settings_tab,
-                    selected_row: self.settings_selected,
-                    model: &self.model,
-                    thinking: &self.thinking_mode,
-                    theme_label: self.theme_mode.label(),
-                },
-            );
-        } else if showing_welcome {
+        if showing_welcome {
             welcome::render_welcome(f, full_body_area, &self.welcome);
         } else {
             // Quiet terminal style: everything scrolls together in one stream.
@@ -2320,19 +2260,7 @@ impl TuiApp {
         let input_area = chunks[4];
 
         let showing_welcome = self.is_showing_welcome();
-        if self.settings_open {
-            settings_panel::render_settings_panel(
-                f,
-                content_area,
-                settings_panel::SettingsPanelProps {
-                    selected_tab: self.settings_tab,
-                    selected_row: self.settings_selected,
-                    model: &self.model,
-                    thinking: &self.thinking_mode,
-                    theme_label: self.theme_mode.label(),
-                },
-            );
-        } else if showing_welcome {
+        if showing_welcome {
             welcome::render_classic_welcome(f, content_area, &self.welcome);
         } else {
             let elapsed = self

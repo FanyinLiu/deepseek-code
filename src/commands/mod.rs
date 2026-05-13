@@ -701,8 +701,12 @@ fn cmd_tui(args: &str, ctx: &mut CommandContext) -> CommandResult {
 }
 
 fn cmd_settings(_args: &str, ctx: &mut CommandContext) -> CommandResult {
-    ctx.app.open_settings_panel();
-    Ok(None)
+    let snapshot = crate::tui::settings_panel::SettingsSnapshot {
+        model: &ctx.app.model,
+        thinking: &ctx.app.thinking_mode,
+        theme_label: ctx.app.theme_mode.label(),
+    };
+    Ok(Some(crate::tui::settings_panel::format_inline(snapshot)))
 }
 
 fn cmd_mode(args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -2054,35 +2058,14 @@ mod tests {
     }
 
     #[test]
-    fn settings_command_opens_read_only_panel() {
-        let result = execute_with_test_app("/settings").expect("settings should run");
+    fn settings_command_returns_inline_snapshot() {
+        let result = execute_with_test_app("/settings")
+            .expect("settings should run")
+            .expect("settings should emit transcript text");
 
-        assert!(result.is_none());
-
-        let reg = CommandRegistry::new();
-        let mut app = crate::tui::app::TuiApp::new(
-            crate::deepseek::DeepSeekModel::Flash,
-            crate::deepseek::ThinkingMode::Auto,
-            None,
-            std::path::PathBuf::from("."),
-        );
-        let mut yolo = false;
-        let mut ctx = CommandContext {
-            app: &mut app,
-            project_root: std::path::Path::new("."),
-            yolo_mode: &mut yolo,
-            mcp_status: "MCP: not initialized",
-            background_tasks: &[],
-        };
-
-        let output = reg
-            .execute("/set", &mut ctx)
-            .expect("command should be handled")
-            .expect("settings should run");
-
-        assert!(output.is_none());
-        assert!(ctx.app.settings_open);
-        assert!(ctx.app.status_message.contains("read-only"));
+        assert!(result.contains("Settings (read-only)"));
+        assert!(result.contains("Session defaults"));
+        assert!(result.contains("Theme"));
     }
 
     #[test]
