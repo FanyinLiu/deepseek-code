@@ -3,6 +3,9 @@
 /.deepseek-code/local.toml
 /.deepseek-code/checkpoints/
 /.deepseek-code/live-preview/
+/.deepseek-code/missions/
+/logs/
+/TASK.md
 *.pdb
 .env
 .env.*
