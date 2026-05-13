@@ -3,6 +3,7 @@ use chrono::Utc;
 use super::events::{MissionEvent, MissionEventKind};
 use super::types::{MissionMode, MissionPlan, MissionState, MissionStatus, MissionStep};
 
+/// Generate a replayable dry-run mission plan from a user-provided goal.
 #[must_use]
 pub fn generate_dry_run_plan(goal: &str) -> MissionPlan {
     let mode = recommend_mode(goal);
@@ -21,6 +22,7 @@ pub fn generate_dry_run_plan(goal: &str) -> MissionPlan {
     }
 }
 
+/// Reconstruct the latest mission state from a replayable event stream.
 #[must_use]
 pub fn replay_state_from_events(events: &[MissionEvent]) -> Option<MissionState> {
     let mut state = None;
@@ -30,12 +32,13 @@ pub fn replay_state_from_events(events: &[MissionEvent]) -> Option<MissionState>
                 state = Some(next.clone());
             }
             MissionEventKind::PlanGenerated { plan } => {
+                let total_steps = plan.steps.len();
                 state = Some(MissionState {
                     mission_id: event.mission_id.clone(),
                     status: MissionStatus::Planned,
-                    current_step: Some(0),
-                    total_steps: plan.steps.len(),
-                    summary: format!("plan generated with {} steps", plan.steps.len()),
+                    current_step: (total_steps > 0).then_some(0),
+                    total_steps,
+                    summary: format!("plan generated with {total_steps} steps"),
                     updated_at: event.at,
                 });
             }
@@ -196,12 +199,6 @@ fn plan_steps(
         }
     }
 
-    for step in &mut steps {
-        if step.validation_commands.is_empty() && step.id == "step-4" {
-            step.validation_commands = validation_commands.to_vec();
-        }
-    }
-
     steps
 }
 
@@ -209,6 +206,7 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
 }
 
+/// Build the terminal completed state for a dry-run mission.
 #[must_use]
 pub fn completed_state(mission_id: &str, step_count: usize) -> MissionState {
     MissionState {

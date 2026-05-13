@@ -23,6 +23,7 @@ use super::subagent::{
     SubagentType,
 };
 use super::supervisor::Supervisor;
+use super::team::{TeamMilestone, TeamPlan};
 
 const READ_ONLY_TOOLS: &[&str] = &[
     "read_file",
@@ -135,23 +136,6 @@ pub struct SwarmPlan {
     pub validation_commands: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TeamMilestone {
-    pub title: String,
-    #[serde(default)]
-    pub acceptance: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TeamPlan {
-    pub goal: String,
-    pub milestones: Vec<TeamMilestone>,
-    pub acceptance_criteria: Vec<String>,
-    pub agent_roles: Vec<String>,
-    pub validation_commands: Vec<String>,
-    pub risks: Vec<String>,
-}
-
 impl SwarmPlan {
     #[must_use]
     pub fn team_plan(&self) -> TeamPlan {
@@ -168,6 +152,7 @@ impl SwarmPlan {
                 .iter()
                 .map(|task| format!("{}: {}", task.role.as_str(), task.description))
                 .collect(),
+            tasks: Vec::new(),
             validation_commands: self.validation_commands.clone(),
             risks: self.risks.clone(),
         }

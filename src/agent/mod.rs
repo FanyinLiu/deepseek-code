@@ -13,6 +13,7 @@ pub mod subagent;
 pub mod supervisor;
 pub mod swarm;
 pub mod task_tool;
+pub mod team;
 pub mod tool_loop;
 pub mod utils;
 
@@ -28,3 +29,7 @@ pub use swarm::{
     SwarmAgentRole, SwarmCoordinator, SwarmPlan, SwarmRun, SwarmTask, SwarmTaskStatus,
 };
 pub use task_tool::TaskToolHandler;
+pub use team::{
+    AgentRole, AgentRunState, TeamMilestone, TeamPlan, TeamPlanDraft, TeamRun, TeamTask,
+    TeamTaskMode,
+};
