@@ -650,27 +650,31 @@ fn cmd_auto(_args: &str, ctx: &mut CommandContext) -> CommandResult {
 
 fn cmd_theme(args: &str, ctx: &mut CommandContext) -> CommandResult {
     let requested = args.trim().to_ascii_lowercase();
-    let mode = match requested.as_str() {
+    let (mode, label_suffix) = match requested.as_str() {
         "" => {
             return Ok(Some(format!(
-                "Theme: {}\n\nUsage: /theme light | dark | high-contrast | toggle",
+                "Theme: {}\n\nUsage: /theme auto | light | dark | high-contrast | toggle",
                 ctx.app.theme_mode.label()
             )));
         }
-        "light" | "droid" => crate::tui::theme::ThemeMode::Light,
-        "dark" | "terminal" => crate::tui::theme::ThemeMode::Dark,
-        "high-contrast" | "high_contrast" | "contrast" | "hc" => {
-            crate::tui::theme::ThemeMode::HighContrast
+        "auto" | "system" => {
+            let detected = crate::tui::theme::ThemeMode::detect();
+            (detected, format!(" (auto → {})", detected.label()))
         }
-        "toggle" => ctx.app.theme_mode.toggled(),
+        "light" | "droid" => (crate::tui::theme::ThemeMode::Light, String::new()),
+        "dark" | "terminal" => (crate::tui::theme::ThemeMode::Dark, String::new()),
+        "high-contrast" | "high_contrast" | "contrast" | "hc" => {
+            (crate::tui::theme::ThemeMode::HighContrast, String::new())
+        }
+        "toggle" => (ctx.app.theme_mode.toggled(), String::new()),
         other => {
             return Err(format!(
-                "Unknown theme: {other}. Use /theme light, /theme dark, /theme high-contrast, or /theme toggle."
+                "Unknown theme: {other}. Use /theme auto, /theme light, /theme dark, /theme high-contrast, or /theme toggle."
             ));
         }
     };
     ctx.app.set_theme_mode(mode);
-    Ok(Some(format!("Theme set to {}", mode.label())))
+    Ok(Some(format!("Theme set to {}{label_suffix}", mode.label())))
 }
 
 fn cmd_tui(args: &str, ctx: &mut CommandContext) -> CommandResult {

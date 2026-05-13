@@ -394,7 +394,7 @@ fn default_language() -> String {
     "zh-CN".into()
 }
 fn default_theme() -> String {
-    "light".into()
+    "auto".into()
 }
 fn default_renderer() -> String {
     "classic".into()

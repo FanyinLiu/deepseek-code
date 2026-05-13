@@ -38,6 +38,33 @@ impl ThemeMode {
         }
     }
 
+    /// Resolve a config string, mapping "auto"/"system"/empty to a runtime
+    /// detection. Concrete names ("light", "dark", "high-contrast") fall
+    /// through to [`Self::from_config`].
+    #[must_use]
+    pub fn resolve(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" | "system" | "" => Self::detect(),
+            _ => Self::from_config(value),
+        }
+    }
+
+    /// Best-effort detection of the host terminal's brightness.
+    ///
+    /// Order: `COLORFGBG` env var → macOS `AppleInterfaceStyle` → dark.
+    /// Side effects are limited to env reads and (on macOS) a `defaults`
+    /// invocation; both are short and silently ignored on failure.
+    #[must_use]
+    pub fn detect() -> Self {
+        if let Some(mode) = detect_from_colorfgbg() {
+            return mode;
+        }
+        if let Some(mode) = detect_from_macos_interface_style() {
+            return mode;
+        }
+        Self::Dark
+    }
+
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -55,6 +82,43 @@ impl ThemeMode {
             Self::HighContrast => Self::Light,
         }
     }
+}
+
+fn detect_from_colorfgbg() -> Option<ThemeMode> {
+    parse_colorfgbg(&std::env::var("COLORFGBG").ok()?)
+}
+
+fn parse_colorfgbg(raw: &str) -> Option<ThemeMode> {
+    let bg = raw.split(';').nth(1)?.trim().parse::<u8>().ok()?;
+    Some(if bg < 7 {
+        ThemeMode::Dark
+    } else {
+        ThemeMode::Light
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn detect_from_macos_interface_style() -> Option<ThemeMode> {
+    let output = std::process::Command::new("defaults")
+        .args(["read", "-g", "AppleInterfaceStyle"])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let value = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .to_ascii_lowercase();
+        if value == "dark" {
+            return Some(ThemeMode::Dark);
+        }
+    }
+    // macOS only sets AppleInterfaceStyle when the system is in dark mode;
+    // a missing key (non-zero exit) means light.
+    Some(ThemeMode::Light)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn detect_from_macos_interface_style() -> Option<ThemeMode> {
+    None
 }
 
 #[cfg(not(test))]
@@ -381,6 +445,24 @@ mod tests {
         assert_eq!(ThemeMode::from_config("hc"), ThemeMode::HighContrast);
         assert_eq!(ThemeMode::from_config("light"), ThemeMode::Light);
         assert_eq!(ThemeMode::from_config("unknown"), ThemeMode::Light);
+    }
+
+    #[test]
+    fn resolve_passes_concrete_themes_through_without_detection() {
+        assert_eq!(ThemeMode::resolve("light"), ThemeMode::Light);
+        assert_eq!(ThemeMode::resolve("dark"), ThemeMode::Dark);
+        assert_eq!(ThemeMode::resolve("hc"), ThemeMode::HighContrast);
+    }
+
+    #[test]
+    fn colorfgbg_split_picks_dark_for_low_bg_indices() {
+        assert_eq!(parse_colorfgbg("15;0"), Some(ThemeMode::Dark));
+        assert_eq!(parse_colorfgbg("15;6"), Some(ThemeMode::Dark));
+        assert_eq!(parse_colorfgbg("0;15"), Some(ThemeMode::Light));
+        assert_eq!(parse_colorfgbg("0;7"), Some(ThemeMode::Light));
+        assert_eq!(parse_colorfgbg(""), None);
+        assert_eq!(parse_colorfgbg("15"), None);
+        assert_eq!(parse_colorfgbg("15;abc"), None);
     }
 
     #[test]

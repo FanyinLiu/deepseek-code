@@ -256,7 +256,7 @@ impl TuiApp {
         project_root: PathBuf,
     ) -> Self {
         let config = storage::Config::load(Some(&project_root)).unwrap_or_default();
-        let theme_mode = theme::ThemeMode::from_config(&config.ui.theme);
+        let theme_mode = theme::ThemeMode::resolve(&config.ui.theme);
         let renderer_mode = RendererMode::from_config(&config.ui.renderer);
         theme::set_active_theme(theme_mode);
         let welcome = welcome::WelcomeDashboardData::load(
