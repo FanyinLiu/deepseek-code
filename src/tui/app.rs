@@ -2305,17 +2305,13 @@ impl TuiApp {
                 Constraint::Min(3),
                 Constraint::Length(options_h),
                 Constraint::Length(activity_h),
-                Constraint::Length(1),
                 Constraint::Length(input_h),
-                Constraint::Length(1),
             ])
             .split(inner);
         let content_area = chunks[0];
         let options_area = chunks[1];
         let activity_area = chunks[2];
-        let top_divider_area = chunks[3];
-        let input_area = chunks[4];
-        let bottom_divider_area = chunks[5];
+        let input_area = chunks[3];
 
         let showing_welcome = self.is_showing_welcome();
         if self.settings_open {
@@ -2437,7 +2433,6 @@ impl TuiApp {
             );
         }
 
-        render_classic_divider(f, top_divider_area);
         let opts_for_input = self.pending_options.as_ref().map(|(_, o)| o.as_slice());
         if self.api_key_entry.is_some() {
             input::render_api_key_input(f, input_area, &self.input_text, self.cursor_pos);
@@ -2450,7 +2445,6 @@ impl TuiApp {
                 opts_for_input,
             );
         }
-        render_classic_divider(f, bottom_divider_area);
 
         let (cursor_x, cursor_y) = input::terminal_cursor_position(
             input_area,
@@ -2670,22 +2664,6 @@ fn render_canvas(f: &mut Frame, area: Rect) {
         .collect::<Vec<_>>();
     f.render_widget(
         Paragraph::new(Text::from(lines)).style(Style::default().fg(p.text).bg(p.canvas)),
-        area,
-    );
-}
-
-fn render_classic_divider(f: &mut Frame, area: Rect) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let p = theme::palette();
-    let line = "─".repeat(area.width as usize);
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            line,
-            Style::default().fg(p.dim).bg(p.canvas),
-        )))
-        .style(Style::default().fg(p.text).bg(p.canvas)),
         area,
     );
 }
@@ -4433,7 +4411,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal.draw(|f| app.render(f)).expect("draw");
 
-        terminal.backend_mut().assert_cursor_position((7, 31));
+        terminal.backend_mut().assert_cursor_position((7, 32));
     }
 
     #[test]
