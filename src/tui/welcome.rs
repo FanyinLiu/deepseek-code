@@ -428,7 +428,7 @@ pub fn render_classic_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboard
     if area.height >= 10 {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled(
-            "1-3 starters · / commands · ds features · ds agent · ds mission",
+            "1-3 starters · / commands · @ files · ! shell",
             welcome_accent(),
         )]));
     }
@@ -625,7 +625,7 @@ fn render_invitation_and_footer(f: &mut Frame, area: Rect, data: &WelcomeDashboa
         (
             "What are we changing today?",
             "Type below, or press 1-3 to load a starter.",
-            "1-3 starters · / commands · ds features · ds agent · ds mission",
+            "1-3 starters · / commands · @ files · ! shell · enter send",
         )
     };
     let lines = vec![
@@ -732,8 +732,6 @@ fn render_compact_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData
     let footer = vec![
         key_span("1-3"),
         action_span(" starters   "),
-        key_span("ds"),
-        action_span(" features/agent/mission   "),
         key_span("enter"),
         action_span(" send"),
     ];
@@ -991,9 +989,8 @@ mod tests {
         assert!(rendered.contains("DeepSeek Code"));
         assert!(rendered.contains("What are we changing today?"));
         assert!(rendered.contains("starters"));
-        assert!(rendered.contains("ds features"));
-        assert!(rendered.contains("ds agent"));
-        assert!(rendered.contains("ds mission"));
+        assert!(rendered.contains("@ files"));
+        assert!(rendered.contains("! shell"));
         assert!(rendered.contains("workspace"));
         assert!(rendered.contains("memory"));
         assert!(!rendered.contains("Project"));
