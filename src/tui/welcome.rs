@@ -357,43 +357,85 @@ pub fn render_classic_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboard
         return;
     }
 
-    let cwd = truncate_chars(
-        &data.workspace_path.display().to_string(),
-        area.width as usize,
-    );
+    f.render_widget(Paragraph::new("").style(welcome_bg()), area);
 
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("✻ ", welcome_accent()),
-            Span::styled("DS-CODE", welcome_text().add_modifier(Modifier::BOLD)),
-            Span::styled("  ·  ", welcome_muted()),
-            Span::styled(model_label(&data.model).to_string(), welcome_muted()),
-        ]),
-        Line::from(""),
-    ];
+    let mut lines = vec![Line::from(vec![
+        Span::styled("DS-CODE", welcome_text().add_modifier(Modifier::BOLD)),
+        Span::styled(" · ", welcome_muted()),
+        Span::styled(
+            format!("{} ({})", model_label(&data.model), data.thinking),
+            welcome_muted(),
+        ),
+    ])];
 
     if data.api_key_status != "ready" {
         lines.push(Line::from(vec![Span::styled(
-            "  Paste your API key below, then press Enter.",
-            welcome_text(),
-        )]));
-        lines.push(Line::from(vec![Span::styled(
-            format!("  cwd: {cwd}"),
+            truncate_chars(
+                &data.workspace_path.display().to_string(),
+                area.width as usize,
+            ),
             welcome_muted(),
         )]));
-    } else {
+        lines.push(Line::from(""));
         lines.push(Line::from(vec![Span::styled(
-            "  /help for commands  ·  press 1-3 for starters",
-            welcome_muted(),
+            "API setup required",
+            welcome_accent().add_modifier(Modifier::BOLD),
         )]));
         lines.push(Line::from(vec![Span::styled(
-            format!("  cwd: {cwd}"),
+            "Paste your API key in the input line below, then press Enter.",
             welcome_muted(),
         )]));
+        if area.height >= 9 {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(
+                "1 paste API key · 2 enter to save · 3 start coding",
+                welcome_text(),
+            )]));
+        }
+        f.render_widget(
+            Paragraph::new(Text::from(lines))
+                .style(welcome_bg())
+                .wrap(Wrap { trim: true }),
+            area,
+        );
+        return;
     }
 
+    lines.push(Line::from(vec![Span::styled(
+        truncate_chars(
+            &data.workspace_path.display().to_string(),
+            area.width as usize,
+        ),
+        welcome_muted(),
+    )]));
+    lines.push(Line::from(vec![
+        Span::styled("api:ready", welcome_ok()),
+        Span::styled(" · ", welcome_muted()),
+        Span::styled(format!("config:{}", data.config_status), welcome_muted()),
+    ]));
+
+    if area.height >= 8 {
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(vec![Span::styled(
+        "What are we changing today?",
+        welcome_text().add_modifier(Modifier::BOLD),
+    )]));
+    lines.push(Line::from(vec![Span::styled(
+        "Type below, or press 1-3 to load a starter.",
+        welcome_muted(),
+    )]));
+    if area.height >= 10 {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::styled(
+            "1-3 starters · / commands · ds features · ds agent · ds mission",
+            welcome_accent(),
+        )]));
+    }
     f.render_widget(
-        Paragraph::new(Text::from(lines)).wrap(Wrap { trim: true }),
+        Paragraph::new(Text::from(lines))
+            .style(welcome_bg())
+            .wrap(Wrap { trim: true }),
         area,
     );
 }
