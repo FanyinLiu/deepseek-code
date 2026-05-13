@@ -5580,11 +5580,10 @@ mod tests {
         )
         .expect("render snapshot");
 
-        assert!(snapshot.contains("API setup required"));
+        assert!(snapshot.contains("DS-CODE"));
         assert!(snapshot.contains("Paste your API key"));
-        assert!(snapshot.contains("paste API key"));
-        assert!(snapshot.contains("DeepSeek V4 Flash (auto)"));
-        assert!(!snapshot.contains("Type below, or press 1-3"));
+        assert!(snapshot.contains("cwd:"));
+        assert!(!snapshot.contains("/help for commands"));
     }
 
     #[test]
@@ -5599,10 +5598,10 @@ mod tests {
         )
         .expect("render snapshot");
 
-        assert!(snapshot.contains("What are we changing today?"));
-        assert!(snapshot.contains("Type below, or press 1-3"));
-        assert!(snapshot.contains("api:ready"));
-        assert!(snapshot.contains("DeepSeek V4 Flash (auto)"));
+        assert!(snapshot.contains("DS-CODE"));
+        assert!(snapshot.contains("/help for commands"));
+        assert!(snapshot.contains("press 1-3 for starters"));
+        assert!(snapshot.contains("DeepSeek V4 Flash"));
     }
 
     #[test]
@@ -5618,7 +5617,7 @@ mod tests {
         .expect("render snapshot");
 
         assert!(snapshot.contains("deepseek-code"));
-        assert!(snapshot.contains("api:ready"));
+        assert!(snapshot.contains("DS-CODE"));
     }
 
     #[test]
