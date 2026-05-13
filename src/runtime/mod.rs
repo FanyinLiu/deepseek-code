@@ -51,7 +51,6 @@ impl RuntimeKernel {
     }
 
     /// Validate that the kernel has one component for each required service.
-    #[must_use]
     pub fn validate(&self) -> Result<(), RuntimeKernelError> {
         let mut names = std::collections::BTreeSet::new();
         for component in self.components() {
