@@ -26,7 +26,7 @@ use ratatui::{
     style::Style,
     text::{Line, Span, Text},
     widgets::Paragraph,
-    Frame, Terminal,
+    Frame, Terminal, TerminalOptions, Viewport,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -183,6 +183,11 @@ impl RendererMode {
     #[must_use]
     fn uses_alternate_screen(self) -> bool {
         self == Self::Fullscreen
+    }
+
+    #[must_use]
+    fn uses_inline_viewport(self) -> bool {
+        self == Self::Classic
     }
 }
 
@@ -1997,6 +2002,9 @@ impl TuiApp {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.renderer_mode.uses_inline_viewport() {
+            return;
+        }
         match mouse.kind {
             MouseEventKind::ScrollUp => self.scroll_older(MOUSE_SCROLL_LINES),
             MouseEventKind::ScrollDown => self.scroll_newer(MOUSE_SCROLL_LINES),
@@ -2617,14 +2625,7 @@ impl TerminalSession {
                 EnableBracketedPaste
             )?;
         } else {
-            execute!(
-                stdout,
-                Hide,
-                MoveTo(0, 0),
-                Clear(ClearType::All),
-                MoveTo(0, 0),
-                EnableBracketedPaste
-            )?;
+            execute!(stdout, Hide, EnableBracketedPaste)?;
         }
         stdout.flush()?;
         Ok(Self {
@@ -2659,6 +2660,29 @@ impl Drop for TerminalSession {
             let _ = write!(stdout, "\x1b[0m\x1b[39m\x1b[49m");
             let _ = stdout.flush();
         }
+    }
+}
+
+fn classic_viewport_height() -> u16 {
+    let terminal_height = crossterm::terminal::size()
+        .map(|(_, height)| height)
+        .unwrap_or(24);
+    terminal_height.clamp(14, 28)
+}
+
+fn tui_terminal(
+    renderer: RendererMode,
+) -> Result<Terminal<CrosstermBackend<std::io::Stdout>>, anyhow::Error> {
+    let backend = CrosstermBackend::new(std::io::stdout());
+    if renderer.uses_inline_viewport() {
+        Ok(Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(classic_viewport_height()),
+            },
+        )?)
+    } else {
+        Ok(Terminal::new(backend)?)
     }
 }
 
@@ -3454,8 +3478,7 @@ pub async fn run_tui(
 
     // Set up terminal
     let _terminal_session = TerminalSession::enter(renderer_mode)?;
-    let backend = CrosstermBackend::new(std::io::stdout());
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = tui_terminal(renderer_mode)?;
     if renderer_mode.uses_alternate_screen() {
         terminal.clear()?;
     }
@@ -4460,6 +4483,7 @@ mod tests {
     #[test]
     fn mouse_wheel_scrolls_transcript() {
         let mut app = test_app();
+        app.renderer_mode = RendererMode::Fullscreen;
 
         app.handle_mouse(crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::ScrollUp,
@@ -4475,6 +4499,21 @@ mod tests {
             row: 0,
             modifiers: KeyModifiers::empty(),
         });
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn classic_renderer_leaves_mouse_wheel_to_terminal_scrollback() {
+        let mut app = test_app();
+        app.renderer_mode = RendererMode::Classic;
+
+        app.handle_mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        });
+
         assert_eq!(app.scroll_offset, 0);
     }
 
