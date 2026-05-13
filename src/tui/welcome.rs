@@ -352,6 +352,94 @@ pub fn render_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
     render_split_welcome(f, inner, data);
 }
 
+pub fn render_classic_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    f.render_widget(Paragraph::new("").style(welcome_bg()), area);
+
+    let mut lines = vec![Line::from(vec![
+        Span::styled("DS-CODE", welcome_text().add_modifier(Modifier::BOLD)),
+        Span::styled(" · ", welcome_muted()),
+        Span::styled(
+            format!("{} ({})", model_label(&data.model), data.thinking),
+            welcome_muted(),
+        ),
+    ])];
+
+    if data.api_key_status != "ready" {
+        lines.push(Line::from(vec![Span::styled(
+            truncate_chars(
+                &data.workspace_path.display().to_string(),
+                area.width as usize,
+            ),
+            welcome_muted(),
+        )]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::styled(
+            "API setup required",
+            welcome_accent().add_modifier(Modifier::BOLD),
+        )]));
+        lines.push(Line::from(vec![Span::styled(
+            "Paste your API key in the input line below, then press Enter.",
+            welcome_muted(),
+        )]));
+        if area.height >= 9 {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![Span::styled(
+                "1 paste API key · 2 enter to save · 3 start coding",
+                welcome_text(),
+            )]));
+        }
+        f.render_widget(
+            Paragraph::new(Text::from(lines))
+                .style(welcome_bg())
+                .wrap(Wrap { trim: true }),
+            area,
+        );
+        return;
+    }
+
+    lines.push(Line::from(vec![Span::styled(
+        truncate_chars(
+            &data.workspace_path.display().to_string(),
+            area.width as usize,
+        ),
+        welcome_muted(),
+    )]));
+    lines.push(Line::from(vec![
+        Span::styled("api:ready", welcome_ok()),
+        Span::styled(" · ", welcome_muted()),
+        Span::styled(format!("config:{}", data.config_status), welcome_muted()),
+    ]));
+
+    if area.height >= 8 {
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(vec![Span::styled(
+        "What are we changing today?",
+        welcome_text().add_modifier(Modifier::BOLD),
+    )]));
+    lines.push(Line::from(vec![Span::styled(
+        "Type below, or press 1-3 to load a starter.",
+        welcome_muted(),
+    )]));
+    if area.height >= 10 {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![Span::styled(
+            "1-3 starters · / commands · @ files · ! shell",
+            welcome_accent(),
+        )]));
+    }
+    f.render_widget(
+        Paragraph::new(Text::from(lines))
+            .style(welcome_bg())
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
 fn welcome_horizontal_margin(width: u16) -> u16 {
     match width {
         0..=72 => 1,
@@ -718,6 +806,27 @@ fn render_compact_api_onboarding(f: &mut Frame, area: Rect, data: &WelcomeDashbo
 // ═══════════════════════════════════════════════════════════════════════════════
 //  Helpers
 // ═══════════════════════════════════════════════════════════════════════════════
+
+fn model_label(model: &DeepSeekModel) -> &'static str {
+    match model {
+        DeepSeekModel::Pro => "DeepSeek V4 Pro",
+        DeepSeekModel::Flash => "DeepSeek V4 Flash",
+        DeepSeekModel::LegacyChat => "DeepSeek Chat",
+        DeepSeekModel::LegacyReasoner => "DeepSeek Reasoner",
+    }
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut out = value
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    out.push('…');
+    out
+}
 
 fn context_line(label: &str, value: impl Into<String>) -> Line<'static> {
     Line::from(vec![

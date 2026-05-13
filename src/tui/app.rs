@@ -22,7 +22,7 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Margin, Rect},
     style::Style,
     text::{Line, Span, Text},
     widgets::Paragraph,
@@ -2029,6 +2029,11 @@ impl TuiApp {
     fn render(&self, f: &mut Frame) {
         theme::set_active_theme(self.theme_mode);
         let area = f.area();
+        if self.renderer_mode == RendererMode::Classic {
+            self.render_classic(f, area);
+            return;
+        }
+
         render_canvas(f, area);
         let input_h = self.input_height();
 
@@ -2271,6 +2276,195 @@ impl TuiApp {
         }
     }
 
+    fn render_classic(&self, f: &mut Frame, area: Rect) {
+        render_canvas(f, area);
+
+        let input_h = self.input_height();
+        let slash_suggestions = self.slash_command_suggestions();
+        let options_count = self
+            .options_needed
+            .as_ref()
+            .map(|decision| decision.options.len())
+            .or_else(|| self.pending_options.as_ref().map(|(_, opts)| opts.len()))
+            .or_else(|| (!slash_suggestions.is_empty()).then_some(slash_suggestions.len()))
+            .unwrap_or(0);
+        let options_h: u16 = if options_count > 0 {
+            (options_count + 4).min(10) as u16
+        } else {
+            0
+        };
+        let show_exit_prompt = self.ctrl_c_exit_prompt_active_at(std::time::Instant::now());
+        let activity_h = u16::from(self.is_streaming || show_exit_prompt);
+        let inner = area.inner(Margin {
+            horizontal: u16::from(area.width >= 60),
+            vertical: 0,
+        });
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),
+                Constraint::Length(options_h),
+                Constraint::Length(activity_h),
+                Constraint::Length(1),
+                Constraint::Length(input_h),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+        let content_area = chunks[0];
+        let options_area = chunks[1];
+        let activity_area = chunks[2];
+        let top_divider_area = chunks[3];
+        let input_area = chunks[4];
+        let bottom_divider_area = chunks[5];
+
+        let showing_welcome = self.is_showing_welcome();
+        if self.settings_open {
+            settings_panel::render_settings_panel(
+                f,
+                content_area,
+                settings_panel::SettingsPanelProps {
+                    selected_tab: self.settings_tab,
+                    selected_row: self.settings_selected,
+                    model: &self.model,
+                    thinking: &self.thinking_mode,
+                    theme_label: self.theme_mode.label(),
+                },
+            );
+        } else if showing_welcome {
+            welcome::render_classic_welcome(f, content_area, &self.welcome);
+        } else {
+            let elapsed = self
+                .stream_start
+                .map_or(0, |s| s.elapsed().as_millis() as u64);
+            let empty_subagents: &[subagent_cards::SubagentCard] = &[];
+            let visible_subagents = if self.active_swarm.is_some() {
+                if self
+                    .active_swarm
+                    .as_ref()
+                    .is_some_and(|swarm| swarm.detail_expanded)
+                {
+                    &self.subagents
+                } else {
+                    empty_subagents
+                }
+            } else {
+                &self.subagents
+            };
+            transcript_view::render_transcript(
+                f,
+                content_area,
+                transcript_view::TranscriptProps {
+                    messages: &self.messages,
+                    pending_user_message: self.pending_user_message.as_deref(),
+                    scroll_offset: self.scroll_offset,
+                    plan_summary: self.plan_summary.as_deref(),
+                    plan_steps: &self.plan_steps,
+                    plan_current_step: self.plan_current_step,
+                    plan_total_steps: self.plan_total_steps,
+                    plan_warnings: &self.plan_warnings,
+                    subagents: visible_subagents,
+                    global_elapsed_ms: elapsed,
+                    diffs: &self.file_diffs,
+                    selected_diff: self.selected_diff,
+                    is_streaming: self.is_streaming,
+                    stream_buffer: &self.stream_buffer,
+                    reasoning_buffer: &self.reasoning_buffer,
+                    show_reasoning: self.show_reasoning,
+                },
+            );
+        }
+
+        if self.scroll_offset > 0 {
+            render_jump_to_bottom_hint(f, content_area);
+        }
+
+        if options_h > 0 {
+            let (kind, title, options) = if let Some(decision) = &self.options_needed {
+                (
+                    decision.kind,
+                    decision.title.as_str(),
+                    decision.options.as_slice(),
+                )
+            } else if let Some((t, opts)) = &self.pending_options {
+                (DecisionKind::Clarification, t.as_str(), opts.as_slice())
+            } else {
+                (DecisionKind::Clarification, "", &[][..])
+            };
+            if !options.is_empty() {
+                plan_tracker::render_options_panel(
+                    f,
+                    options_area,
+                    kind,
+                    title,
+                    options,
+                    self.selected_option_index,
+                );
+            } else if !slash_suggestions.is_empty() {
+                plan_tracker::render_slash_command_panel(
+                    f,
+                    options_area,
+                    &slash_suggestions,
+                    self.selected_slash_index,
+                );
+            }
+        }
+
+        if show_exit_prompt {
+            render_classic_status_text(f, activity_area, "Press Ctrl-C again to exit");
+        } else if self.is_streaming {
+            status_bar::render_status_bar(
+                f,
+                activity_area,
+                status_bar::StatusBarProps {
+                    mode: self.current_mode(),
+                    thinking: &self.thinking_mode,
+                    activity: Some(status_bar::StatusActivity {
+                        title: &self.current_task_title,
+                        elapsed_ms: self
+                            .stream_start
+                            .map_or(0, |started| started.elapsed().as_millis() as u64),
+                        input_tokens: self.activity_input_tokens(),
+                        tokens: self.current_turn_output_tokens,
+                        agent_tokens: self.live_agent_tokens(),
+                        thought_seconds: self.stream_start.map_or(0, |started| {
+                            thought_seconds_from_reasoning(
+                                &self.reasoning_buffer,
+                                started.elapsed().as_secs(),
+                            )
+                        }),
+                    }),
+                },
+            );
+        }
+
+        render_classic_divider(f, top_divider_area);
+        let opts_for_input = self.pending_options.as_ref().map(|(_, o)| o.as_slice());
+        if self.api_key_entry.is_some() {
+            input::render_api_key_input(f, input_area, &self.input_text, self.cursor_pos);
+        } else {
+            input::render_input(
+                f,
+                input_area,
+                &self.input_text,
+                self.cursor_pos,
+                opts_for_input,
+            );
+        }
+        render_classic_divider(f, bottom_divider_area);
+
+        let (cursor_x, cursor_y) = input::terminal_cursor_position(
+            input_area,
+            &self.input_text,
+            self.cursor_pos,
+            self.api_key_entry.is_some(),
+        );
+        f.set_cursor_position((cursor_x, cursor_y));
+
+        if let Some((ref approval, _)) = self.approval {
+            approval_popup::render_approval_popup(f, area, approval);
+        }
+    }
+
     fn render_powerline_footer(&self, f: &mut Frame, area: ratatui::layout::Rect) {
         let status = if self.is_streaming {
             "working"
@@ -2476,6 +2670,43 @@ fn render_canvas(f: &mut Frame, area: Rect) {
         .collect::<Vec<_>>();
     f.render_widget(
         Paragraph::new(Text::from(lines)).style(Style::default().fg(p.text).bg(p.canvas)),
+        area,
+    );
+}
+
+fn render_classic_divider(f: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let p = theme::palette();
+    let line = "─".repeat(area.width as usize);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            line,
+            Style::default().fg(p.dim).bg(p.canvas),
+        )))
+        .style(Style::default().fg(p.text).bg(p.canvas)),
+        area,
+    );
+}
+
+fn render_classic_status_text(f: &mut Frame, area: Rect, text: &str) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let p = theme::palette();
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("* ", Style::default().fg(p.warning).bg(p.canvas)),
+            Span::styled(
+                text.to_string(),
+                Style::default()
+                    .fg(p.dim)
+                    .bg(p.canvas)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            ),
+        ]))
+        .style(Style::default().fg(p.text).bg(p.canvas)),
         area,
     );
 }
@@ -4202,7 +4433,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal.draw(|f| app.render(f)).expect("draw");
 
-        terminal.backend_mut().assert_cursor_position((7, 30));
+        terminal.backend_mut().assert_cursor_position((7, 31));
     }
 
     #[test]
@@ -5425,10 +5656,9 @@ mod tests {
         .expect("render snapshot");
 
         assert!(snapshot.contains("Identify entry points"));
-        assert!(snapshot.contains("plan"));
         assert!(snapshot.contains("agents"));
         assert!(snapshot.contains("Trace TUI input loop"));
-        assert!(snapshot.contains("DeepSeek V4 Flash (auto)"));
+        assert!(!snapshot.contains("ds-code"));
         assert!(!snapshot.contains("Model:"));
     }
 
