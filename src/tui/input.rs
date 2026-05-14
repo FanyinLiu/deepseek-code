@@ -11,7 +11,12 @@ use crate::tui::theme;
 /// Quiet terminal input: no border, just a clean prompt. The visible cursor
 /// comes from the terminal itself (positioned by the caller via
 /// [`terminal_cursor_position`]); we never paint a glyph for it.
-pub fn render_input(f: &mut Frame, area: Rect, input_text: &str, _pending_options: Option<&[String]>) {
+pub fn render_input(
+    f: &mut Frame,
+    area: Rect,
+    input_text: &str,
+    _pending_options: Option<&[String]>,
+) {
     let lines: Vec<Line> = if input_text.is_empty() {
         vec![Line::from(vec![prompt_span()])]
     } else {

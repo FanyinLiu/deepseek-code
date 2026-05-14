@@ -255,10 +255,7 @@ mod tests {
             &ThinkingMode::On,
         );
 
-        assert_eq!(
-            hint,
-            "⠹ Fix input colors... (1s · ↓ 663 tokens · thinking)"
-        );
+        assert_eq!(hint, "⠹ Fix input colors... (1s · ↓ 663 tokens · thinking)");
     }
 
     #[test]
