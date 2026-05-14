@@ -161,7 +161,6 @@ fn is_sensitive_command_env_key(key: &str) -> bool {
         "OPENAI",
         "DEEPSEEK",
         "GITHUB",
-        "ANTHROPIC",
         "MCP",
     ];
 

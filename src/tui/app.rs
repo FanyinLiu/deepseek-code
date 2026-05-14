@@ -4352,7 +4352,7 @@ mod tests {
     #[test]
     fn task_title_summarizes_chinese_prompt() {
         assert_eq!(
-            summarize_task_title("修复输入框颜色和光标显示，让它更像 Claude Code"),
+            summarize_task_title("修复输入框颜色和光标显示，让它更像主流编程助手"),
             "修复输入框"
         );
     }

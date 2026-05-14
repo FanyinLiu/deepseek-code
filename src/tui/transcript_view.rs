@@ -227,7 +227,7 @@ fn render_message(lines: &mut Vec<Line>, msg: &ProtocolMessage, width: u16) {
                 intent: format!("{kind} request"),
                 detail,
             };
-            lines.extend(render_claude_tool_lines(&view, width));
+            lines.extend(render_connected_tool_lines(&view, width));
         }
     }
 }
@@ -664,7 +664,7 @@ fn user_text_lines(content: &str, width: u16) -> Vec<Line<'static>> {
     lines
 }
 
-fn render_claude_tool_lines(view: &view_blocks::ToolCallView, width: u16) -> Vec<Line<'static>> {
+fn render_connected_tool_lines(view: &view_blocks::ToolCallView, width: u16) -> Vec<Line<'static>> {
     if view.status == view_blocks::ViewStatus::Running {
         if view.name == "run_command" {
             return connected_tool_lines("Running 1 shell command...", &view.detail, width);
