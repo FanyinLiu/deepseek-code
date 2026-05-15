@@ -160,6 +160,8 @@ pub struct UiConfig {
     pub language: String,
     #[serde(default = "default_theme")]
     pub theme: String,
+    #[serde(default = "default_motion")]
+    pub motion: String,
     #[serde(default)]
     pub show_reasoning_summary: bool,
     #[serde(default)]
@@ -304,6 +306,7 @@ impl Default for UiConfig {
         Self {
             language: default_language(),
             theme: default_theme(),
+            motion: default_motion(),
             show_reasoning_summary: true,
             show_raw_reasoning: false,
             show_cache_hud: true,
@@ -349,7 +352,10 @@ fn default_language() -> String {
     "zh-CN".into()
 }
 fn default_theme() -> String {
-    "light".into()
+    "auto".into()
+}
+fn default_motion() -> String {
+    "subtle".into()
 }
 
 fn default_router_enabled() -> bool {
@@ -677,6 +683,11 @@ mod tests {
         let loaded = Config::load(Some(&config_dir)).expect("load config");
 
         assert_eq!(loaded.api_key.as_deref(), Some("sk-local"));
+    }
+
+    #[test]
+    fn ui_config_defaults_to_subtle_motion() {
+        assert_eq!(Config::default().ui.motion, "subtle");
     }
 
     #[test]

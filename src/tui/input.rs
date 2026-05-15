@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::tui::theme;
+use crate::tui::{motion::MotionFrame, theme};
 
 /// Quiet terminal input: no border, just a clean prompt.
 pub fn render_input(
@@ -15,9 +15,10 @@ pub fn render_input(
     input_text: &str,
     cursor_position: usize,
     _pending_options: Option<&[String]>,
+    motion: MotionFrame,
 ) {
     let lines: Vec<Line> = if input_text.is_empty() {
-        vec![Line::from(vec![prompt_span(), cursor_span()])]
+        vec![Line::from(vec![prompt_span(), cursor_span(motion)])]
     } else {
         let mut line_start = 0usize;
         input_text
@@ -35,7 +36,7 @@ pub fn render_input(
                 } else {
                     spans.push(Span::styled("  ", input_style()));
                 }
-                spans.extend(edit_spans(line, local_cursor));
+                spans.extend(edit_spans(line, local_cursor, motion));
                 line_start += line_len + 1;
                 Line::from(spans)
             })
@@ -47,20 +48,26 @@ pub fn render_input(
     f.render_widget(input, area);
 }
 
-pub fn render_api_key_input(f: &mut Frame, area: Rect, input_text: &str, cursor_position: usize) {
+pub fn render_api_key_input(
+    f: &mut Frame,
+    area: Rect,
+    input_text: &str,
+    cursor_position: usize,
+    motion: MotionFrame,
+) {
     let display = mask_secret(input_text);
     let cursor = cursor_position.min(display.chars().count());
     let lines = if display.is_empty() {
         vec![Line::from(vec![
             prompt_span(),
-            cursor_span(),
+            cursor_span(motion),
             Span::styled(" ", input_style()),
             Span::styled("paste API key...", muted_style()),
         ])]
     } else {
         vec![Line::from({
             let mut spans = vec![prompt_span()];
-            spans.extend(edit_spans(&display, Some(cursor)));
+            spans.extend(edit_spans(&display, Some(cursor), motion));
             spans
         })]
     };
@@ -131,7 +138,7 @@ fn muted_style() -> Style {
     Style::default().fg(p.muted).bg(p.canvas)
 }
 
-fn edit_spans(line: &str, cursor: Option<usize>) -> Vec<Span<'static>> {
+fn edit_spans(line: &str, cursor: Option<usize>, motion: MotionFrame) -> Vec<Span<'static>> {
     let Some(cursor) = cursor else {
         return vec![Span::styled(line.to_string(), input_style())];
     };
@@ -148,7 +155,7 @@ fn edit_spans(line: &str, cursor: Option<usize>) -> Vec<Span<'static>> {
         spans.push(Span::styled(before, input_style()));
     }
 
-    spans.push(cursor_span());
+    spans.push(cursor_span(motion));
 
     if let Some(ch) = at {
         spans.push(Span::styled(ch.to_string(), input_style()));
@@ -161,9 +168,9 @@ fn edit_spans(line: &str, cursor: Option<usize>) -> Vec<Span<'static>> {
     spans
 }
 
-fn cursor_span() -> Span<'static> {
+fn cursor_span(motion: MotionFrame) -> Span<'static> {
     Span::styled(
-        "▌",
+        motion.cursor(),
         Style::default()
             .fg(theme::palette().accent)
             .bg(theme::palette().canvas),
@@ -192,13 +199,18 @@ fn char_display_width(ch: char) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::motion::MotionLevel;
     use ratatui::{backend::TestBackend, Terminal};
+
+    fn frame(elapsed_ms: u64) -> MotionFrame {
+        MotionFrame::new(MotionLevel::Subtle, elapsed_ms)
+    }
 
     #[test]
     fn empty_normal_input_draws_visible_cursor() {
         let mut terminal = Terminal::new(TestBackend::new(20, 1)).expect("terminal");
         terminal
-            .draw(|f| render_input(f, f.area(), "", 0, None))
+            .draw(|f| render_input(f, f.area(), "", 0, None, frame(0)))
             .expect("draw");
 
         let rendered = buffer_text(terminal.backend());
@@ -209,7 +221,7 @@ mod tests {
     fn typed_input_uses_inline_cursor_marker() {
         let mut terminal = Terminal::new(TestBackend::new(20, 1)).expect("terminal");
         terminal
-            .draw(|f| render_input(f, f.area(), "ask", 3, None))
+            .draw(|f| render_input(f, f.area(), "ask", 3, None, frame(0)))
             .expect("draw");
 
         let rendered = buffer_text(terminal.backend());
@@ -226,7 +238,7 @@ mod tests {
     fn api_key_input_empty_render_shows_setup_hint() {
         let mut terminal = Terminal::new(TestBackend::new(80, 1)).expect("terminal");
         terminal
-            .draw(|f| render_api_key_input(f, f.area(), "", 0))
+            .draw(|f| render_api_key_input(f, f.area(), "", 0, frame(0)))
             .expect("draw");
         let rendered = buffer_text(terminal.backend());
         assert!(rendered.contains("> ▌"));
@@ -237,7 +249,7 @@ mod tests {
     fn api_key_input_masks_secret_render() {
         let mut terminal = Terminal::new(TestBackend::new(80, 1)).expect("terminal");
         terminal
-            .draw(|f| render_api_key_input(f, f.area(), "sk-secret", 9))
+            .draw(|f| render_api_key_input(f, f.area(), "sk-secret", 9, frame(0)))
             .expect("draw");
         let rendered = buffer_text(terminal.backend());
         assert!(rendered.contains("•••••••••"));
@@ -249,7 +261,7 @@ mod tests {
         theme::set_active_theme(theme::ThemeMode::Light);
         let mut terminal = Terminal::new(TestBackend::new(20, 1)).expect("terminal");
         terminal
-            .draw(|f| render_input(f, f.area(), "hello", 5, None))
+            .draw(|f| render_input(f, f.area(), "hello", 5, None, frame(0)))
             .expect("draw");
         let cell = terminal.backend().buffer().cell((2, 0)).expect("cell");
         assert_eq!(cell.fg, theme::LIGHT_PALETTE.text);
@@ -261,7 +273,7 @@ mod tests {
         theme::set_active_theme(theme::ThemeMode::Light);
         let mut terminal = Terminal::new(TestBackend::new(20, 2)).expect("terminal");
         terminal
-            .draw(|f| render_input(f, f.area(), "hello\nworld", 11, None))
+            .draw(|f| render_input(f, f.area(), "hello\nworld", 11, None, frame(0)))
             .expect("draw");
         let cell = terminal.backend().buffer().cell((2, 1)).expect("cell");
         assert_eq!(cell.fg, theme::LIGHT_PALETTE.text);
@@ -273,7 +285,7 @@ mod tests {
         theme::set_active_theme(theme::ThemeMode::Light);
         let mut terminal = Terminal::new(TestBackend::new(80, 1)).expect("terminal");
         terminal
-            .draw(|f| render_api_key_input(f, f.area(), "", 0))
+            .draw(|f| render_api_key_input(f, f.area(), "", 0, frame(0)))
             .expect("draw");
         let cell = terminal.backend().buffer().cell((4, 0)).expect("cell");
         assert!(
@@ -287,12 +299,31 @@ mod tests {
         theme::set_active_theme(theme::ThemeMode::Dark);
         let mut terminal = Terminal::new(TestBackend::new(20, 1)).expect("terminal");
         terminal
-            .draw(|f| render_input(f, f.area(), "hello", 5, None))
+            .draw(|f| render_input(f, f.area(), "hello", 5, None, frame(0)))
             .expect("draw");
         let cell = terminal.backend().buffer().cell((2, 0)).expect("cell");
         assert_eq!(cell.fg, theme::DARK_PALETTE.text);
         assert_eq!(cell.bg, theme::DARK_PALETTE.canvas);
         theme::set_active_theme(theme::ThemeMode::Light);
+    }
+
+    #[test]
+    fn cursor_blink_only_changes_cursor_cell() {
+        let mut visible_terminal = Terminal::new(TestBackend::new(20, 1)).expect("terminal");
+        visible_terminal
+            .draw(|f| render_input(f, f.area(), "ask", 3, None, frame(0)))
+            .expect("draw visible");
+        let visible = buffer_text(visible_terminal.backend());
+
+        let mut hidden_terminal = Terminal::new(TestBackend::new(20, 1)).expect("terminal");
+        hidden_terminal
+            .draw(|f| render_input(f, f.area(), "ask", 3, None, frame(500)))
+            .expect("draw hidden");
+        let hidden = buffer_text(hidden_terminal.backend());
+
+        assert_eq!(visible.chars().count(), hidden.chars().count());
+        assert!(visible.contains("> ask▌"));
+        assert!(hidden.contains("> ask "));
     }
 
     #[test]

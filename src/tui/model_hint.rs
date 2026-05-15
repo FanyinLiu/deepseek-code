@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::deepseek::{DeepSeekModel, ThinkingMode};
-use crate::tui::{status_bar, theme};
+use crate::tui::{motion, status_bar, theme};
 
 #[must_use]
 pub fn model_hint_text(model: &DeepSeekModel, thinking: &ThinkingMode) -> String {
@@ -47,6 +47,7 @@ pub fn render_composer_hint(
     thinking: &ThinkingMode,
     activity: Option<status_bar::StatusActivity<'_>>,
     mode: status_bar::AppMode,
+    motion_level: motion::MotionLevel,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -56,7 +57,7 @@ pub fn render_composer_hint(
     let model_text = model_hint_text(model, thinking);
     let mut activity_text = activity
         .as_ref()
-        .map(|activity| status_bar::activity_hint_text(activity, thinking))
+        .map(|activity| status_bar::activity_hint_text(activity, thinking, motion_level))
         .unwrap_or_default();
     let width = area.width as usize;
     let right_len = display_width(&model_text);
@@ -197,6 +198,7 @@ mod tests {
                         thought_seconds: 2,
                     }),
                     status_bar::AppMode::Chat,
+                    motion::MotionLevel::Off,
                 );
             })
             .expect("draw");
@@ -209,7 +211,7 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(rendered
-            .contains("⠴ Fix input colors... (2s · ↓ 578 tokens · thinking with high effort)"));
+            .contains("* Fix input colors... (2s · ↓ 578 tokens · thinking with high effort)"));
         assert!(rendered.contains("DeepSeek V4 Flash (on)"));
     }
 }

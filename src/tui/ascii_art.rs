@@ -14,6 +14,9 @@ pub const LOGO_LARGE: &str = r#"
 /// A compact one-line logo for the status bar.
 pub const LOGO_TINY: &str = "◆";
 
+/// Tiny product mark for compact brand lockups.
+pub const WHALE_TINY: &str = LOGO_TINY;
+
 /// Droid-style welcome wordmark for normal terminal widths.
 pub const WELCOME_WORDMARK: &[&str] = &[
     "█████   █████   █████   █████   █████   █████",
@@ -23,53 +26,24 @@ pub const WELCOME_WORDMARK: &[&str] = &[
     "█████   █████   ██      ██      █████   █████",
 ];
 
-/// Many-handed hydra badge — the project mascot.
-/// Symmetrical pixel art representing the "many-handed coding agent".
-/// 25 rows × 62 columns.
-pub const WELCOME_MASCOT: &[&str] = &[
-    "                            ██████                            ",
-    "                        ██████████████                        ",
-    "                      ██████████████████                      ",
-    "                    ██████████████████████                    ",
-    "                    ██████████████████████                    ",
-    "                    ██████████████████████                    ",
-    "      ██████          ██    ██████    ██          ██████      ",
-    "    ████  ████        ██      ██      ██        ████  ████    ",
-    "    ██      ████        ██████████████        ████      ██    ",
-    "    ██████    ██      ██████████████████      ██    ██████    ",
-    "              ██          ██████████          ██              ",
-    "              ████          ██████          ████              ",
-    "                ██████                  ██████                ",
-    "                                                              ",
-    "    ██████████        ████          ████        ██████████    ",
-    "  ████      ████  ████████          ████████  ████      ████  ",
-    "████          ██████        ██  ██        ██████          ████",
-    "██                        ████  ████                        ██",
-    "██      ██              ██████  ██████              ██      ██",
-    "████    ██          ██████          ██████          ██    ████",
-    "  ██████        ██████                  ██████        ██████  ",
-    "              ████                          ████              ",
-    "              ██                              ██              ",
-    "              ████      ██          ██      ████              ",
-    "                ████████              ████████                ",
+/// DeepSeek whale mark used in the welcome card.
+pub const WELCOME_WHALE: &[&str] = &[
+    "              __",
+    "       ____.-' /",
+    "  _.-''        \\___",
+    " /  .-.   .-.      \\",
+    "/___/  \\_/   \\______\\",
+    "     \\____/          ",
 ];
 
-/// Terminal-correct compact mascot using half-block pixels.
-pub const WELCOME_MASCOT_COMPACT: &[&str] = &[
-    "            ▄▄███▄▄            ",
-    "          ▄█████████▄          ",
-    "          ███████████          ",
-    "  ▄█▀█▄    █  ▀█▀  █    ▄█▀█▄  ",
-    "  █▄▄ ▀█   ▄███████▄   █▀ ▄▄█  ",
-    "       █▄    ▀███▀    ▄█       ",
-    "        ▀▀▀         ▀▀▀        ",
-    " ▄█▀▀▀█▄ ▄▄██     ██▄▄ ▄█▀▀▀█▄ ",
-    "█▀     ▀▀▀   ▄█ █▄   ▀▀▀     ▀█",
-    "█▄  █     ▄▄█▀▀ ▀▀█▄▄     █  ▄█",
-    " ▀▀▀   ▄█▀▀         ▀▀█▄   ▀▀▀ ",
-    "       █▄   ▄     ▄   ▄█       ",
-    "        ▀▀▀▀       ▀▀▀▀        ",
-];
+/// Compatibility alias for older welcome code/tests.
+pub const WELCOME_MASCOT: &[&str] = WELCOME_WHALE;
+
+/// Compact whale mark for narrow welcome surfaces.
+pub const WELCOME_WHALE_COMPACT: &[&str] = &["      __", " __.-' /", "/_   _/", "  \\_/  "];
+
+/// Compatibility alias for older compact mascot code/tests.
+pub const WELCOME_MASCOT_COMPACT: &[&str] = WELCOME_WHALE_COMPACT;
 
 /// Diamond "mascot" frames for the thinking spinner.
 pub const SPINNER_FRAMES: &[&str] = &["◇", "◈", "◆", "◈"];
@@ -94,7 +68,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn welcome_mascot_stays_terminal_safe() {
+    fn welcome_whale_stays_terminal_safe() {
         assert_eq!(WELCOME_WORDMARK.len(), 5);
         let wordmark_width = WELCOME_WORDMARK[0].chars().count();
         assert_eq!(wordmark_width, 45);
@@ -103,33 +77,22 @@ mod tests {
             assert!(line.chars().all(|ch| matches!(ch, ' ' | '█')));
         }
 
-        assert_eq!(WELCOME_MASCOT.len(), 25);
-
-        let width = WELCOME_MASCOT[0].chars().count();
-        assert_eq!(width, 62);
-
-        for line in WELCOME_MASCOT {
-            assert_eq!(line.chars().count(), width);
-            assert!(line.chars().all(|ch| matches!(ch, ' ' | '█')));
+        assert_eq!(WELCOME_WHALE.len(), 6);
+        for line in WELCOME_WHALE {
+            assert!(line.chars().count() <= 23);
+            assert!(line.is_ascii());
         }
 
-        assert_eq!(WELCOME_MASCOT_COMPACT.len(), 13);
-        let compact_width = WELCOME_MASCOT_COMPACT[0].chars().count();
-        assert_eq!(compact_width, 31);
-        for line in WELCOME_MASCOT_COMPACT {
-            assert_eq!(line.chars().count(), compact_width);
-            assert!(line.chars().all(|ch| matches!(ch, ' ' | '█' | '▄' | '▀')));
+        assert_eq!(WELCOME_WHALE_COMPACT.len(), 4);
+        for line in WELCOME_WHALE_COMPACT {
+            assert!(line.chars().count() <= 8);
+            assert!(line.is_ascii());
         }
     }
 
     #[test]
-    fn welcome_mascot_keeps_symmetry() {
-        let block_count = WELCOME_MASCOT
-            .iter()
-            .map(|line| line.chars().filter(|ch| *ch == '█').count())
-            .sum::<usize>();
-
-        // Should be a dense badge
-        assert!(block_count >= 100);
+    fn welcome_whale_has_tail_and_body() {
+        assert!(WELCOME_WHALE.iter().any(|line| line.contains("____.-'")));
+        assert!(WELCOME_WHALE.iter().any(|line| line.contains("\\______\\")));
     }
 }

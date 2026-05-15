@@ -3,7 +3,7 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use crate::tui::theme;
+use crate::tui::{motion, theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewStatus {
@@ -89,8 +89,18 @@ pub struct WorkerReportView {
 
 #[must_use]
 pub fn status_word(status: ViewStatus) -> Span<'static> {
+    status_word_with_motion(status, motion::MotionFrame::disabled())
+}
+
+#[must_use]
+pub fn status_word_with_motion(status: ViewStatus, frame: motion::MotionFrame) -> Span<'static> {
+    let icon = if status == ViewStatus::Running {
+        frame.running_icon()
+    } else {
+        status.icon()
+    };
     Span::styled(
-        format!("{} {}", status.icon(), status.label()),
+        format!("{icon} {}", status.label()),
         Style::default()
             .fg(status.color())
             .add_modifier(Modifier::BOLD),
@@ -108,9 +118,18 @@ pub fn kv_line(label: impl Into<String>, value: impl Into<String>) -> Line<'stat
 
 #[must_use]
 pub fn header_line(title: impl Into<String>, status: ViewStatus) -> Line<'static> {
+    header_line_with_motion(title, status, motion::MotionFrame::disabled())
+}
+
+#[must_use]
+pub fn header_line_with_motion(
+    title: impl Into<String>,
+    status: ViewStatus,
+    frame: motion::MotionFrame,
+) -> Line<'static> {
     let p = theme::palette();
     Line::from(vec![
-        status_word(status),
+        status_word_with_motion(status, frame),
         Span::styled("  ", Style::default()),
         Span::styled(
             title.into(),
@@ -134,6 +153,15 @@ pub fn render_tool_lines(view: &ToolCallView, max_detail: usize) -> Vec<Line<'st
 
 #[must_use]
 pub fn compact_tool_line(view: &ToolCallView, max_detail: usize) -> Line<'static> {
+    compact_tool_line_with_motion(view, max_detail, motion::MotionFrame::disabled())
+}
+
+#[must_use]
+pub fn compact_tool_line_with_motion(
+    view: &ToolCallView,
+    max_detail: usize,
+    frame: motion::MotionFrame,
+) -> Line<'static> {
     let p = theme::palette();
     let detail = summarize_tool_detail(&view.detail);
     let detail = truncate(&detail, max_detail);
@@ -143,7 +171,7 @@ pub fn compact_tool_line(view: &ToolCallView, max_detail: usize) -> Line<'static
         format!("tool {}  {}", view.name, detail)
     };
     Line::from(vec![
-        status_word(view.status),
+        status_word_with_motion(view.status, frame),
         Span::styled("  ", Style::default().fg(p.text).bg(p.canvas)),
         Span::styled(
             title,
@@ -172,8 +200,17 @@ pub fn render_task_lines(view: &TaskReturnView, max_detail: usize) -> Vec<Line<'
 
 #[must_use]
 pub fn render_worker_lines(view: &WorkerReportView, max_detail: usize) -> Vec<Line<'static>> {
+    render_worker_lines_with_motion(view, max_detail, motion::MotionFrame::disabled())
+}
+
+#[must_use]
+pub fn render_worker_lines_with_motion(
+    view: &WorkerReportView,
+    max_detail: usize,
+    frame: motion::MotionFrame,
+) -> Vec<Line<'static>> {
     let mut lines = vec![
-        header_line(format!("agent {}", view.name), view.status),
+        header_line_with_motion(format!("agent {}", view.name), view.status, frame),
         kv_line("task", truncate(&view.task, max_detail)),
     ];
     for (label, value) in &view.metadata {

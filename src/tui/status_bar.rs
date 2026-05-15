@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::deepseek::ThinkingMode;
-use crate::tui::theme;
+use crate::tui::{motion, theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
@@ -43,6 +43,7 @@ pub struct StatusBarProps<'a> {
     pub mode: AppMode,
     pub thinking: &'a ThinkingMode,
     pub activity: Option<StatusActivity<'a>>,
+    pub motion_level: motion::MotionLevel,
 }
 
 pub struct StatusActivity<'a> {
@@ -52,19 +53,28 @@ pub struct StatusActivity<'a> {
     pub thought_seconds: u64,
 }
 
-pub(crate) fn activity_hint_text(activity: &StatusActivity<'_>, thinking: &ThinkingMode) -> String {
-    let spinner = activity_spinner(activity.elapsed_ms);
+pub(crate) fn activity_hint_text(
+    activity: &StatusActivity<'_>,
+    thinking: &ThinkingMode,
+    motion_level: motion::MotionLevel,
+) -> String {
+    let frame = motion::MotionFrame::new(motion_level, activity.elapsed_ms);
+    let spinner = frame.running_icon();
     let title = stable_activity_title(activity.title);
     let elapsed = format_elapsed(activity.elapsed_ms / 1_000);
     let effort = thinking_effort_label(thinking);
 
     if activity.tokens > 0 {
         format!(
-            "{spinner} {title}... ({elapsed} · ↓ {} tokens · thinking with {effort} effort)",
+            "{spinner} {title}{} ({elapsed} · ↓ {} tokens · thinking with {effort} effort)",
+            frame.dots(),
             activity.tokens
         )
     } else {
-        format!("{spinner} {title}... ({elapsed} · thinking with {effort} effort)")
+        format!(
+            "{spinner} {title}{} ({elapsed} · thinking with {effort} effort)",
+            frame.dots()
+        )
     }
 }
 
@@ -91,12 +101,6 @@ fn format_elapsed(elapsed_seconds: u64) -> String {
     }
 }
 
-fn activity_spinner(elapsed_ms: u64) -> &'static str {
-    const GLYPHS: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    let idx = ((elapsed_ms / 80) as usize) % GLYPHS.len();
-    GLYPHS[idx]
-}
-
 fn thinking_effort_label(thinking: &ThinkingMode) -> &'static str {
     match thinking {
         ThinkingMode::Auto => "auto",
@@ -117,7 +121,7 @@ pub fn render_status_bar(f: &mut Frame, area: Rect, props: StatusBarProps<'_>) {
     };
 
     let line = Line::from(vec![Span::styled(
-        activity_hint_text(&activity, props.thinking),
+        activity_hint_text(&activity, props.thinking, props.motion_level),
         Style::default()
             .fg(props.mode.color())
             .bg(p.canvas)
@@ -134,6 +138,7 @@ pub fn render_status_bar(f: &mut Frame, area: Rect, props: StatusBarProps<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::motion::MotionLevel;
 
     #[test]
     fn activity_hint_uses_english_task_title() {
@@ -145,11 +150,12 @@ mod tests {
                 thought_seconds: 2,
             },
             &ThinkingMode::Auto,
+            MotionLevel::Off,
         );
 
         assert_eq!(
             hint,
-            "⠴ Fix input colors... (6s · ↓ 578 tokens · thinking with auto effort)"
+            "* Fix input colors... (6s · ↓ 578 tokens · thinking with auto effort)"
         );
     }
 
@@ -163,11 +169,12 @@ mod tests {
                 thought_seconds: 2,
             },
             &ThinkingMode::Auto,
+            MotionLevel::Off,
         );
 
         assert_eq!(
             hint,
-            "⠴ 修复输入颜色... (6s · ↓ 578 tokens · thinking with auto effort)"
+            "* 修复输入颜色... (6s · ↓ 578 tokens · thinking with auto effort)"
         );
     }
 
@@ -189,11 +196,12 @@ mod tests {
                 thought_seconds: 0,
             },
             &ThinkingMode::On,
+            MotionLevel::Off,
         );
 
         assert_eq!(
             hint,
-            "⠹ Fix input colors... (1s · ↓ 663 tokens · thinking with high effort)"
+            "* Fix input colors... (1s · ↓ 663 tokens · thinking with high effort)"
         );
     }
 
@@ -207,6 +215,7 @@ mod tests {
                 thought_seconds: 0,
             },
             &ThinkingMode::Auto,
+            MotionLevel::Off,
         );
         let second = activity_hint_text(
             &StatusActivity {
@@ -216,6 +225,7 @@ mod tests {
                 thought_seconds: 0,
             },
             &ThinkingMode::Auto,
+            MotionLevel::Off,
         );
 
         assert!(first.contains("Fix input colors..."));

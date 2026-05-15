@@ -42,15 +42,32 @@ impl ApiKeyStoreLocation {
 }
 
 pub fn get_api_key(config_value: Option<&str>) -> Option<String> {
-    // 1. Env var (highest priority for CLI usage)
+    if let Some(key) = get_env_api_key() {
+        return Some(key);
+    }
+
+    if let Some(key) = get_keyring_api_key() {
+        return Some(key);
+    }
+
+    get_config_api_key(config_value)
+}
+
+pub fn get_api_key_without_keyring(config_value: Option<&str>) -> Option<String> {
+    get_env_api_key().or_else(|| get_config_api_key(config_value))
+}
+
+pub fn get_env_api_key() -> Option<String> {
     if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
         if !key.trim().is_empty() {
             tracing::debug!("using API key from DEEPSEEK_API_KEY env var");
             return Some(key.trim().to_string());
         }
     }
+    None
+}
 
-    // 2. System keyring
+pub fn get_keyring_api_key() -> Option<String> {
     match keyring::Entry::new(KEYRING_SERVICE, KEYRING_USERNAME) {
         Ok(entry) => match entry.get_password() {
             Ok(key) if !key.is_empty() => {
@@ -63,8 +80,10 @@ pub fn get_api_key(config_value: Option<&str>) -> Option<String> {
             tracing::debug!("keyring not available: {}", e);
         }
     }
+    None
+}
 
-    // 3. Config file (fallback, discouraged)
+fn get_config_api_key(config_value: Option<&str>) -> Option<String> {
     if let Some(key) = config_value {
         if !key.trim().is_empty() {
             tracing::warn!("using API key from config file — consider using keyring instead");
@@ -81,7 +100,7 @@ pub fn get_effective_api_key(project_root: Option<&Path>) -> Option<String> {
     get_api_key(config_value)
 }
 
-fn config_api_key(config: &crate::storage::Config) -> Option<&str> {
+pub fn config_api_key(config: &crate::storage::Config) -> Option<&str> {
     config
         .api_key
         .as_deref()

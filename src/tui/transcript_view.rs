@@ -7,7 +7,9 @@ use ratatui::{
 };
 
 use crate::deepseek::{MessageVisibility, ProtocolMessage, Role};
-use crate::tui::{diff_viewer, plan_tracker, subagent_cards, syntax_highlight, theme, view_blocks};
+use crate::tui::{
+    diff_viewer, motion, plan_tracker, subagent_cards, syntax_highlight, theme, view_blocks,
+};
 
 /// Single continuous terminal transcript.
 /// No role headers, no extra blank lines, content speaks for itself.
@@ -22,6 +24,7 @@ pub struct TranscriptProps<'a> {
     pub plan_warnings: &'a [String],
     pub subagents: &'a [subagent_cards::SubagentCard],
     pub global_elapsed_ms: u64,
+    pub motion_level: motion::MotionLevel,
     pub diffs: &'a [diff_viewer::FileDiffItem],
     pub selected_diff: Option<usize>,
     pub is_streaming: bool,
@@ -33,6 +36,7 @@ pub struct TranscriptProps<'a> {
 pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) {
     let mut lines: Vec<Line> = Vec::new();
     let palette = theme::palette();
+    let frame = motion::MotionFrame::new(props.motion_level, props.global_elapsed_ms);
 
     // ── Messages ──
     for msg in props.messages {
@@ -43,7 +47,7 @@ pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) 
         if !lines.is_empty() {
             lines.push(Line::from(""));
         }
-        render_message(&mut lines, msg, area.width);
+        render_message(&mut lines, msg, area.width, frame);
     }
 
     let sticky_user_lines: Vec<Line<'static>> = props
@@ -57,13 +61,20 @@ pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) 
         if !lines.is_empty() && !props.stream_buffer.starts_with('\n') {
             lines.push(Line::from(""));
         }
-        render_assistant_content(
-            &mut lines,
-            props.stream_buffer,
-            area.width,
-            "",
-            palette.text,
-        );
+        if props.stream_buffer.trim().is_empty() && props.is_streaming {
+            lines.push(streaming_status_line(frame));
+        } else {
+            render_assistant_content(
+                &mut lines,
+                props.stream_buffer,
+                area.width,
+                "",
+                palette.text,
+            );
+            if props.is_streaming {
+                lines.push(streaming_status_line(frame));
+            }
+        }
     }
 
     // ── Reasoning (hidden by default, shown if toggled) ──
@@ -86,11 +97,14 @@ pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) 
         }
         render_inline_plan(
             &mut lines,
-            props.plan_summary,
-            props.plan_steps,
-            props.plan_current_step,
-            props.plan_total_steps,
-            props.plan_warnings,
+            InlinePlanProps {
+                summary: props.plan_summary,
+                steps: props.plan_steps,
+                current_step: props.plan_current_step,
+                total_steps: props.plan_total_steps,
+                warnings: props.plan_warnings,
+                frame,
+            },
         );
     }
 
@@ -99,7 +113,12 @@ pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) 
         if !lines.is_empty() {
             lines.push(Line::from(""));
         }
-        render_inline_subagents(&mut lines, props.subagents, props.global_elapsed_ms);
+        render_inline_subagents(
+            &mut lines,
+            props.subagents,
+            props.global_elapsed_ms,
+            props.motion_level,
+        );
     }
 
     // ── Inline Diffs ──
@@ -143,7 +162,12 @@ pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) 
     f.render_widget(paragraph, area);
 }
 
-fn render_message(lines: &mut Vec<Line>, msg: &ProtocolMessage, width: u16) {
+fn render_message(
+    lines: &mut Vec<Line>,
+    msg: &ProtocolMessage,
+    width: u16,
+    frame: motion::MotionFrame,
+) {
     let palette = theme::palette();
     if msg.role == Role::User {
         render_user_message(lines, msg, width);
@@ -189,7 +213,7 @@ fn render_message(lines: &mut Vec<Line>, msg: &ProtocolMessage, width: u16) {
                 intent: format!("{kind} request"),
                 detail,
             };
-            lines.extend(render_claude_tool_lines(&view, width));
+            lines.extend(render_active_tool_lines(&view, width, frame));
         }
     }
 }
@@ -393,7 +417,7 @@ fn render_markdown_table(lines: &mut Vec<Line>, table_lines: &[&str], width: u16
     let p = theme::palette();
     let border_style = transcript_style(match theme::active_theme() {
         theme::ThemeMode::Light => Color::Rgb(42, 42, 36),
-        theme::ThemeMode::Dark => p.divider,
+        theme::ThemeMode::Dark | theme::ThemeMode::Auto => p.divider,
     });
 
     lines.push(table_border_line(
@@ -543,7 +567,7 @@ fn table_row_line(row: &[String], widths: &[usize], is_header: bool) -> Line<'st
     let p = theme::palette();
     let border_style = transcript_style(match theme::active_theme() {
         theme::ThemeMode::Light => Color::Rgb(42, 42, 36),
-        theme::ThemeMode::Dark => p.divider,
+        theme::ThemeMode::Dark | theme::ThemeMode::Auto => p.divider,
     });
     let mut spans = vec![Span::styled("│", border_style)];
     for (cell, width) in row.iter().zip(widths.iter().copied()) {
@@ -604,35 +628,49 @@ fn render_user_text(lines: &mut Vec<Line>, content: &str, width: u16) {
 }
 
 fn user_text_lines(content: &str, width: u16) -> Vec<Line<'static>> {
+    let p = theme::palette();
     let mut lines = Vec::new();
     for line in content.lines() {
-        let mut text = format!("▸ {}", line.trim_end());
-        let max_width = width.saturating_sub(1) as usize;
-        text = truncate_display_width(&text, max_width);
-        let fill = max_width.saturating_sub(display_width(&text));
-        if fill > 0 {
-            text.push_str(&" ".repeat(fill));
-        }
-        lines.push(Line::from(vec![Span::styled(
-            text,
-            Style::default()
-                .fg(user_bar_fg())
-                .bg(user_bar_bg())
-                .add_modifier(Modifier::BOLD),
-        )]));
+        let max_width = width.saturating_sub(3) as usize;
+        let text = truncate_display_width(line.trim_end(), max_width);
+        lines.push(Line::from(vec![
+            Span::styled("> ", Style::default().fg(p.accent).bg(p.canvas)),
+            Span::styled(text, Style::default().fg(p.text).bg(p.canvas)),
+        ]));
     }
     lines
 }
 
-fn render_claude_tool_lines(view: &view_blocks::ToolCallView, width: u16) -> Vec<Line<'static>> {
+fn streaming_status_line(frame: motion::MotionFrame) -> Line<'static> {
+    let p = theme::palette();
+    Line::from(vec![
+        Span::styled(
+            format!("{} ", frame.running_icon()),
+            Style::default().fg(p.accent).bg(p.canvas),
+        ),
+        Span::styled(
+            format!("Thinking{}", frame.dots()),
+            Style::default().fg(p.dim).bg(p.canvas),
+        ),
+    ])
+}
+
+fn render_active_tool_lines(
+    view: &view_blocks::ToolCallView,
+    width: u16,
+    frame: motion::MotionFrame,
+) -> Vec<Line<'static>> {
     let p = theme::palette();
     if view.name == "run_command" && view.status == view_blocks::ViewStatus::Running {
         let command = truncate(&view.detail, width.saturating_sub(8) as usize);
         return vec![
             Line::from(vec![
-                Span::styled("● ", Style::default().fg(p.muted).bg(p.canvas)),
                 Span::styled(
-                    "Running 1 shell command...",
+                    format!("{} ", frame.running_icon()),
+                    Style::default().fg(p.muted).bg(p.canvas),
+                ),
+                Span::styled(
+                    format!("Running 1 shell command{}", frame.dots()),
                     Style::default()
                         .fg(p.text)
                         .bg(p.canvas)
@@ -646,7 +684,7 @@ fn render_claude_tool_lines(view: &view_blocks::ToolCallView, width: u16) -> Vec
         ];
     }
 
-    view_blocks::render_tool_lines(view, 88)
+    vec![view_blocks::compact_tool_line_with_motion(view, 88, frame)]
 }
 
 fn should_hide_transcript_line(line: &str) -> bool {
@@ -664,20 +702,6 @@ fn should_hide_transcript_line(line: &str) -> bool {
         || lower.starts_with("intent ")
         || lower.starts_with("detail --- ")
         || lower.starts_with("detail todo.md")
-}
-
-fn user_bar_bg() -> Color {
-    match theme::active_theme() {
-        theme::ThemeMode::Light => Color::Rgb(42, 42, 42),
-        theme::ThemeMode::Dark => theme::palette().surface_alt,
-    }
-}
-
-fn user_bar_fg() -> Color {
-    match theme::active_theme() {
-        theme::ThemeMode::Light => Color::Rgb(250, 246, 232),
-        theme::ThemeMode::Dark => theme::palette().text,
-    }
 }
 
 fn transcript_style(fg: ratatui::style::Color) -> Style {
@@ -863,14 +887,15 @@ fn is_command_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')
 }
 
-fn render_inline_plan(
-    lines: &mut Vec<Line>,
-    summary: Option<&str>,
-    steps: &[plan_tracker::PlanStepItem],
-    current_step: usize,
-    total_steps: usize,
-    warnings: &[String],
-) {
+fn render_inline_plan(lines: &mut Vec<Line>, props: InlinePlanProps<'_>) {
+    let InlinePlanProps {
+        summary,
+        steps,
+        current_step,
+        total_steps,
+        warnings,
+        frame,
+    } = props;
     let completed = steps
         .iter()
         .filter(|step| step.status == plan_tracker::PlanStepStatus::Done)
@@ -900,7 +925,7 @@ fn render_inline_plan(
         lines.push(Line::from(vec![
             Span::styled("  └ ", transcript_style(p.divider)),
             Span::styled(
-                format!("{} ", plan_checkbox(summary_status)),
+                format!("{} ", plan_checkbox(summary_status, frame)),
                 transcript_style(summary_color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(truncate(s, 84), transcript_style(p.text)),
@@ -953,7 +978,7 @@ fn render_inline_plan(
         };
         lines.push(Line::from(vec![
             Span::styled("  │ ", transcript_style(p.divider)),
-            Span::styled(plan_checkbox(step.status), transcript_style(color)),
+            Span::styled(plan_checkbox(step.status, frame), transcript_style(color)),
             Span::styled(" ", transcript_style(p.divider)),
             Span::styled(format!("{:>2}. ", idx + 1), transcript_style(p.dim)),
             Span::styled(truncate(&plan_display_title(&step.description), 72), style),
@@ -970,6 +995,15 @@ fn render_inline_plan(
             ),
         ]));
     }
+}
+
+struct InlinePlanProps<'a> {
+    summary: Option<&'a str>,
+    steps: &'a [plan_tracker::PlanStepItem],
+    current_step: usize,
+    total_steps: usize,
+    warnings: &'a [String],
+    frame: motion::MotionFrame,
 }
 
 fn visible_plan_range(len: usize, focus: usize, max_visible: usize) -> std::ops::Range<usize> {
@@ -1065,8 +1099,10 @@ fn aggregate_plan_status(steps: &[plan_tracker::PlanStepItem]) -> plan_tracker::
 fn render_inline_subagents(
     lines: &mut Vec<Line>,
     cards: &[subagent_cards::SubagentCard],
-    _global_elapsed_ms: u64,
+    global_elapsed_ms: u64,
+    motion_level: motion::MotionLevel,
 ) {
+    let frame = motion::MotionFrame::new(motion_level, global_elapsed_ms);
     let running = cards
         .iter()
         .filter(|c| c.status == subagent_cards::SubagentCardStatus::Running)
@@ -1109,7 +1145,7 @@ fn render_inline_subagents(
         if card.token_usage > 0 {
             metadata.push(("tokens".to_string(), card.token_usage.to_string()));
         }
-        lines.extend(view_blocks::render_worker_lines(
+        lines.extend(view_blocks::render_worker_lines_with_motion(
             &view_blocks::WorkerReportView {
                 name: truncate(&card.agent_type, 12),
                 status,
@@ -1118,6 +1154,7 @@ fn render_inline_subagents(
                 summary: Some(display.to_string()),
             },
             70,
+            frame,
         ));
         // Show live output lines for running agents (mirrors sidebar cards).
         if card.status == subagent_cards::SubagentCardStatus::Running
@@ -1192,10 +1229,10 @@ fn aggregate_diff_items(diffs: &[diff_viewer::FileDiffItem]) -> Vec<diff_viewer:
     items
 }
 
-fn plan_checkbox(status: plan_tracker::PlanStepStatus) -> &'static str {
+fn plan_checkbox(status: plan_tracker::PlanStepStatus, frame: motion::MotionFrame) -> &'static str {
     match status {
         plan_tracker::PlanStepStatus::Pending => "□",
-        plan_tracker::PlanStepStatus::Running => "■",
+        plan_tracker::PlanStepStatus::Running => frame.running_icon(),
         plan_tracker::PlanStepStatus::Done => "✓",
         plan_tracker::PlanStepStatus::Failed => "✗",
     }
@@ -1354,6 +1391,7 @@ mod tests {
                         plan_warnings: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
+                        motion_level: motion::MotionLevel::Off,
                         diffs: &[],
                         selected_diff: None,
                         is_streaming: false,
@@ -1420,6 +1458,7 @@ mod tests {
                         plan_warnings: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
+                        motion_level: motion::MotionLevel::Off,
                         diffs: &[],
                         selected_diff: None,
                         is_streaming: false,
@@ -1559,6 +1598,7 @@ mod tests {
                         plan_warnings: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
+                        motion_level: motion::MotionLevel::Off,
                         diffs: &[],
                         selected_diff: None,
                         is_streaming: false,
@@ -1616,6 +1656,7 @@ mod tests {
                         plan_warnings: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
+                        motion_level: motion::MotionLevel::Off,
                         diffs: &[],
                         selected_diff: None,
                         is_streaming: false,
@@ -1695,6 +1736,7 @@ mod tests {
                         plan_warnings: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
+                        motion_level: motion::MotionLevel::Off,
                         diffs: &[],
                         selected_diff: None,
                         is_streaming: true,
@@ -1740,6 +1782,7 @@ mod tests {
                         plan_warnings: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
+                        motion_level: motion::MotionLevel::Off,
                         diffs: &[],
                         selected_diff: None,
                         is_streaming: true,
@@ -1759,7 +1802,7 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(rendered.contains("CLI"));
-        assert!(rendered.contains("▸"));
+        assert!(rendered.contains("> "));
         assert!(rendered.contains("line 7"));
         theme::set_active_theme(theme::ThemeMode::Light);
     }
@@ -1785,6 +1828,7 @@ mod tests {
                         plan_warnings: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
+                        motion_level: motion::MotionLevel::Off,
                         diffs: &[],
                         selected_diff: None,
                         is_streaming: true,
@@ -1843,6 +1887,7 @@ mod tests {
                         plan_warnings: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
+                        motion_level: motion::MotionLevel::Off,
                         diffs: &[],
                         selected_diff: None,
                         is_streaming: true,
@@ -1893,6 +1938,7 @@ mod tests {
                         plan_warnings: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
+                        motion_level: motion::MotionLevel::Off,
                         diffs: &[],
                         selected_diff: None,
                         is_streaming: false,
@@ -1950,6 +1996,7 @@ mod tests {
                         plan_warnings: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
+                        motion_level: motion::MotionLevel::Off,
                         diffs: &[],
                         selected_diff: None,
                         is_streaming: false,

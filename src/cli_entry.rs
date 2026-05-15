@@ -153,8 +153,12 @@ enum Commands {
         scenario: PreviewScenario,
 
         /// Simulated UI theme
-        #[arg(long, value_enum, default_value_t = PreviewTheme::Light)]
+        #[arg(long, value_enum, default_value_t = PreviewTheme::Auto)]
         theme: PreviewTheme,
+
+        /// Fixed animation elapsed time in milliseconds
+        #[arg(long, default_value_t = 0)]
+        elapsed_ms: u64,
     },
 }
 
@@ -172,14 +176,14 @@ enum PreviewScenario {
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum PreviewTheme {
+    Auto,
     Light,
     Dark,
 }
 
 pub async fn run() -> Result<(), anyhow::Error> {
-    init_tracing();
-
     let cli = Cli::parse();
+    init_tracing(cli.command.as_ref());
 
     match cli.command {
         Some(Commands::Doctor) => cli::doctor(cli.project_root).await,
@@ -216,6 +220,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
             api,
             scenario,
             theme,
+            elapsed_ms,
         }) => {
             let root = cli.project_root.unwrap_or_else(|| {
                 crate::storage::find_project_root().unwrap_or_else(|| ".".into())
@@ -225,6 +230,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
                 PreviewScenario::Workbench => tui::app::PreviewSnapshotScenario::Workbench,
             };
             let theme = match theme {
+                PreviewTheme::Auto => tui::theme::ThemeMode::Auto,
                 PreviewTheme::Light => tui::theme::ThemeMode::Light,
                 PreviewTheme::Dark => tui::theme::ThemeMode::Dark,
             };
@@ -235,6 +241,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
                 height,
                 scenario,
                 theme,
+                elapsed_ms,
             )?;
             println!("{snapshot}");
             Ok(())
@@ -249,12 +256,51 @@ pub async fn run() -> Result<(), anyhow::Error> {
     }
 }
 
-fn init_tracing() {
+fn init_tracing(command: Option<&Commands>) {
+    if command_suppresses_terminal_tracing(command) {
+        return;
+    }
+
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("error")),
         )
         .with_target(false)
         .try_init();
+}
+
+fn command_suppresses_terminal_tracing(command: Option<&Commands>) -> bool {
+    matches!(
+        command,
+        Some(Commands::Tui { .. } | Commands::PreviewTui { .. })
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_ui_commands_do_not_emit_tracing_into_the_screen() {
+        assert!(command_suppresses_terminal_tracing(Some(&Commands::Tui {
+            thinking: false,
+            model: None,
+            session: None,
+        })));
+        assert!(command_suppresses_terminal_tracing(Some(
+            &Commands::PreviewTui {
+                width: 120,
+                height: 28,
+                api: PreviewApiState::Ready,
+                scenario: PreviewScenario::Welcome,
+                theme: PreviewTheme::Dark,
+                elapsed_ms: 0,
+            },
+        )));
+        assert!(!command_suppresses_terminal_tracing(Some(
+            &Commands::Doctor
+        )));
+        assert!(!command_suppresses_terminal_tracing(None));
+    }
 }

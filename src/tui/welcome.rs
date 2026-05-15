@@ -68,6 +68,13 @@ pub struct RecentSessionItem {
     pub tool_call_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WelcomeLoadStatus {
+    has_api_key: bool,
+    config_loaded: bool,
+    cache_status: &'static str,
+}
+
 fn detect_project_language(root: &Path) -> String {
     let indicators: &[(&str, &str)] = &[
         ("Cargo.toml", "Rust"),
@@ -108,11 +115,11 @@ fn detect_project_language(root: &Path) -> String {
     "Unknown".to_string()
 }
 
-fn load_mcp_status(root: &Path) -> (Vec<McpServerItem>, bool) {
+fn load_mcp_status(config: Option<&storage::Config>) -> (Vec<McpServerItem>, bool) {
     let mut servers = Vec::new();
     let mut any_available = false;
 
-    if let Ok(config) = crate::storage::Config::load(Some(root)) {
+    if let Some(config) = config {
         if config.mcp.enabled {
             for name in config.mcp.servers.keys() {
                 servers.push(McpServerItem {
@@ -185,12 +192,39 @@ fn load_project_mascot(root: &Path) -> Option<Vec<String>> {
 
 impl WelcomeDashboardData {
     pub fn load(root: &Path, model: DeepSeekModel, thinking: ThinkingMode) -> Self {
-        let api_key = storage::get_effective_api_key(Some(root));
-        let config = storage::Config::load(Some(root));
-        let cache_status = match config.as_ref() {
-            Ok(config) if config.ui.show_cache_hud => "no turn yet",
-            Ok(_) => "disabled",
-            Err(_) => "unknown",
+        let config_result = storage::Config::load(Some(root));
+        let has_api_key = storage::get_api_key(
+            config_result
+                .as_ref()
+                .ok()
+                .and_then(storage::config_api_key),
+        )
+        .is_some();
+        let config_loaded = config_result.is_ok();
+        let config = config_result.ok();
+
+        Self::load_with_startup(
+            root,
+            model,
+            thinking,
+            config.as_ref(),
+            config_loaded,
+            has_api_key,
+        )
+    }
+
+    pub fn load_with_startup(
+        root: &Path,
+        model: DeepSeekModel,
+        thinking: ThinkingMode,
+        config: Option<&storage::Config>,
+        config_loaded: bool,
+        has_api_key: bool,
+    ) -> Self {
+        let cache_status = match config {
+            Some(config) if config.ui.show_cache_hud => "no turn yet",
+            Some(_) => "disabled",
+            None => "unknown",
         };
 
         let recent_sessions = dirs::home_dir()
@@ -214,10 +248,13 @@ impl WelcomeDashboardData {
             root,
             model,
             thinking,
-            api_key.is_some(),
-            config.is_ok(),
-            cache_status,
+            WelcomeLoadStatus {
+                has_api_key,
+                config_loaded,
+                cache_status,
+            },
             recent_sessions,
+            config,
         )
     }
 
@@ -225,10 +262,9 @@ impl WelcomeDashboardData {
         root: &Path,
         model: DeepSeekModel,
         thinking: ThinkingMode,
-        has_api_key: bool,
-        config_loaded: bool,
-        cache_status: &'static str,
+        status: WelcomeLoadStatus,
         recent_sessions: Vec<RecentSessionItem>,
+        config: Option<&storage::Config>,
     ) -> Self {
         let recent_sessions = recent_sessions.into_iter().take(3).collect();
         let detected_language = detect_project_language(root);
@@ -306,7 +342,7 @@ impl WelcomeDashboardData {
             },
         ];
 
-        let (mcp_servers, _mcp_available) = load_mcp_status(root);
+        let (mcp_servers, _mcp_available) = load_mcp_status(config);
         let agents_md = load_agents_md(root);
         let mascot_lines = load_project_mascot(root);
 
@@ -319,9 +355,17 @@ impl WelcomeDashboardData {
             workspace_path: root.to_path_buf(),
             model,
             thinking,
-            api_key_status: if has_api_key { "ready" } else { "missing" },
-            config_status: if config_loaded { "loaded" } else { "fallback" },
-            cache_status,
+            api_key_status: if status.has_api_key {
+                "ready"
+            } else {
+                "missing"
+            },
+            config_status: if status.config_loaded {
+                "loaded"
+            } else {
+                "fallback"
+            },
+            cache_status: status.cache_status,
             recent_sessions,
             skills,
             mcp_servers,
@@ -351,6 +395,10 @@ pub fn render_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
         render_compact_welcome(f, area, data);
         return;
     }
+    if area.width < 110 {
+        render_focused_welcome(f, area, data);
+        return;
+    }
 
     f.render_widget(Paragraph::new("").style(welcome_bg()), area);
 
@@ -373,74 +421,103 @@ pub fn render_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
     render_actions(f, columns[2], data);
 }
 
-// ── Left: Identity ──
-fn render_identity(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
-    let logo_height = data
-        .mascot_lines
-        .as_ref()
-        .map_or(ascii_art::WELCOME_WORDMARK.len(), Vec::len) as u16;
-
+fn render_focused_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
+    f.render_widget(Paragraph::new("").style(welcome_bg()), area);
+    let inner = area.inner(Margin {
+        horizontal: 4,
+        vertical: 1,
+    });
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(2),
-            Constraint::Length(logo_height.saturating_add(1)),
-            Constraint::Length(2),
+            Constraint::Length(7),
+            Constraint::Length(5),
+            Constraint::Length(5),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+
+    render_product_mark(f, chunks[0]);
+
+    let tips = vec![
+        Line::from(vec![
+            Span::styled("◇ ", welcome_accent()),
+            Span::styled(
+                "Ask questions, edit files, or run commands.",
+                welcome_muted(),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("◇ ", welcome_accent()),
+            Span::styled("Be specific for the best results.", welcome_muted()),
+        ]),
+        Line::from(vec![
+            Span::styled("◇ ", welcome_accent()),
+            Span::styled("/help for more information.", welcome_muted()),
+        ]),
+    ];
+    f.render_widget(
+        Paragraph::new(Text::from(tips))
+            .style(welcome_bg())
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        chunks[1],
+    );
+
+    if data.api_key_status == "missing" {
+        render_api_key_setup(f, chunks[2]);
+    } else {
+        render_context(f, chunks[2], data);
+    }
+
+    render_invitation_and_footer(f, chunks[3], data);
+}
+
+// ── Left: Identity ──
+fn render_identity(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(7),
             Constraint::Length(4),
             Constraint::Min(1),
         ])
         .split(area);
 
-    let lines = if let Some(mascot_lines) = &data.mascot_lines {
-        mascot_lines
-            .iter()
-            .map(|line| Line::from(Span::styled(line.clone(), welcome_logo())))
-            .collect::<Vec<_>>()
-    } else {
-        ascii_art::WELCOME_WORDMARK
-            .iter()
-            .map(|line| Line::from(Span::styled(*line, welcome_logo())))
-            .collect::<Vec<_>>()
-    };
-
-    let paragraph = Paragraph::new(Text::from(lines))
-        .alignment(Alignment::Center)
-        .wrap(Wrap { trim: false });
-    f.render_widget(paragraph, chunks[1]);
-
-    let prompt = Paragraph::new(Text::from(vec![Line::from(vec![
-        Span::styled("Tip: ", welcome_label().add_modifier(Modifier::BOLD)),
-        Span::styled(
-            "Use /init to teach DeepSeek Code this workspace",
-            welcome_text().add_modifier(Modifier::BOLD),
-        ),
-    ])]))
-    .alignment(Alignment::Center)
-    .wrap(Wrap { trim: true });
-    f.render_widget(prompt, chunks[2]);
+    render_product_mark(f, chunks[1]);
 
     let shortcuts = vec![
         Line::from(vec![
-            Span::styled("shift+tab", welcome_text().add_modifier(Modifier::BOLD)),
-            Span::styled(" switch mode  ·  ", welcome_muted()),
-            Span::styled("ctrl+n", welcome_text().add_modifier(Modifier::BOLD)),
-            Span::styled(" switch model", welcome_muted()),
+            Span::styled("◇ ", welcome_accent()),
+            Span::styled(
+                "Ask questions, edit files, or run commands.",
+                welcome_muted(),
+            ),
         ]),
         Line::from(vec![
-            Span::styled("ctrl+l", welcome_text().add_modifier(Modifier::BOLD)),
-            Span::styled(" autonomy  ·  ", welcome_muted()),
-            Span::styled("tab", welcome_text().add_modifier(Modifier::BOLD)),
-            Span::styled(" thinking", welcome_muted()),
+            Span::styled("◇ ", welcome_accent()),
+            Span::styled(
+                "Plan, approvals, and agents appear only when needed.",
+                welcome_muted(),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("◇ ", welcome_accent()),
+            Span::styled(
+                "/help for commands, @path for files, ! for shell.",
+                welcome_muted(),
+            ),
         ]),
     ];
     f.render_widget(
         Paragraph::new(Text::from(shortcuts))
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: true }),
-        chunks[3],
+        chunks[2],
     );
 
-    render_capability_line(f, chunks[4], data);
+    render_capability_line(f, chunks[3], data);
 }
 
 // ── Right: Actions ──
@@ -474,44 +551,48 @@ fn render_divider(f: &mut Frame, area: Rect) {
 
 fn render_release_header(f: &mut Frame, area: Rect) {
     let lines = vec![Line::from(vec![
-        Span::styled("Changelog ", welcome_accent().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Ready surface ",
+            welcome_accent().add_modifier(Modifier::BOLD),
+        ),
         Span::styled("v0.1.0", welcome_text().add_modifier(Modifier::BOLD)),
-        Span::styled("        Ctrl+J close", welcome_text()),
+        Span::styled("        quiet until work starts", welcome_muted()),
     ])];
-    f.render_widget(
-        Paragraph::new(Text::from(lines))
-            .style(welcome_bg())
-            .wrap(Wrap { trim: true }),
-        area,
-    );
+    f.render_widget(Paragraph::new(Text::from(lines)).style(welcome_bg()), area);
 }
 
 fn render_changelog(f: &mut Frame, area: Rect) {
     let lines = vec![
         Line::from(Span::styled(
-            "New",
+            "Start",
             welcome_accent().add_modifier(Modifier::BOLD),
         )),
         Line::from(vec![
-            Span::styled("* ", welcome_text()),
-            Span::styled("Clean welcome", welcome_text().add_modifier(Modifier::BOLD)),
-            Span::styled(" - quiet startup surface", welcome_muted()),
+            Span::styled("1 ", welcome_accent().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "New conversation",
+                welcome_text().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" - describe the change", welcome_muted()),
         ]),
         Line::from(vec![
-            Span::styled("* ", welcome_text()),
-            Span::styled("Plan UI", welcome_text().add_modifier(Modifier::BOLD)),
-            Span::styled(" - steps, workers, progress", welcome_muted()),
+            Span::styled("2 ", welcome_accent().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Inspect workspace",
+                welcome_text().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" - read files before editing", welcome_muted()),
         ]),
         Line::from(vec![
-            Span::styled("* ", welcome_text()),
-            Span::styled("API setup", welcome_text().add_modifier(Modifier::BOLD)),
-            Span::styled(" - saved after first entry", welcome_muted()),
+            Span::styled("3 ", welcome_accent().add_modifier(Modifier::BOLD)),
+            Span::styled("Run checks", welcome_text().add_modifier(Modifier::BOLD)),
+            Span::styled(" - verify before summary", welcome_muted()),
         ]),
     ];
     f.render_widget(
         Paragraph::new(Text::from(lines))
             .style(welcome_bg())
-            .wrap(Wrap { trim: true }),
+            .wrap(Wrap { trim: false }),
         area,
     );
 }
@@ -527,7 +608,7 @@ fn render_invitation_and_footer(f: &mut Frame, area: Rect, data: &WelcomeDashboa
         (
             "What are we changing today?",
             "Type below, or press 1-3 to load a starter.",
-            "1-3 starters · / commands · @ files · ! shell · enter send",
+            "1-3 starters · plan/agents/approvals appear on demand",
         )
     };
     let lines = vec![
@@ -630,6 +711,11 @@ fn render_compact_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData
         return;
     }
 
+    if area.width >= 70 && area.height >= 12 {
+        render_compact_brand_welcome(f, area, data);
+        return;
+    }
+
     let headline = "What are we changing today?";
     let footer = vec![
         key_span("1-3"),
@@ -637,19 +723,10 @@ fn render_compact_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData
         key_span("enter"),
         action_span(" send"),
     ];
-    let mut lines = Vec::new();
-    if let Some(mascot_lines) = &data.mascot_lines {
-        lines.extend(
-            mascot_lines
-                .iter()
-                .take(3)
-                .map(|line| Line::from(Span::styled(line.clone(), welcome_logo()))),
-        );
-    }
-    lines.extend([
+    let lines = vec![
         Line::from(vec![Span::styled(
-            "DeepSeek Code",
-            welcome_text().add_modifier(Modifier::BOLD),
+            format!("{}  DeepSeek Code", ascii_art::WHALE_TINY),
+            welcome_badge(),
         )]),
         Line::from(vec![Span::styled(headline, welcome_muted())]),
         Line::from(""),
@@ -660,13 +737,68 @@ fn render_compact_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData
         ]),
         Line::from(""),
         Line::from(footer),
-    ]);
+    ];
 
     let paragraph = Paragraph::new(Text::from(lines))
         .alignment(Alignment::Center)
         .wrap(Wrap { trim: true });
 
     f.render_widget(paragraph, area);
+}
+
+fn render_compact_brand_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
+    let inner = area.inner(Margin {
+        horizontal: 2,
+        vertical: 1,
+    });
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(7),
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+
+    render_product_mark(f, chunks[0]);
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            "What are we changing today?",
+            welcome_muted(),
+        )]))
+        .style(welcome_bg())
+        .alignment(Alignment::Center),
+        chunks[1],
+    );
+
+    let workspace = Line::from(vec![
+        Span::styled(&data.workspace_name, welcome_text()),
+        Span::styled(" · ", welcome_muted()),
+        Span::styled(data.model.to_string(), welcome_muted()),
+    ]);
+    f.render_widget(
+        Paragraph::new(workspace)
+            .style(welcome_bg())
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        chunks[2],
+    );
+
+    let footer = Line::from(vec![
+        key_span("1-3"),
+        action_span(" starters   "),
+        key_span("enter"),
+        action_span(" send"),
+    ]);
+    f.render_widget(
+        Paragraph::new(footer)
+            .style(welcome_bg())
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        chunks[3],
+    );
 }
 
 fn render_compact_api_onboarding(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
@@ -735,6 +867,78 @@ fn action_span(text: &str) -> Span<'static> {
     Span::styled(text.to_string(), welcome_muted())
 }
 
+fn render_product_mark(f: &mut Frame, area: Rect) {
+    if area.width < 48 || area.height < 6 {
+        let lines = vec![
+            Line::from(vec![Span::styled(ascii_art::WHALE_TINY, welcome_badge())]),
+            Line::from(vec![Span::styled(
+                "DeepSeek Code",
+                welcome_text().add_modifier(Modifier::BOLD),
+            )]),
+        ];
+        f.render_widget(
+            Paragraph::new(Text::from(lines))
+                .style(welcome_bg())
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true }),
+            area,
+        );
+        return;
+    }
+
+    let whale_width = ascii_art::WELCOME_WHALE
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0);
+    let title_width = 30;
+    let lockup_width = whale_width + 4 + title_width;
+    let left_x = area.x + ((area.width as usize).saturating_sub(lockup_width) / 2) as u16;
+    let title_x = left_x + whale_width as u16 + 4;
+    let title_rows: [Vec<Span<'static>>; 6] = [
+        vec![],
+        vec![
+            Span::styled("DeepSeek ", welcome_accent().add_modifier(Modifier::BOLD)),
+            Span::styled("Code", welcome_brand_alt().add_modifier(Modifier::BOLD)),
+        ],
+        vec![Span::styled("Your AI Coding Partner", welcome_muted())],
+        vec![],
+        vec![Span::styled("Think Deeper. Code Smarter.", welcome_muted())],
+        vec![],
+    ];
+
+    for (idx, whale) in ascii_art::WELCOME_WHALE.iter().enumerate() {
+        let row_y = area.y + idx as u16;
+        if row_y >= area.y + area.height {
+            break;
+        }
+
+        let indent = whale.chars().take_while(|ch| *ch == ' ').count() as u16;
+        let whale_body = whale.trim_start();
+        if !whale_body.is_empty() {
+            let whale_area = Rect::new(
+                left_x + indent,
+                row_y,
+                area.right().saturating_sub(left_x + indent),
+                1,
+            );
+            f.render_widget(
+                Paragraph::new(whale_body.to_string())
+                    .style(welcome_accent().add_modifier(Modifier::BOLD)),
+                whale_area,
+            );
+        }
+
+        if let Some(row) = title_rows.get(idx).filter(|row| !row.is_empty()) {
+            let title_area = Rect::new(title_x, row_y, area.right().saturating_sub(title_x), 1);
+            f.render_widget(
+                Paragraph::new(Line::from(row.clone())).style(welcome_bg()),
+                title_area,
+            );
+        }
+    }
+}
+
 fn render_capability_line(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
     let skills_available = data.skills.iter().filter(|skill| skill.available).count();
     let mcp_count = data.mcp_servers.len();
@@ -775,10 +979,6 @@ fn welcome_bg() -> Style {
     Style::default().fg(p.text).bg(p.canvas)
 }
 
-fn welcome_logo() -> Style {
-    welcome_bg().fg(theme::palette().text)
-}
-
 fn welcome_text() -> Style {
     welcome_bg().fg(welcome_fg())
 }
@@ -787,12 +987,18 @@ fn welcome_muted() -> Style {
     welcome_bg().fg(theme::palette().dim)
 }
 
-fn welcome_label() -> Style {
-    welcome_bg().fg(theme::palette().text)
-}
-
 fn welcome_accent() -> Style {
     welcome_bg().fg(theme::palette().accent)
+}
+
+fn welcome_brand_alt() -> Style {
+    welcome_bg().fg(theme::palette().warning)
+}
+
+fn welcome_badge() -> Style {
+    welcome_bg()
+        .fg(theme::palette().info)
+        .add_modifier(Modifier::BOLD)
 }
 
 fn welcome_ok() -> Style {
@@ -819,10 +1025,13 @@ mod tests {
             Path::new("D:/deepseek-code"),
             DeepSeekModel::Flash,
             ThinkingMode::Auto,
-            false,
-            true,
-            "no turn yet",
+            WelcomeLoadStatus {
+                has_api_key: false,
+                config_loaded: true,
+                cache_status: "no turn yet",
+            },
             Vec::new(),
+            None,
         );
         assert!(data.recent_sessions.is_empty());
         assert_eq!(data.api_key_status, "missing");
@@ -845,10 +1054,13 @@ mod tests {
             Path::new("D:/deepseek-code"),
             DeepSeekModel::Pro,
             ThinkingMode::On,
-            true,
-            true,
-            "no turn yet",
+            WelcomeLoadStatus {
+                has_api_key: true,
+                config_loaded: true,
+                cache_status: "no turn yet",
+            },
             sessions,
+            None,
         );
         assert_eq!(data.recent_sessions.len(), 3);
         assert_eq!(data.recent_sessions[0].label, "session-0");
@@ -943,10 +1155,13 @@ mod tests {
             Path::new("D:/deepseek-code"),
             DeepSeekModel::Flash,
             ThinkingMode::Auto,
-            has_api_key,
-            true,
-            "no turn yet",
+            WelcomeLoadStatus {
+                has_api_key,
+                config_loaded: true,
+                cache_status: "no turn yet",
+            },
             recent_sessions,
+            None,
         )
     }
 

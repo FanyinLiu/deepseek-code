@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use super::theme;
+use super::{motion, theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanStepStatus {
@@ -113,10 +113,10 @@ fn duration_label(step: &PlanStepItem) -> String {
         .unwrap_or_default()
 }
 
-fn status_icon(status: PlanStepStatus) -> &'static str {
+fn status_icon(status: PlanStepStatus, frame: motion::MotionFrame) -> &'static str {
     match status {
         PlanStepStatus::Pending => "○",
-        PlanStepStatus::Running => "◈",
+        PlanStepStatus::Running => frame.running_icon(),
         PlanStepStatus::Done => "◆",
         PlanStepStatus::Failed => "✗",
     }
@@ -142,15 +142,15 @@ fn status_label(status: PlanStepStatus) -> &'static str {
 }
 
 /// Render the plan tracker with optional review warnings shown above the step list.
-pub fn render_plan_tracker_with_warnings(
-    f: &mut Frame,
-    area: Rect,
-    summary: &str,
-    steps: &[PlanStepItem],
-    current_step: usize,
-    total_steps: usize,
-    warnings: &[String],
-) {
+pub fn render_plan_tracker_with_warnings(f: &mut Frame, area: Rect, props: PlanTrackerProps<'_>) {
+    let PlanTrackerProps {
+        summary,
+        steps,
+        current_step,
+        total_steps,
+        warnings,
+        frame,
+    } = props;
     let display_step = if total_steps == 0 {
         0
     } else {
@@ -216,7 +216,7 @@ pub fn render_plan_tracker_with_warnings(
     let end = (start + visible).min(steps.len());
 
     for step in steps.iter().skip(start).take(end - start) {
-        let icon = status_icon(step.status);
+        let icon = status_icon(step.status, frame);
         let color = status_color(step.status);
         let kind = step_kind(&step.description);
         let label = status_label(step.status);
@@ -256,6 +256,15 @@ pub fn render_plan_tracker_with_warnings(
     f.render_widget(paragraph, area);
 }
 
+pub struct PlanTrackerProps<'a> {
+    pub summary: &'a str,
+    pub steps: &'a [PlanStepItem],
+    pub current_step: usize,
+    pub total_steps: usize,
+    pub warnings: &'a [String],
+    pub frame: motion::MotionFrame,
+}
+
 /// Render the options selection menu (shown when orchestrator emits OptionsNeeded).
 pub fn render_options_panel(
     f: &mut Frame,
@@ -269,10 +278,7 @@ pub fn render_options_panel(
     }
 
     let p = theme::palette();
-    let selected_bg = match theme::active_theme() {
-        theme::ThemeMode::Light => Color::Rgb(58, 56, 48),
-        theme::ThemeMode::Dark => p.surface_alt,
-    };
+    let selected_bg = p.surface_alt;
     let mut lines = Vec::new();
     let use_chinese = option_panel_uses_chinese(title, options);
     let prompt = questionnaire_prompt(title);
@@ -321,7 +327,7 @@ pub fn render_options_panel(
         let row_text = pad_to_width(&format!(" {marker} {key}. [Q] {desc}"), row_width);
         let row_style = if selected {
             Style::default()
-                .fg(p.inverse_text)
+                .fg(p.accent)
                 .bg(selected_bg)
                 .add_modifier(Modifier::BOLD)
         } else {
@@ -442,10 +448,7 @@ pub fn render_slash_command_panel(
     }
 
     let p = theme::palette();
-    let selected_bg = match theme::active_theme() {
-        theme::ThemeMode::Light => Color::Rgb(58, 56, 48),
-        theme::ThemeMode::Dark => p.surface_alt,
-    };
+    let selected_bg = p.surface_alt;
     let mut lines = vec![Line::from(vec![
         Span::styled(
             "Commands",
@@ -477,7 +480,7 @@ pub fn render_slash_command_panel(
         let desc = truncate(description, desc_width);
         let style = if selected {
             Style::default()
-                .fg(p.inverse_text)
+                .fg(p.accent)
                 .bg(selected_bg)
                 .add_modifier(Modifier::BOLD)
         } else {

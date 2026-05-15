@@ -54,6 +54,7 @@ pub struct SettingsPanelProps<'a> {
     pub model: &'a DeepSeekModel,
     pub thinking: &'a ThinkingMode,
     pub theme_label: &'a str,
+    pub motion_label: &'a str,
 }
 
 #[must_use]
@@ -163,12 +164,9 @@ fn settings_rows(props: &SettingsPanelProps<'_>) -> Vec<Line<'static>> {
                 ("Diff display mode", "GitHub".to_string()),
                 ("Theme", props.theme_label.to_string()),
                 ("Tool result display", "Compact".to_string()),
-                ("Statusline mode", "Powerline".to_string()),
-                ("Statusline icon mode", "Text".to_string()),
-                ("Statusline shape", "Capsule".to_string()),
                 ("Cursor style", "Inline block".to_string()),
                 ("Prompt precache", "on".to_string()),
-                ("Startup logo animation", "off".to_string()),
+                ("Motion", props.motion_label.to_string()),
                 ("Hooks", "enabled".to_string()),
             ],
             props.selected_row,
@@ -228,6 +226,7 @@ mod tests {
                         model: &DeepSeekModel::Flash,
                         thinking: &ThinkingMode::Auto,
                         theme_label: "light",
+                        motion_label: "subtle",
                     },
                 );
             })
@@ -244,6 +243,8 @@ mod tests {
         assert!(rendered.contains("Task Defaults"));
         assert!(rendered.contains("Preferences"));
         assert!(rendered.contains("Sound"));
-        assert!(rendered.contains("Statusline mode"));
+        assert!(rendered.contains("Tool result display"));
+        assert!(rendered.contains("Motion"));
+        assert!(rendered.contains("subtle"));
     }
 }

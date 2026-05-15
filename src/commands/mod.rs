@@ -132,6 +132,11 @@ fn cmd_clear(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     Ok(Some("Screen cleared".to_string()))
 }
 
+fn cmd_exit(_args: &str, ctx: &mut CommandContext) -> CommandResult {
+    ctx.app.running = false;
+    Ok(Some("Goodbye.".to_string()))
+}
+
 fn cmd_copy(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     let Some(message) = ctx
         .app
@@ -652,16 +657,17 @@ fn cmd_theme(args: &str, ctx: &mut CommandContext) -> CommandResult {
     let mode = match requested.as_str() {
         "" => {
             return Ok(Some(format!(
-                "Theme: {}\n\nUsage: /theme light | dark | toggle",
+                "Theme: {}\n\nUsage: /theme auto | light | dark | toggle",
                 ctx.app.theme_mode.label()
             )));
         }
+        "auto" | "system" => crate::tui::theme::ThemeMode::Auto,
         "light" | "droid" => crate::tui::theme::ThemeMode::Light,
         "dark" | "terminal" => crate::tui::theme::ThemeMode::Dark,
         "toggle" => ctx.app.theme_mode.toggled(),
         other => {
             return Err(format!(
-                "Unknown theme: {other}. Use /theme light, /theme dark, or /theme toggle."
+                "Unknown theme: {other}. Use /theme auto, /theme light, /theme dark, or /theme toggle."
             ));
         }
     };
@@ -974,20 +980,6 @@ fn cmd_plugins(_args: &str, _ctx: &mut CommandContext) -> CommandResult {
     ))
 }
 
-fn cmd_statusline(_args: &str, ctx: &mut CommandContext) -> CommandResult {
-    Ok(Some(
-        [
-            manager_header("statusline", "ready"),
-            format!("mode      {}", ctx.app.interaction_mode.label()),
-            format!("theme     {}", ctx.app.theme_mode.label()),
-            "style     compact chips".to_string(),
-            "segments  app, mode, web, context, tokens, cost, cache, tools, permissions"
-                .to_string(),
-        ]
-        .join("\n"),
-    ))
-}
-
 fn count_entries(path: &std::path::Path) -> usize {
     list_entry_names(path).len()
 }
@@ -1094,6 +1086,13 @@ impl CommandRegistry {
             description: "Reset conversation and clear screen",
             usage: "/clear or /new",
             handler: cmd_clear,
+        });
+        self.register(&SlashCommand {
+            name: "/exit",
+            aliases: &["/quit", "/q"],
+            description: "Exit the TUI",
+            usage: "/exit or /quit",
+            handler: cmd_exit,
         });
         self.register(&SlashCommand {
             name: "/copy",
@@ -1281,7 +1280,7 @@ impl CommandRegistry {
             name: "/theme",
             aliases: &["/themes"],
             description: "Show or switch the UI theme",
-            usage: "/theme [light|dark|toggle]",
+            usage: "/theme [auto|light|dark|toggle]",
             handler: cmd_theme,
         });
         self.register(&SlashCommand {
@@ -1388,13 +1387,6 @@ impl CommandRegistry {
             description: "Show plugin extension status",
             usage: "/plugins",
             handler: cmd_plugins,
-        });
-        self.register(&SlashCommand {
-            name: "/statusline",
-            aliases: &[],
-            description: "Show statusline configuration summary",
-            usage: "/statusline",
-            handler: cmd_statusline,
         });
         self.register(&SlashCommand {
             name: "/help",
@@ -1555,7 +1547,6 @@ mod tests {
             "/sessions",
             "/simplify",
             "/skills",
-            "/statusline",
             "/wiki",
         ] {
             assert!(names.contains(expected), "missing {expected}");
@@ -1704,6 +1695,34 @@ mod tests {
 
         assert!(output.contains("dark"));
         assert_eq!(ctx.app.theme_mode, crate::tui::theme::ThemeMode::Dark);
+    }
+
+    #[test]
+    fn exit_command_stops_tui_loop() {
+        let reg = CommandRegistry::new();
+        let mut app = crate::tui::app::TuiApp::new(
+            crate::deepseek::DeepSeekModel::Flash,
+            crate::deepseek::ThinkingMode::Auto,
+            None,
+            std::path::PathBuf::from("."),
+        );
+        let mut yolo = false;
+        let mut ctx = CommandContext {
+            app: &mut app,
+            project_root: std::path::Path::new("."),
+            yolo_mode: &mut yolo,
+            mcp_status: "MCP: not initialized",
+            background_tasks: &[],
+        };
+
+        let output = reg
+            .execute("/quit", &mut ctx)
+            .expect("command should be handled")
+            .expect("exit should run")
+            .expect("exit should show output");
+
+        assert_eq!(output, "Goodbye.");
+        assert!(!ctx.app.running);
     }
 
     #[test]

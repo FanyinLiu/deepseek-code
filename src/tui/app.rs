@@ -1,9 +1,17 @@
 use std::path::{Path, PathBuf};
 
-use crossterm::event::{self, Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::{
+    cursor::{Hide, Show},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyCode, KeyEvent,
+        KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+    },
+    execute,
+    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
+};
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Margin, Rect},
     style::Style,
     text::{Line, Span, Text},
     widgets::Paragraph,
@@ -23,8 +31,8 @@ use crate::policy::ApprovalDisplay;
 use crate::storage;
 
 use super::{
-    approval_popup, diff_viewer, file_tree, input, layout, model_hint, plan_tracker,
-    settings_panel, status_bar, statusline, subagent_cards, theme, transcript_view, welcome,
+    approval_popup, diff_viewer, input, layout, model_hint, motion, plan_tracker, settings_panel,
+    status_bar, subagent_cards, theme, transcript_view, welcome,
 };
 
 /// TUI application state.
@@ -77,14 +85,12 @@ pub struct TuiApp {
     pub draft_input: String,
     // Diff viewer interaction
     pub selected_diff: Option<usize>,
-    pub diff_scroll: usize,
     pub diff_focused: bool,
-    // File tree sidebar
-    pub file_tree: file_tree::FileTree,
-    pub show_file_tree: bool,
-    pub file_tree_focused: bool,
+    pub project_root: PathBuf,
     pub mcp_status: String,
     pub theme_mode: theme::ThemeMode,
+    pub motion_level: motion::MotionLevel,
+    ui_started_at: std::time::Instant,
     pub settings_open: bool,
     pub settings_tab: settings_panel::SettingsTab,
     pub settings_selected: usize,
@@ -157,6 +163,43 @@ impl ApiKeyState {
     }
 }
 
+struct TuiStartupData {
+    config: storage::Config,
+    config_loaded: bool,
+    api_key_available: bool,
+    probe_keyring: bool,
+}
+
+impl TuiStartupData {
+    fn load(root: &Path) -> (Self, Option<String>) {
+        let config_result = storage::Config::load(Some(root));
+        let config_loaded = config_result.is_ok();
+        let config = config_result.unwrap_or_default();
+        let api_key = storage::get_api_key_without_keyring(storage::config_api_key(&config));
+        let api_key_available = api_key.is_some();
+        let probe_keyring = storage::get_env_api_key().is_none();
+
+        (
+            Self {
+                config,
+                config_loaded,
+                api_key_available,
+                probe_keyring,
+            },
+            api_key,
+        )
+    }
+
+    fn preview(api_key_available: bool) -> Self {
+        Self {
+            config: storage::Config::default(),
+            config_loaded: false,
+            api_key_available,
+            probe_keyring: false,
+        }
+    }
+}
+
 impl TuiApp {
     #[must_use]
     pub fn new(
@@ -165,13 +208,27 @@ impl TuiApp {
         session_name: Option<String>,
         project_root: PathBuf,
     ) -> Self {
-        let config = storage::Config::load(Some(&project_root)).unwrap_or_default();
-        let theme_mode = theme::ThemeMode::from_config(&config.ui.theme);
+        let (startup, _) = TuiStartupData::load(&project_root);
+        Self::new_with_startup(model, thinking_mode, session_name, project_root, startup)
+    }
+
+    fn new_with_startup(
+        model: DeepSeekModel,
+        thinking_mode: ThinkingMode,
+        session_name: Option<String>,
+        project_root: PathBuf,
+        startup: TuiStartupData,
+    ) -> Self {
+        let theme_mode = theme::ThemeMode::from_config(&startup.config.ui.theme);
+        let motion_level = motion::MotionLevel::from_config(&startup.config.ui.motion);
         theme::set_active_theme(theme_mode);
-        let welcome = welcome::WelcomeDashboardData::load(
+        let welcome = welcome::WelcomeDashboardData::load_with_startup(
             &project_root,
             model.clone(),
             thinking_mode.clone(),
+            Some(&startup.config),
+            startup.config_loaded,
+            startup.api_key_available,
         );
 
         let api_key_state = ApiKeyState::from_welcome(welcome.api_key_status);
@@ -233,13 +290,12 @@ impl TuiApp {
             history_cursor: None,
             draft_input: String::new(),
             selected_diff: None,
-            diff_scroll: 0,
             diff_focused: false,
-            file_tree: file_tree::FileTree::new(project_root.clone()),
-            show_file_tree: false,
-            file_tree_focused: false,
+            project_root: project_root.clone(),
             mcp_status: String::new(),
             theme_mode,
+            motion_level,
+            ui_started_at: std::time::Instant::now(),
             settings_open: false,
             settings_tab: settings_panel::SettingsTab::SessionDefaults,
             settings_selected: 0,
@@ -286,6 +342,23 @@ impl TuiApp {
         theme::set_active_theme(mode);
         self.status_message = format!("Theme set to {}", mode.label());
         self.push_activity(format!("theme: {}", mode.label()));
+    }
+
+    fn motion_frame(&self) -> motion::MotionFrame {
+        motion::MotionFrame::new(
+            self.motion_level,
+            self.ui_started_at.elapsed().as_millis() as u64,
+        )
+    }
+
+    fn stream_motion_frame(&self) -> motion::MotionFrame {
+        motion::MotionFrame::new(
+            self.motion_level,
+            self.stream_start.map_or_else(
+                || self.ui_started_at.elapsed().as_millis() as u64,
+                |started| started.elapsed().as_millis() as u64,
+            ),
+        )
     }
 
     pub fn open_settings_panel(&mut self) {
@@ -426,21 +499,6 @@ impl TuiApp {
 
         match key.code {
             KeyCode::Enter => {
-                // File tree: read selected file
-                if self.file_tree_focused {
-                    if let Some(path) = self.file_tree.selected_path() {
-                        if !self.file_tree.selected_is_dir() {
-                            let relative = path
-                                .strip_prefix(&self.file_tree.root)
-                                .unwrap_or(&path)
-                                .to_string_lossy()
-                                .replace('\\', "/");
-                            let _ = tx.send(TuiAction::Submit(format!("Read @{relative}")));
-                            self.status_message = format!("Reading @{relative}");
-                        }
-                    }
-                    return;
-                }
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                     // Shift+Enter: insert newline at cursor position
                     let byte_idx = self
@@ -524,8 +582,6 @@ impl TuiApp {
                             self.selected_diff = Some(idx - 1);
                         }
                     }
-                } else if self.file_tree_focused {
-                    self.file_tree.navigate_up();
                 } else if key.modifiers.contains(KeyModifiers::CONTROL) {
                     self.scroll_older(3);
                 } else if self.can_use_arrow_history() {
@@ -546,8 +602,6 @@ impl TuiApp {
                             self.selected_diff = Some(idx + 1);
                         }
                     }
-                } else if self.file_tree_focused {
-                    self.file_tree.navigate_down();
                 } else if key.modifiers.contains(KeyModifiers::CONTROL) {
                     self.scroll_newer(3);
                 } else if self.history_cursor.is_some() {
@@ -630,7 +684,6 @@ impl TuiApp {
                 'd' if self.input_text.is_empty() => {
                     if !self.file_diffs.is_empty() {
                         self.diff_focused = !self.diff_focused;
-                        self.file_tree_focused = false;
                         if self.diff_focused && self.selected_diff.is_none() {
                             self.selected_diff = Some(0);
                         }
@@ -639,18 +692,6 @@ impl TuiApp {
                         } else {
                             "Diff focus OFF".into()
                         };
-                    }
-                }
-                'f' if self.input_text.is_empty() => {
-                    self.show_file_tree = !self.show_file_tree;
-                    self.file_tree_focused = self.show_file_tree;
-                    self.diff_focused = false;
-                    if self.show_file_tree {
-                        self.file_tree.refresh();
-                        self.status_message =
-                            "File tree ON — ↑↓ navigate, Enter=read, →=expand".into();
-                    } else {
-                        self.status_message = "File tree OFF".into();
                     }
                 }
                 '1' | '2' | '3' if showing_welcome && self.input_text.is_empty() => {
@@ -662,16 +703,10 @@ impl TuiApp {
                         self.status_message = format!("Loaded launch prompt {c}");
                     }
                 }
-                'j' if self.input_text.is_empty()
-                    && !self.diff_focused
-                    && !self.file_tree_focused =>
-                {
+                'j' if self.input_text.is_empty() && !self.diff_focused => {
                     self.scroll_newer(1);
                 }
-                'k' if self.input_text.is_empty()
-                    && !self.diff_focused
-                    && !self.file_tree_focused =>
-                {
+                'k' if self.input_text.is_empty() && !self.diff_focused => {
                     self.scroll_older(1);
                 }
                 'a' if self.input_text.is_empty() && self.diff_focused => {
@@ -692,9 +727,6 @@ impl TuiApp {
                         }
                     }
                 }
-                'e' if self.input_text.is_empty() && self.file_tree_focused => {
-                    self.file_tree.toggle_expand();
-                }
                 ']' if self.input_text.is_empty() => {
                     self.scroll_newer(10);
                 }
@@ -712,6 +744,25 @@ impl TuiApp {
                 }
             },
             _ => {}
+        }
+    }
+
+    fn handle_mouse_event(&mut self, mouse: MouseEvent) -> bool {
+        let amount = if mouse.modifiers.contains(KeyModifiers::CONTROL) {
+            10
+        } else {
+            3
+        };
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.scroll_older(amount);
+                true
+            }
+            MouseEventKind::ScrollDown => {
+                self.scroll_newer(amount);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -1051,7 +1102,9 @@ impl TuiApp {
     }
 
     fn can_use_arrow_history(&self) -> bool {
-        logical_line_count(&self.input_text) == 1 && !self.input_history.is_empty()
+        !self.input_text.is_empty()
+            && logical_line_count(&self.input_text) == 1
+            && !self.input_history.is_empty()
     }
 
     fn try_complete_slash_command(&mut self) -> bool {
@@ -1093,7 +1146,7 @@ impl TuiApp {
             return false;
         };
 
-        let candidates = file_mention_candidates(&self.file_tree.root, &prefix, 8);
+        let candidates = file_mention_candidates(&self.project_root, &prefix, 8);
         if candidates.is_empty() {
             self.status_message = format!("No file matches @{prefix}");
             return true;
@@ -1291,6 +1344,7 @@ impl TuiApp {
         self.welcome.api_key_status = self.api_key_state.welcome_status();
     }
 
+    #[cfg(test)]
     fn mark_api_key_ready_from_storage(&mut self, root: &Path) {
         self.set_api_key_state(ApiKeyState::Ready);
         self.api_key_entry = None;
@@ -1717,18 +1771,12 @@ impl TuiApp {
         theme::set_active_theme(self.theme_mode);
         let area = f.area();
         render_canvas(f, area);
+        if self.should_render_command_center(area) {
+            self.render_command_center(f, area);
+            return;
+        }
         let input_h = self.input_height();
-
-        // If file tree is shown, split horizontally
-        let (tree_area, main_area) = if self.show_file_tree && area.width > 40 {
-            let chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(30), Constraint::Min(10)])
-                .split(area);
-            (Some(chunks[0]), chunks[1])
-        } else {
-            (None, area)
-        };
+        let main_area = area;
 
         let (status_area, body_area, model_hint_area, divider_area, input_area, footer_area) =
             layout::app_layout(main_area, input_h);
@@ -1766,11 +1814,6 @@ impl TuiApp {
         render_canvas(f, input_area);
         render_canvas(f, footer_area);
 
-        // Render file tree sidebar
-        if let Some(ta) = tree_area {
-            file_tree::render_file_tree(f, ta, &self.file_tree);
-        }
-
         // Status bar (minimal)
         status_bar::render_status_bar(
             f,
@@ -1779,6 +1822,7 @@ impl TuiApp {
                 mode: self.current_mode(),
                 thinking: &self.thinking_mode,
                 activity: None,
+                motion_level: self.motion_level,
             },
         );
 
@@ -1793,15 +1837,14 @@ impl TuiApp {
                     model: &self.model,
                     thinking: &self.thinking_mode,
                     theme_label: self.theme_mode.label(),
+                    motion_label: self.motion_level.label(),
                 },
             );
         } else if self.is_showing_welcome() {
             welcome::render_welcome(f, content_area, &self.welcome);
         } else {
             // Quiet terminal style: everything scrolls together in one stream.
-            let elapsed = self
-                .stream_start
-                .map_or(0, |s| s.elapsed().as_millis() as u64);
+            let elapsed = self.stream_motion_frame().elapsed_ms;
             transcript_view::render_transcript(
                 f,
                 content_area,
@@ -1816,6 +1859,7 @@ impl TuiApp {
                     plan_warnings: &self.plan_warnings,
                     subagents: &self.subagents,
                     global_elapsed_ms: elapsed,
+                    motion_level: self.motion_level,
                     diffs: &self.file_diffs,
                     selected_diff: self.selected_diff,
                     is_streaming: self.is_streaming,
@@ -1860,9 +1904,7 @@ impl TuiApp {
             &self.thinking_mode,
             self.is_streaming.then(|| status_bar::StatusActivity {
                 title: &self.current_task_title,
-                elapsed_ms: self
-                    .stream_start
-                    .map_or(0, |started| started.elapsed().as_millis() as u64),
+                elapsed_ms: self.stream_motion_frame().elapsed_ms,
                 tokens: self.current_turn_output_tokens,
                 thought_seconds: self.stream_start.map_or(0, |started| {
                     thought_seconds_from_reasoning(
@@ -1872,6 +1914,7 @@ impl TuiApp {
                 }),
             }),
             self.current_mode(),
+            self.motion_level,
         );
 
         // Divider line above the input.
@@ -1890,7 +1933,13 @@ impl TuiApp {
         // Input
         let opts_for_input = self.pending_options.as_ref().map(|(_, o)| o.as_slice());
         if self.api_key_entry.is_some() {
-            input::render_api_key_input(f, input_area, &self.input_text, self.cursor_pos);
+            input::render_api_key_input(
+                f,
+                input_area,
+                &self.input_text,
+                self.cursor_pos,
+                self.motion_frame(),
+            );
         } else {
             input::render_input(
                 f,
@@ -1898,12 +1947,11 @@ impl TuiApp {
                 &self.input_text,
                 self.cursor_pos,
                 opts_for_input,
+                self.motion_frame(),
             );
         }
         if self.ctrl_c_exit_prompt_active_at(std::time::Instant::now()) {
             self.render_ctrl_c_exit_footer(f, footer_area);
-        } else {
-            self.render_powerline_footer(f, footer_area);
         }
 
         // Approval popup (on top of everything)
@@ -1912,36 +1960,155 @@ impl TuiApp {
         }
     }
 
-    fn render_powerline_footer(&self, f: &mut Frame, area: ratatui::layout::Rect) {
-        let status = if self.is_streaming {
-            "working"
-        } else if self.api_key_state == ApiKeyState::Missing {
-            "api needed"
-        } else if self.total_tokens > 0 {
-            "done"
-        } else {
-            "ready"
-        };
-        let permissions = if self.session_auto_approve {
-            "bypass permissions on"
-        } else {
-            "permissions ask"
-        };
+    fn should_render_command_center(&self, _area: Rect) -> bool {
+        self.should_render_minimal_runtime_surface()
+    }
 
-        statusline::render_statusline(
+    fn render_command_center(&self, f: &mut Frame, area: Rect) {
+        let p = theme::palette();
+        f.render_widget(
+            Paragraph::new("").style(Style::default().bg(p.canvas)),
+            area,
+        );
+
+        self.render_minimal_runtime_surface(f, area);
+        if let Some((ref approval, _)) = self.approval {
+            approval_popup::render_approval_popup(f, area, approval);
+        }
+    }
+
+    fn should_render_minimal_runtime_surface(&self) -> bool {
+        !self.is_showing_welcome() && !self.settings_open && self.api_key_entry.is_none()
+    }
+
+    fn render_minimal_runtime_surface(&self, f: &mut Frame, area: Rect) {
+        let p = theme::palette();
+        f.render_widget(
+            Paragraph::new("").style(Style::default().bg(p.canvas)),
+            area,
+        );
+
+        let root = area.inner(Margin {
+            horizontal: 3,
+            vertical: 1,
+        });
+        let slash_suggestions = self.slash_command_suggestions();
+        let options_count = self
+            .options_needed
+            .as_ref()
+            .map(|(_, opts, _)| opts.len())
+            .or_else(|| self.pending_options.as_ref().map(|(_, opts)| opts.len()))
+            .or_else(|| (!slash_suggestions.is_empty()).then_some(slash_suggestions.len()))
+            .unwrap_or(0);
+        let options_h: u16 = if options_count > 0 {
+            (options_count + 5).min(12) as u16
+        } else {
+            0
+        };
+        let composer_h = self.minimal_runtime_prompt_height();
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(1),
+                Constraint::Length(options_h),
+                Constraint::Length(composer_h),
+            ])
+            .split(root);
+
+        self.render_minimal_runtime_content(f, rows[0]);
+        if options_h > 0 {
+            self.render_command_options(f, rows[1], &slash_suggestions);
+        }
+        if composer_h > 0 {
+            self.render_minimal_runtime_prompt(f, rows[2]);
+        }
+    }
+
+    fn render_minimal_runtime_prompt(&self, f: &mut Frame, area: Rect) {
+        if area.height == 0 {
+            return;
+        }
+        let line_area = Rect::new(
+            area.x,
+            if area.height == 1 {
+                area.y
+            } else {
+                area.y + area.height.saturating_sub(1) / 2
+            },
+            area.width,
+            1,
+        );
+        let opts_for_input = self.pending_options.as_ref().map(|(_, o)| o.as_slice());
+        let input_area = if area.height > 1 { area } else { line_area };
+        input::render_input(
+            f,
+            input_area,
+            &self.input_text,
+            self.cursor_pos,
+            opts_for_input,
+            self.motion_frame(),
+        );
+    }
+
+    fn minimal_runtime_prompt_height(&self) -> u16 {
+        let line_count = self.input_text.lines().count().max(1) as u16;
+        line_count.clamp(1, 3)
+    }
+
+    fn render_minimal_runtime_content(&self, f: &mut Frame, area: Rect) {
+        if area.height == 0 {
+            return;
+        }
+        render_canvas(f, area);
+        let elapsed = self.stream_motion_frame().elapsed_ms;
+        transcript_view::render_transcript(
             f,
             area,
-            statusline::StatuslineProps {
-                mode: self.current_mode(),
-                status,
-                tokens: self.total_tokens,
-                input_tokens: self.current_turn_input_tokens,
-                output_tokens: self.current_turn_output_tokens,
-                cost: self.total_cost,
-                cache: self.cache.as_ref(),
-                permissions,
+            transcript_view::TranscriptProps {
+                messages: &self.messages,
+                pending_user_message: self.pending_user_message.as_deref(),
+                scroll_offset: self.scroll_offset,
+                plan_summary: self.plan_summary.as_deref(),
+                plan_steps: &self.plan_steps,
+                plan_current_step: self.plan_current_step,
+                plan_total_steps: self.plan_total_steps,
+                plan_warnings: &self.plan_warnings,
+                subagents: &self.subagents,
+                global_elapsed_ms: elapsed,
+                motion_level: self.motion_level,
+                diffs: &self.file_diffs,
+                selected_diff: self.selected_diff,
+                is_streaming: self.is_streaming,
+                stream_buffer: &self.stream_buffer,
+                reasoning_buffer: &self.reasoning_buffer,
+                show_reasoning: self.show_reasoning,
             },
         );
+    }
+
+    fn render_command_options(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        slash_suggestions: &[(String, String)],
+    ) {
+        let (title, options) = if let Some((t, opts, _)) = &self.options_needed {
+            (t.as_str(), opts.as_slice())
+        } else if let Some((t, opts)) = &self.pending_options {
+            (t.as_str(), opts.as_slice())
+        } else {
+            ("", &[][..])
+        };
+        if !options.is_empty() {
+            plan_tracker::render_options_panel(f, area, title, options, self.selected_option_index);
+        } else if !slash_suggestions.is_empty() {
+            plan_tracker::render_slash_command_panel(
+                f,
+                area,
+                slash_suggestions,
+                self.selected_slash_index,
+            );
+        }
     }
 
     fn render_ctrl_c_exit_footer(&self, f: &mut Frame, area: ratatui::layout::Rect) {
@@ -2076,9 +2243,20 @@ pub fn render_preview_snapshot(
     height: u16,
     scenario: PreviewSnapshotScenario,
     theme_mode: theme::ThemeMode,
+    elapsed_ms: u64,
 ) -> Result<String, anyhow::Error> {
-    let mut app = TuiApp::new(DeepSeekModel::Flash, ThinkingMode::Auto, None, project_root);
+    let startup = TuiStartupData::preview(!api_key_missing);
+    let mut app = TuiApp::new_with_startup(
+        DeepSeekModel::Flash,
+        ThinkingMode::Auto,
+        None,
+        project_root,
+        startup,
+    );
     app.set_theme_mode(theme_mode);
+    app.ui_started_at = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_millis(elapsed_ms))
+        .unwrap_or_else(std::time::Instant::now);
     if api_key_missing {
         app.set_api_key_state(ApiKeyState::Missing);
         app.api_key_entry = Some(ApiKeyEntry::default());
@@ -2094,7 +2272,11 @@ pub fn render_preview_snapshot(
         app.set_api_key_state(ApiKeyState::Ready);
         app.is_streaming = true;
         app.show_reasoning = true;
-        app.stream_start = Some(std::time::Instant::now());
+        app.stream_start = Some(
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_millis(elapsed_ms))
+                .unwrap_or_else(std::time::Instant::now),
+        );
         let turn_id = uuid::Uuid::new_v4();
         app.messages = vec![
             ProtocolMessage {
@@ -2135,6 +2317,7 @@ pub fn render_preview_snapshot(
             "Identify entry points -> inspect tests -> make the smallest safe fix".into();
         app.status_message = "Working across plan, agents, and tools".into();
         app.current_task_title = "整理系统运行流畅度".into();
+        app.pending_user_message = Some("整理系统运行流畅度".into());
         app.total_tokens = 578;
         app.current_turn_tokens = 578;
         app.plan_summary = Some("整理系统运行流畅度".into());
@@ -2198,7 +2381,12 @@ struct TerminalSession {
 
 impl TerminalSession {
     fn enter() -> Result<Self, anyhow::Error> {
-        crossterm::terminal::enable_raw_mode()?;
+        terminal::enable_raw_mode()?;
+        let mut stdout = std::io::stdout();
+        if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture, Hide) {
+            let _ = terminal::disable_raw_mode();
+            return Err(error.into());
+        }
         Ok(Self { active: true })
     }
 }
@@ -2206,7 +2394,9 @@ impl TerminalSession {
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         if self.active {
-            let _ = crossterm::terminal::disable_raw_mode();
+            let mut stdout = std::io::stdout();
+            let _ = execute!(stdout, Show, DisableMouseCapture, LeaveAlternateScreen);
+            let _ = terminal::disable_raw_mode();
         }
     }
 }
@@ -2815,7 +3005,8 @@ pub async fn run_tui(
 ) -> Result<(), anyhow::Error> {
     let root = project_root
         .unwrap_or_else(|| storage::find_project_root().unwrap_or_else(|| PathBuf::from(".")));
-    let api_key = storage::get_effective_api_key(Some(&root));
+    let (startup, api_key) = TuiStartupData::load(&root);
+    let probe_keyring = startup.probe_keyring;
     let mut active_client =
         crate::deepseek::client::DeepSeekClient::new(api_key.unwrap_or_default());
 
@@ -2878,12 +3069,14 @@ pub async fn run_tui(
     let mut terminal = Terminal::new(backend)?;
 
     let (action_tx, mut action_rx) = mpsc::unbounded_channel::<TuiAction>();
-    let mut app = TuiApp::new(model, thinking_mode, session_id, root.clone());
+    let mut app = TuiApp::new_with_startup(model, thinking_mode, session_id, root.clone(), startup);
     if let Some(ref orch) = orchestrator {
         app.mcp_status = orch.mcp_status();
     }
     let mut running_turn: Option<RunningTurn> = None;
     let mut local_task: Option<JoinHandle<()>> = None;
+    let mut keyring_task =
+        probe_keyring.then(|| tokio::task::spawn_blocking(storage::get_keyring_api_key));
     let mut yolo_mode = false;
 
     // Main event loop
@@ -2913,7 +3106,7 @@ pub async fn run_tui(
             }
 
             match running.handle.await {
-                Ok((returned_orchestrator, run_error)) => {
+                Ok((mut returned_orchestrator, run_error)) => {
                     let completion_report = app.plan_completion_report();
                     app.messages = returned_orchestrator.session.messages.clone();
                     app.stream_buffer.clear();
@@ -2927,6 +3120,7 @@ pub async fn run_tui(
                     if let Some(error) = run_error {
                         app.status_message = format!("Turn failed: {error}");
                     }
+                    returned_orchestrator.client = active_client.clone();
                     orchestrator = Some(returned_orchestrator);
                 }
                 Err(error) if error.is_cancelled() => {
@@ -2951,6 +3145,24 @@ pub async fn run_tui(
         {
             if let Some(handle) = local_task.take() {
                 let _ = handle.await;
+            }
+        }
+
+        if keyring_task
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+        {
+            if let Some(handle) = keyring_task.take() {
+                if let Ok(Some(api_key)) = handle.await {
+                    active_client = crate::deepseek::client::DeepSeekClient::new(api_key.clone());
+                    app.set_api_key_state(ApiKeyState::Ready);
+                    app.api_key_entry = None;
+                    app.status_message = "API key loaded from system keyring".into();
+                    app.push_activity("api key loaded from keyring");
+                    if let Some(orchestrator) = orchestrator.as_mut() {
+                        orchestrator.client = active_client.clone();
+                    }
+                }
             }
         }
 
@@ -2979,6 +3191,9 @@ pub async fn run_tui(
                     }
                     app.dismiss_ctrl_c_exit_prompt();
                     app.handle_key(key, &action_tx);
+                }
+                CEvent::Mouse(mouse) if app.handle_mouse_event(mouse) => {
+                    app.dismiss_ctrl_c_exit_prompt();
                 }
                 CEvent::Mouse(_) => {}
                 _ => {}
@@ -3091,18 +3306,14 @@ pub async fn run_tui(
                     }
 
                     if app.should_block_agent_turn_for_api_key() {
-                        if let Some(api_key) = storage::get_effective_api_key(Some(&root)) {
-                            app.mark_api_key_ready_from_storage(&root);
-                            active_client =
-                                crate::deepseek::client::DeepSeekClient::new(api_key.clone());
-                            if let Some(orchestrator) = orchestrator.as_mut() {
-                                orchestrator.client = active_client.clone();
-                            }
-                        } else {
-                            app.push_activity("send blocked: missing API key");
-                            app.begin_api_key_entry(Some(input));
+                        if keyring_task.is_some() {
+                            app.status_message = "Checking saved API key...".into();
+                            app.push_activity("send paused: checking keyring");
                             continue;
                         }
+                        app.push_activity("send blocked: missing API key");
+                        app.begin_api_key_entry(Some(input));
+                        continue;
                     }
 
                     // Clear any lingering completed plan / subagents from a previous turn
@@ -3380,7 +3591,7 @@ mod tests {
     #[test]
     fn task_title_summarizes_chinese_prompt() {
         assert_eq!(
-            summarize_task_title("修复输入框颜色和光标显示，让它更像 Claude Code"),
+            summarize_task_title("修复输入框颜色和光标显示，让它更像终端助手"),
             "修复输入框"
         );
     }
@@ -3538,6 +3749,45 @@ mod tests {
 
         assert_eq!(app.scroll_offset, 0);
         assert_eq!(app.input_text, "hello");
+    }
+
+    #[test]
+    fn empty_arrow_keys_scroll_transcript_instead_of_prompt_history() {
+        let mut app = test_app();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.input_history = vec!["first".to_string(), "second".to_string()];
+
+        app.handle_key(key(KeyCode::Up, KeyEventKind::Press), &tx);
+
+        assert_eq!(app.scroll_offset, 1);
+        assert!(app.input_text.is_empty());
+        assert!(app.history_cursor.is_none());
+
+        app.handle_key(key(KeyCode::Down, KeyEventKind::Press), &tx);
+
+        assert_eq!(app.scroll_offset, 0);
+        assert!(app.input_text.is_empty());
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_transcript() {
+        let mut app = test_app();
+
+        assert!(app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        }));
+        assert_eq!(app.scroll_offset, 3);
+
+        assert!(app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        }));
+        assert_eq!(app.scroll_offset, 0);
     }
 
     #[test]
@@ -3931,6 +4181,19 @@ mod tests {
     }
 
     #[test]
+    fn minimal_runtime_prompt_defaults_to_single_line() {
+        let mut app = test_app();
+
+        assert_eq!(app.minimal_runtime_prompt_height(), 1);
+
+        app.input_text = "hello\nworld\nagain\nmore".to_string();
+        assert_eq!(app.minimal_runtime_prompt_height(), 3);
+
+        app.pending_user_message = Some("submitted task".to_string());
+        assert_eq!(app.minimal_runtime_prompt_height(), 3);
+    }
+
+    #[test]
     fn reasoning_is_hidden_by_default_until_toggled() {
         let app = test_app();
 
@@ -4142,6 +4405,7 @@ mod tests {
             28,
             PreviewSnapshotScenario::Welcome,
             theme::ThemeMode::Light,
+            0,
         )
         .expect("render snapshot");
 
@@ -4161,6 +4425,7 @@ mod tests {
             28,
             PreviewSnapshotScenario::Welcome,
             theme::ThemeMode::Light,
+            0,
         )
         .expect("render snapshot");
 
@@ -4179,11 +4444,47 @@ mod tests {
             28,
             PreviewSnapshotScenario::Welcome,
             theme::ThemeMode::Dark,
+            0,
         )
         .expect("render snapshot");
 
-        assert!(snapshot.contains("deepseek-code"));
+        assert!(snapshot.contains("DeepSeek Code"));
+        assert!(snapshot.contains("What are we changing today?"));
+        assert!(snapshot.contains("> "));
         assert!(snapshot.contains("api:ready"));
+        assert!(!snapshot.contains("ds-code"));
+        assert!(!snapshot.contains("sandbox: workspace-write"));
+        assert!(!snapshot.contains("Plan active"));
+        assert!(!snapshot.contains("Agents running"));
+        assert!(!snapshot.contains("Approval needed"));
+    }
+
+    #[test]
+    fn preview_snapshot_dark_workbench_uses_runtime_baseline_after_welcome() {
+        let snapshot = render_preview_snapshot(
+            PathBuf::from("D:/deepseek-code"),
+            false,
+            120,
+            30,
+            PreviewSnapshotScenario::Workbench,
+            theme::ThemeMode::Dark,
+            0,
+        )
+        .expect("render snapshot");
+
+        assert!(!snapshot.contains("[DS]"));
+        assert!(snapshot
+            .lines()
+            .any(|line| line.trim_start().starts_with("> ") && line.contains('整')));
+        assert!(snapshot.contains("Thinking"));
+        assert!(!snapshot.contains("DeepSeek Workspace"));
+        assert!(!snapshot.contains("sandbox: workspace-write"));
+        assert!(!snapshot.contains("approval: plan off"));
+        assert!(!snapshot.contains("/ide for Cursor"));
+        assert!(!snapshot.contains("connected"));
+        assert!(!snapshot.contains("DEEPSEEK CODE"));
+        assert!(!snapshot.contains("CONTEXT"));
+        assert!(!snapshot.contains("TOOLS"));
     }
 
     #[test]
@@ -4195,15 +4496,45 @@ mod tests {
             30,
             PreviewSnapshotScenario::Workbench,
             theme::ThemeMode::Light,
+            0,
         )
         .expect("render snapshot");
 
         assert!(snapshot.contains("Identify entry points"));
-        assert!(snapshot.contains("plan"));
+        assert!(snapshot.contains("4 tasks"));
         assert!(snapshot.contains("agents"));
         assert!(snapshot.contains("Trace TUI input loop"));
-        assert!(snapshot.contains("DeepSeek V4 Flash (auto)"));
+        assert!(snapshot.contains("Thinking"));
+        assert!(!snapshot.contains("DeepSeek V4 Flash (auto)"));
         assert!(!snapshot.contains("Model:"));
+    }
+
+    #[test]
+    fn preview_snapshot_elapsed_ms_drives_motion_frame() {
+        let first = render_preview_snapshot(
+            PathBuf::from("D:/deepseek-code"),
+            false,
+            120,
+            30,
+            PreviewSnapshotScenario::Workbench,
+            theme::ThemeMode::Light,
+            0,
+        )
+        .expect("render first snapshot");
+        let second = render_preview_snapshot(
+            PathBuf::from("D:/deepseek-code"),
+            false,
+            120,
+            30,
+            PreviewSnapshotScenario::Workbench,
+            theme::ThemeMode::Light,
+            motion::MotionFrame::TICK_MS,
+        )
+        .expect("render second snapshot");
+
+        assert_ne!(first, second);
+        assert!(first.contains("running"));
+        assert!(second.contains("running"));
     }
 
     #[test]
@@ -4230,6 +4561,7 @@ mod tests {
             28,
             PreviewSnapshotScenario::Workbench,
             theme::ThemeMode::Light,
+            0,
         )
         .expect("render snapshot");
         println!("\n=== NO BG ===\n{snapshot}\n=============\n");
