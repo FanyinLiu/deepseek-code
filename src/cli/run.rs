@@ -2,10 +2,10 @@ use std::path::PathBuf;
 
 use crate::agent::orchestrator::{AgentEvent, Orchestrator};
 use crate::cli::output_blocks;
-use crate::deepseek::client::DeepSeekClient;
 use crate::deepseek::{
     ExecutionLane, ReasoningState, Session, SessionId, SessionMetadata, ThinkingMode,
 };
+use crate::provider::{build_provider, ModelSelection, Provider};
 use crate::storage;
 
 /// Run the run command: execute a task with tool access and approval.
@@ -17,7 +17,10 @@ pub async fn run(
     let root = project_root
         .unwrap_or_else(|| storage::find_project_root().unwrap_or_else(|| PathBuf::from(".")));
     let api_key = super::login::resolve_or_prompt_api_key(Some(&root))?;
-    let client = DeepSeekClient::new(api_key);
+    let config = crate::storage::Config::load(Some(&root))?;
+    let provider = build_provider(&config.provider, api_key);
+    let client = provider.create_deepseek_client();
+    let model = ModelSelection::resolve(&config.provider, &config.model, None)?.model;
 
     let session = Session {
         id: SessionId::new_v4(),
@@ -30,6 +33,7 @@ pub async fn run(
             } else {
                 ThinkingMode::Auto
             },
+            selected_model: Some(model),
             ..Default::default()
         },
         tool_call_history: Vec::new(),
@@ -40,7 +44,6 @@ pub async fn run(
     };
 
     let mut orchestrator = Orchestrator::new(client, root, session);
-    let config = crate::storage::Config::load(Some(&orchestrator.project_root)).unwrap_or_default();
     orchestrator.init_mcp(&config.mcp).await;
 
     // Spawn the turn in the background so approval events can be handled

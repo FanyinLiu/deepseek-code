@@ -11,8 +11,7 @@ use crate::agent::subagent::{
     PermissionMode, SubagentConfig, SubagentExecutor, SubagentRegistry, SubagentResult,
     SubagentTask,
 };
-use crate::deepseek::client::DeepSeekClient;
-use crate::deepseek::DeepSeekModel;
+use crate::provider::{build_provider, Provider};
 use crate::storage;
 
 const BUILT_IN_AGENTS: &[&str] = &[
@@ -384,11 +383,13 @@ async fn run_agent(
         config.max_turns = max_turns;
     }
     if let Some(model) = model {
-        config.model = Some(parse_model(&model)?);
+        config.model = Some(crate::provider::parse_model(&model)?);
     }
 
+    let app_config = storage::Config::load(Some(project_root))?;
     let api_key = super::login::resolve_or_prompt_api_key(Some(project_root))?;
-    let client = Arc::new(DeepSeekClient::new(api_key));
+    let provider = build_provider(&app_config.provider, api_key);
+    let client = Arc::new(provider.create_deepseek_client());
     let task = SubagentTask {
         description: task_text.chars().take(80).collect(),
         prompt: task_text.to_string(),
@@ -703,14 +704,6 @@ fn known_tool_names() -> BTreeSet<String> {
         .collect()
 }
 
-fn parse_model(value: &str) -> Result<DeepSeekModel, anyhow::Error> {
-    match value {
-        "pro" | "deepseek-v4-pro" => Ok(DeepSeekModel::Pro),
-        "flash" | "deepseek-v4-flash" => Ok(DeepSeekModel::Flash),
-        other => bail!("unknown model '{other}' (expected pro or flash)"),
-    }
-}
-
 fn permission_mode_label(mode: &PermissionMode) -> &'static str {
     match mode {
         PermissionMode::Default => "default",
@@ -757,6 +750,7 @@ fn resolve_root(project_root: Option<PathBuf>) -> PathBuf {
 mod tests {
     use super::*;
     use crate::agent::subagent::SubagentType;
+    use crate::deepseek::DeepSeekModel;
 
     #[test]
     fn list_payload_contains_built_ins() {
@@ -835,5 +829,17 @@ Plan safely.
             .errors
             .iter()
             .any(|error| error.code == "unknown_tool"));
+    }
+
+    #[test]
+    fn agent_model_aliases_use_shared_provider_parser() {
+        assert_eq!(
+            crate::provider::parse_model("v4-pro").expect("v4-pro alias"),
+            DeepSeekModel::Pro
+        );
+        assert_eq!(
+            crate::provider::parse_model("v4-flash").expect("v4-flash alias"),
+            DeepSeekModel::Flash
+        );
     }
 }

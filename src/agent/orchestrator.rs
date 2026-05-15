@@ -8,9 +8,9 @@ use crate::deepseek::client::DeepSeekClient;
 use crate::deepseek::tools as ds_tools;
 use crate::deepseek::{
     thinking_config_for_lane, CacheUsage, ChatRequest, DeepSeekModel, ExecutionLane, FinishReason,
-    MessageContent, MessageId, MessageVisibility, ModelCapability, ProtocolMessage,
-    ReasoningEffort, ReasoningState, Role, Session, SessionId, StreamResult, SubTurnId,
-    ThinkingConfig, ToolCall, ToolCallFunction, ToolDefinition, ToolResultRecord, TurnId, Usage,
+    MessageContent, MessageId, MessageVisibility, ModelCapability, ProtocolMessage, Role, Session,
+    SessionId, StreamResult, SubTurnId, ThinkingConfig, ToolCall, ToolCallFunction, ToolDefinition,
+    ToolResultRecord, TurnId, Usage,
 };
 use crate::plan;
 use crate::plan::schema::{Plan, RiskLevel};
@@ -1282,7 +1282,7 @@ impl Orchestrator {
         let lane = force_lane.unwrap_or_else(|| task.default_lane());
 
         // 8. Build prompt (project_rules loaded once at top of run_turn_inner)
-        let cap = ModelCapability::for_model(&self.session.reasoning_state.mode_to_model());
+        let cap = ModelCapability::for_model(&self.session.reasoning_state.effective_model());
         let thinking_config = thinking_config_for_lane(
             &lane,
             &self.session.reasoning_state.mode,
@@ -1369,8 +1369,8 @@ impl Orchestrator {
                     }
                     if let Some(ref usage) = stream_result.usage {
                         self.session.metadata.total_tokens += u64::from(usage.total_tokens);
-                        self.session.metadata.total_cost_estimate +=
-                            usage.estimate_cost_cny(&self.session.reasoning_state.mode_to_model());
+                        self.session.metadata.total_cost_estimate += usage
+                            .estimate_cost_cny(&self.session.reasoning_state.effective_model());
                         send_event(
                             event_tx,
                             AgentEvent::StreamDone {
@@ -1721,7 +1721,8 @@ impl Orchestrator {
 
                 // Stream with tools to execute the plan
                 let tool_defs = self.get_all_tools();
-                let cap = ModelCapability::for_model(&self.session.reasoning_state.mode_to_model());
+                let cap =
+                    ModelCapability::for_model(&self.session.reasoning_state.effective_model());
                 let thinking_config = thinking_config_for_lane(
                     &ExecutionLane::ToolLoopThinking,
                     &self.session.reasoning_state.mode,
@@ -1776,7 +1777,7 @@ impl Orchestrator {
                                 self.session.metadata.total_tokens += u64::from(usage.total_tokens);
                                 self.session.metadata.total_cost_estimate += usage
                                     .estimate_cost_cny(
-                                        &self.session.reasoning_state.mode_to_model(),
+                                        &self.session.reasoning_state.effective_model(),
                                     );
                                 send_event(
                                     event_tx,
@@ -2264,7 +2265,7 @@ impl Orchestrator {
         let project_rules = load_project_rules(&self.project_root);
         let session_events = self.load_session_events();
         let (_, messages) = PromptBuilder::new(
-            self.session.reasoning_state.mode_to_model(),
+            self.session.reasoning_state.effective_model(),
             ExecutionLane::ToolLoopThinking,
             true,
         )
@@ -2277,7 +2278,7 @@ impl Orchestrator {
         );
 
         let followup_request = ChatRequest {
-            model: self.session.reasoning_state.mode_to_model().to_string(),
+            model: self.session.reasoning_state.effective_model().to_string(),
             messages,
             tools: Some(tool_defs),
             thinking: Some(ThinkingConfig::enabled()),
@@ -2335,8 +2336,8 @@ impl Orchestrator {
                     }
                     if let Some(ref usage) = followup_result.usage {
                         self.session.metadata.total_tokens += u64::from(usage.total_tokens);
-                        self.session.metadata.total_cost_estimate +=
-                            usage.estimate_cost_cny(&self.session.reasoning_state.mode_to_model());
+                        self.session.metadata.total_cost_estimate += usage
+                            .estimate_cost_cny(&self.session.reasoning_state.effective_model());
                         send_event(
                             event_tx,
                             AgentEvent::StreamDone {
@@ -2356,15 +2357,6 @@ impl Orchestrator {
             }
         }
         Ok(())
-    }
-}
-
-impl ReasoningState {
-    fn mode_to_model(&self) -> DeepSeekModel {
-        match self.effort {
-            ReasoningEffort::Max | ReasoningEffort::High => DeepSeekModel::Pro,
-            _ => DeepSeekModel::Flash,
-        }
     }
 }
 

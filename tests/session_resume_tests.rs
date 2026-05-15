@@ -18,6 +18,7 @@ fn make_test_session(name: &str, project_root: &std::path::Path) -> Session {
         reasoning_state: ReasoningState {
             mode: ThinkingMode::On,
             effort: ReasoningEffort::Max,
+            selected_model: Some(DeepSeekModel::Pro),
             active_tool_turn: Some(sub_turn),
             preserved_assistant_messages: vec![MessageId::new_v4()],
             last_cleanup_at_turn: Some(turn_id),

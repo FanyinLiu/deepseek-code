@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::agent::router::{ComplexityRouter, Route};
-use crate::deepseek::client::DeepSeekClient;
+use crate::provider::{build_provider, Provider};
 use crate::storage;
 
 /// Assess a task's complexity and print the routing decision (debug/diagnostics).
@@ -9,13 +9,15 @@ pub async fn assess(task: String, project_root: Option<PathBuf>) -> Result<(), a
     let root = project_root
         .unwrap_or_else(|| storage::find_project_root().unwrap_or_else(|| PathBuf::from(".")));
 
-    let router_config = storage::Config::load(Some(&root))
-        .map(|c| c.router)
-        .unwrap_or_default();
+    let config = storage::Config::load(Some(&root))?;
+    let router_config = config.router.clone();
 
     let api_key = storage::get_effective_api_key(Some(&root));
     let has_api_key = api_key.is_some();
-    let client = api_key.map(DeepSeekClient::new);
+    let client = api_key.map(|key| {
+        let provider = build_provider(&config.provider, key);
+        provider.create_deepseek_client()
+    });
 
     let router = if router_config.enabled && has_api_key {
         ComplexityRouter::from(&router_config)

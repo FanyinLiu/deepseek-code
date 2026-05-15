@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use crate::agent::orchestrator::AgentEvent;
 use crate::agent::subagent::{SubagentConfig, SubagentTask, SubagentType};
 use crate::agent::supervisor::Supervisor;
-use crate::deepseek::client::DeepSeekClient;
+use crate::provider::{build_provider, Provider};
 use crate::storage;
 
 /// Run a full multi-agent code review over the project.
@@ -24,8 +24,10 @@ pub async fn review(
 ) -> Result<(), anyhow::Error> {
     let root = project_root
         .unwrap_or_else(|| storage::find_project_root().unwrap_or_else(|| PathBuf::from(".")));
+    let config = storage::Config::load(Some(&root))?;
     let api_key = super::login::resolve_or_prompt_api_key(Some(&root))?;
-    let client = Arc::new(DeepSeekClient::new(api_key));
+    let provider = build_provider(&config.provider, api_key);
+    let client = Arc::new(provider.create_deepseek_client());
 
     // 1. Scan all .rs files grouped by top-level module
     let groups = scan_modules(&root)?;

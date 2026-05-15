@@ -57,8 +57,8 @@ use crate::policy::ApprovalDisplay;
 use crate::storage;
 
 use super::{
-    approval_popup, diff_viewer, file_tree, input, layout, model_hint, plan_tracker, status_bar,
-    statusline, subagent_cards, theme, transcript_view, welcome,
+    approval_popup, diff_viewer, file_tree, input, layout, model_hint, plan_tracker,
+    settings_panel, status_bar, statusline, subagent_cards, theme, transcript_view, welcome,
 };
 
 /// TUI application state.
@@ -122,6 +122,9 @@ pub struct TuiApp {
     pub mcp_status: String,
     pub theme_mode: theme::ThemeMode,
     pub renderer_mode: RendererMode,
+    pub settings_open: bool,
+    pub settings_tab: settings_panel::SettingsTab,
+    pub settings_selected: usize,
     ctrl_c_exit_deadline: Option<std::time::Instant>,
 }
 
@@ -256,7 +259,7 @@ impl TuiApp {
         project_root: PathBuf,
     ) -> Self {
         let config = storage::Config::load(Some(&project_root)).unwrap_or_default();
-        let theme_mode = theme::ThemeMode::resolve(&config.ui.theme);
+        let theme_mode = theme::ThemeMode::from_config(&config.ui.theme);
         let renderer_mode = RendererMode::from_config(&config.ui.renderer);
         theme::set_active_theme(theme_mode);
         let welcome = welcome::WelcomeDashboardData::load(
@@ -334,6 +337,9 @@ impl TuiApp {
             mcp_status: String::new(),
             theme_mode,
             renderer_mode,
+            settings_open: false,
+            settings_tab: settings_panel::SettingsTab::SessionDefaults,
+            settings_selected: 0,
             ctrl_c_exit_deadline: None,
         }
     }
@@ -397,6 +403,42 @@ impl TuiApp {
             mode.label()
         );
         self.push_activity(format!("renderer: {}", mode.label()));
+    }
+
+    pub fn open_settings_panel(&mut self) {
+        self.settings_open = true;
+        self.settings_selected = self
+            .settings_selected
+            .min(settings_panel::row_count(self.settings_tab).saturating_sub(1));
+        self.status_message = "Settings are read-only in this build".into();
+    }
+
+    fn handle_settings_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.settings_open = false;
+                self.status_message = "Settings closed".into();
+            }
+            KeyCode::Tab => {
+                self.settings_tab = self.settings_tab.next();
+                self.settings_selected = 0;
+            }
+            KeyCode::BackTab => {
+                self.settings_tab = self.settings_tab.previous();
+                self.settings_selected = 0;
+            }
+            KeyCode::Up => {
+                self.settings_selected = self.settings_selected.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                let max = settings_panel::row_count(self.settings_tab).saturating_sub(1);
+                self.settings_selected = (self.settings_selected + 1).min(max);
+            }
+            KeyCode::Enter => {
+                self.status_message = "Settings editing is coming later".into();
+            }
+            _ => {}
+        }
     }
 
     fn handle_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<TuiAction>) {
@@ -481,6 +523,11 @@ impl TuiApp {
                     self.approval = Some((approval, respond));
                 }
             }
+            return;
+        }
+
+        if self.settings_open {
+            self.handle_settings_key(key);
             return;
         }
 
@@ -911,6 +958,7 @@ impl TuiApp {
     fn slash_command_suggestions(&self) -> Vec<(String, String)> {
         let trimmed = self.input_text.trim();
         if self.api_key_entry.is_some()
+            || self.settings_open
             || !trimmed.starts_with('/')
             || trimmed.contains(char::is_whitespace)
         {
@@ -2066,7 +2114,19 @@ impl TuiApp {
         }
 
         // Welcome page: full body (only when empty)
-        if showing_welcome {
+        if self.settings_open {
+            settings_panel::render_settings_panel(
+                f,
+                content_area,
+                settings_panel::SettingsPanelProps {
+                    selected_tab: self.settings_tab,
+                    selected_row: self.settings_selected,
+                    model: &self.model,
+                    thinking: &self.thinking_mode,
+                    theme_label: self.theme_mode.label(),
+                },
+            );
+        } else if showing_welcome {
             welcome::render_welcome(f, full_body_area, &self.welcome);
         } else {
             // Quiet terminal style: everything scrolls together in one stream.
@@ -2186,9 +2246,15 @@ impl TuiApp {
         // Input
         let opts_for_input = self.pending_options.as_ref().map(|(_, o)| o.as_slice());
         if self.api_key_entry.is_some() {
-            input::render_api_key_input(f, input_area, &self.input_text);
+            input::render_api_key_input(f, input_area, &self.input_text, self.cursor_pos);
         } else {
-            input::render_input(f, input_area, &self.input_text, opts_for_input);
+            input::render_input(
+                f,
+                input_area,
+                &self.input_text,
+                self.cursor_pos,
+                opts_for_input,
+            );
         }
         let (cursor_x, cursor_y) = input::terminal_cursor_position(
             input_area,
@@ -2229,10 +2295,6 @@ impl TuiApp {
         };
         let show_exit_prompt = self.ctrl_c_exit_prompt_active_at(std::time::Instant::now());
         let activity_h = u16::from(self.is_streaming || show_exit_prompt);
-        let approval_h = self
-            .approval
-            .as_ref()
-            .map_or(0, |(a, _)| approval_popup::inline_height(a));
         let inner = area.inner(Margin {
             horizontal: u16::from(area.width >= 60),
             vertical: 0,
@@ -2243,18 +2305,32 @@ impl TuiApp {
                 Constraint::Min(3),
                 Constraint::Length(options_h),
                 Constraint::Length(activity_h),
-                Constraint::Length(approval_h),
+                Constraint::Length(1),
                 Constraint::Length(input_h),
+                Constraint::Length(1),
             ])
             .split(inner);
         let content_area = chunks[0];
         let options_area = chunks[1];
         let activity_area = chunks[2];
-        let approval_area = chunks[3];
+        let top_divider_area = chunks[3];
         let input_area = chunks[4];
+        let bottom_divider_area = chunks[5];
 
         let showing_welcome = self.is_showing_welcome();
-        if showing_welcome {
+        if self.settings_open {
+            settings_panel::render_settings_panel(
+                f,
+                content_area,
+                settings_panel::SettingsPanelProps {
+                    selected_tab: self.settings_tab,
+                    selected_row: self.settings_selected,
+                    model: &self.model,
+                    thinking: &self.thinking_mode,
+                    theme_label: self.theme_mode.label(),
+                },
+            );
+        } else if showing_welcome {
             welcome::render_classic_welcome(f, content_area, &self.welcome);
         } else {
             let elapsed = self
@@ -2361,16 +2437,20 @@ impl TuiApp {
             );
         }
 
-        if let Some((ref approval, _)) = self.approval {
-            approval_popup::render_approval_inline(f, approval_area, approval);
-        }
-
+        render_classic_divider(f, top_divider_area);
         let opts_for_input = self.pending_options.as_ref().map(|(_, o)| o.as_slice());
         if self.api_key_entry.is_some() {
-            input::render_api_key_input(f, input_area, &self.input_text);
+            input::render_api_key_input(f, input_area, &self.input_text, self.cursor_pos);
         } else {
-            input::render_input(f, input_area, &self.input_text, opts_for_input);
+            input::render_input(
+                f,
+                input_area,
+                &self.input_text,
+                self.cursor_pos,
+                opts_for_input,
+            );
         }
+        render_classic_divider(f, bottom_divider_area);
 
         let (cursor_x, cursor_y) = input::terminal_cursor_position(
             input_area,
@@ -2379,6 +2459,10 @@ impl TuiApp {
             self.api_key_entry.is_some(),
         );
         f.set_cursor_position((cursor_x, cursor_y));
+
+        if let Some((ref approval, _)) = self.approval {
+            approval_popup::render_approval_popup(f, area, approval);
+        }
     }
 
     fn render_powerline_footer(&self, f: &mut Frame, area: ratatui::layout::Rect) {
@@ -2586,6 +2670,22 @@ fn render_canvas(f: &mut Frame, area: Rect) {
         .collect::<Vec<_>>();
     f.render_widget(
         Paragraph::new(Text::from(lines)).style(Style::default().fg(p.text).bg(p.canvas)),
+        area,
+    );
+}
+
+fn render_classic_divider(f: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let p = theme::palette();
+    let line = "─".repeat(area.width as usize);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            line,
+            Style::default().fg(p.dim).bg(p.canvas),
+        )))
+        .style(Style::default().fg(p.text).bg(p.canvas)),
         area,
     );
 }
@@ -4333,7 +4433,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal.draw(|f| app.render(f)).expect("draw");
 
-        terminal.backend_mut().assert_cursor_position((7, 32));
+        terminal.backend_mut().assert_cursor_position((7, 31));
     }
 
     #[test]

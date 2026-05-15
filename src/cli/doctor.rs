@@ -1,13 +1,14 @@
 use std::path::PathBuf;
 
-use crate::deepseek::client::DeepSeekClient;
-use crate::deepseek::{ChatMessage, ChatRequest, DeepSeekModel, ThinkingConfig};
+use crate::deepseek::{ChatMessage, ChatRequest, ThinkingConfig};
+use crate::provider::{build_provider, Provider};
 use crate::storage;
 
 /// Run the doctor command: check connectivity, auth, model availability.
 pub async fn doctor(project_root: Option<PathBuf>) -> Result<(), anyhow::Error> {
     println!("DeepSeek-Code Doctor\n");
     let root = project_root.or_else(storage::find_project_root);
+    let config = storage::Config::load(root.as_deref())?;
 
     // 1. Check API key
     let api_key = if let Some(key) = storage::get_effective_api_key(root.as_deref()) {
@@ -19,7 +20,8 @@ pub async fn doctor(project_root: Option<PathBuf>) -> Result<(), anyhow::Error> 
     };
 
     // 2. Check connectivity
-    let client = DeepSeekClient::new(api_key.clone());
+    let provider = build_provider(&config.provider, api_key.clone());
+    let client = provider.create_deepseek_client();
     println!("   Testing connectivity to api.deepseek.com...");
 
     match client.list_models().await {
@@ -46,9 +48,10 @@ pub async fn doctor(project_root: Option<PathBuf>) -> Result<(), anyhow::Error> 
     }
 
     // 3. Test chat call
-    println!("   Testing chat completion (deepseek-v4-flash)...");
+    let test_model = config.model.default.canonical();
+    println!("   Testing chat completion ({test_model})...");
     let req = ChatRequest {
-        model: DeepSeekModel::Flash.to_string(),
+        model: provider.request_model_name(&test_model),
         messages: vec![ChatMessage {
             role: "user".into(),
             content: Some(crate::deepseek::models::ChatMessageContent::Text(

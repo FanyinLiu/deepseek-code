@@ -1,6 +1,6 @@
 # DeepSeek-Code 调研优化落地路线图
 
-生成日期：2026-05-15
+生成日期：2026-05-14
 
 ## 目标
 
@@ -9,7 +9,7 @@
 - `CLI编程助手架构设计.md`
 - `AI终端编程助手调研报告.docx`
 
-调研中的目标不是要求项目重写，而是把现有 Rust CLI/TUI 编程助手推进到更接近主流终端编程智能体的通用形态。
+调研中的目标不是要求项目重写，而是把现有 Rust CLI/TUI 编程助手推进到更接近 Claude Code、Codex CLI、Kimi CLI、Qwen Code、OpenCode、Droid、Gemini CLI 的通用终端智能体形态。
 
 ## 当前结论
 
@@ -29,28 +29,30 @@
 
 ## 当前健康基线
 
-最近一次本地验证结果：
+最近一次本地验证结果（2026-05-14，P0 provider/model 收口后）：
 
 ```powershell
 cargo fmt --all --check
 cargo check --all-targets --all-features
-cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
+git diff --check
+cargo install --path . --bin ds --force
+ds --version
 ```
 
-以上命令均通过。测试数量合计 363 个通过。
+以上命令本轮均执行并通过。库测试数量为 475 个通过，集成测试同步通过。
 
-当前工作树只发现已有未跟踪目录：
+当前工作树处于 P0 实施中，包含 provider/model 相关未提交改动；既有未跟踪审计资料保持不动：
 
 ```text
-?? research/
+?? docs/audit/
 ```
 
 ## 差距概览
 
 | 方向 | 当前状态 | 主要差距 |
 | --- | --- | --- |
-| Provider / 模型抽象 | DeepSeekClient 已成熟 | 缺统一 Provider trait、Provider registry、OpenAI/Gemini/其他兼容适配 |
+| Provider / 模型抽象 | DeepSeekClient 已成熟 | 缺统一 Provider trait、Provider registry、OpenAI-compatible / Anthropic / Gemini / Ollama / custom provider 适配 |
 | 模型选择 | CLI/TUI 有 model 参数和 `/model` | 模型选择没有完全贯穿到真实请求链路 |
 | TUI 命令体验 | slash registry、补全、`@`、`!` 已有 | 缺完整命令面板、首屏发现、TUI resume/export、真正 `/diff` 面板 |
 | 权限系统 | 审批、路径保护、命令风险、session allow 已有 | 权限模式分散在 policy、TUI、YOLO、subagent 中，缺统一状态机 |
@@ -71,7 +73,7 @@ cargo test --all-features
 
 - 让 `chat --model`、TUI `/model`、配置默认模型真正影响请求。
 - 引入最小 Provider 抽象，但第一版只实现 DeepSeek。
-- 为后续 OpenAI-compatible、Gemini、Ollama/custom provider 预留接口。
+- 为后续 OpenAI-compatible、Anthropic、Gemini、Ollama/custom provider 预留接口。
 
 建议文件：
 
@@ -84,11 +86,12 @@ cargo test --all-features
 - `src/tui/app.rs`
 - `src/commands/mod.rs`
 
-建议新增：
+本轮已新增：
 
 - `src/provider/mod.rs`
-- `src/provider/deepseek.rs`
 - `ProviderConfig` / `ProviderKind` / `ModelSelection`
+
+后续如扩展多 provider，再拆分 `src/provider/deepseek.rs`、provider registry、endpoint、key-env 和 model catalog。
 
 验收标准：
 

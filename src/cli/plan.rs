@@ -2,10 +2,10 @@ use std::path::PathBuf;
 
 use crate::agent::orchestrator::{AgentEvent, Orchestrator};
 use crate::cli::output_blocks;
-use crate::deepseek::client::DeepSeekClient;
 use crate::deepseek::{
     ReasoningEffort, ReasoningState, Session, SessionId, SessionMetadata, ThinkingMode,
 };
+use crate::provider::{build_provider, Provider};
 use crate::storage;
 
 /// Run the plan command: read-only analysis, no file modifications.
@@ -13,7 +13,9 @@ pub async fn plan(task: String, project_root: Option<PathBuf>) -> Result<(), any
     let root = project_root
         .unwrap_or_else(|| storage::find_project_root().unwrap_or_else(|| PathBuf::from(".")));
     let api_key = super::login::resolve_or_prompt_api_key(Some(&root))?;
-    let client = DeepSeekClient::new(api_key);
+    let config = crate::storage::Config::load(Some(&root))?;
+    let provider = build_provider(&config.provider, api_key);
+    let client = provider.create_deepseek_client();
 
     output_blocks::print_header("plan mode", output_blocks::BlockStatus::Running);
     output_blocks::print_kv("project", root.display().to_string());
@@ -27,6 +29,7 @@ pub async fn plan(task: String, project_root: Option<PathBuf>) -> Result<(), any
         reasoning_state: ReasoningState {
             mode: ThinkingMode::On,
             effort: ReasoningEffort::Max,
+            selected_model: Some(config.model.heavy.canonical()),
             ..Default::default()
         },
         tool_call_history: Vec::new(),
@@ -37,7 +40,6 @@ pub async fn plan(task: String, project_root: Option<PathBuf>) -> Result<(), any
     };
 
     let mut orchestrator = Orchestrator::new(client, root, session);
-    let config = crate::storage::Config::load(Some(&orchestrator.project_root)).unwrap_or_default();
     orchestrator.init_mcp(&config.mcp).await;
 
     // Prepend /plan to trigger plan mode classification

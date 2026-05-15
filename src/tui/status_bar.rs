@@ -72,19 +72,21 @@ pub(crate) fn activity_hint_text(activity: &StatusActivity<'_>, thinking: &Think
     }
 }
 
-fn activity_state_label(activity: &StatusActivity<'_>, _thinking: &ThinkingMode) -> String {
+fn activity_state_label(activity: &StatusActivity<'_>, thinking: &ThinkingMode) -> String {
     if activity.thought_seconds > 0 && activity.tokens > 0 {
         return format!("thought for {}", format_elapsed(activity.thought_seconds));
     }
 
     let elapsed_seconds = activity.elapsed_ms / 1_000;
-    if elapsed_seconds >= 90 {
-        "almost done".to_string()
+    let effort = thinking_effort_label(thinking);
+    let phase = if elapsed_seconds >= 90 {
+        "almost done thinking"
     } else if elapsed_seconds >= 35 {
-        "still thinking".to_string()
+        "thinking some more"
     } else {
-        "thinking".to_string()
-    }
+        "thinking"
+    };
+    format!("{phase} with {effort} effort")
 }
 
 fn activity_token_label(input_tokens: u64, output_tokens: u64, agent_tokens: u64) -> String {
@@ -142,6 +144,14 @@ fn activity_spinner(elapsed_ms: u64) -> &'static str {
     const GLYPHS: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     let idx = ((elapsed_ms / 80) as usize) % GLYPHS.len();
     GLYPHS[idx]
+}
+
+fn thinking_effort_label(thinking: &ThinkingMode) -> &'static str {
+    match thinking {
+        ThinkingMode::Auto => "auto",
+        ThinkingMode::On => "high",
+        ThinkingMode::Off => "no",
+    }
 }
 
 /// Quiet activity line. Idle state intentionally renders blank.
@@ -255,7 +265,10 @@ mod tests {
             &ThinkingMode::On,
         );
 
-        assert_eq!(hint, "⠹ Fix input colors... (1s · ↓ 663 tokens · thinking)");
+        assert_eq!(
+            hint,
+            "⠹ Fix input colors... (1s · ↓ 663 tokens · thinking with high effort)"
+        );
     }
 
     #[test]
@@ -274,7 +287,7 @@ mod tests {
 
         assert_eq!(
             hint,
-            "⠋ Fix input colors... (1m 36s · ↓ 663 tokens · almost done)"
+            "⠋ Fix input colors... (1m 36s · ↓ 663 tokens · almost done thinking with high effort)"
         );
     }
 

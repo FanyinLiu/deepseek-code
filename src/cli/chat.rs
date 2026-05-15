@@ -1,10 +1,8 @@
 use std::path::PathBuf;
 
 use crate::agent::orchestrator::{AgentEvent, Orchestrator};
-use crate::deepseek::client::DeepSeekClient;
-use crate::deepseek::{
-    DeepSeekModel, ReasoningState, Session, SessionId, SessionMetadata, ThinkingMode,
-};
+use crate::deepseek::{ReasoningState, Session, SessionId, SessionMetadata, ThinkingMode};
+use crate::provider::{build_provider, ModelSelection, Provider};
 use crate::storage;
 
 /// Run the chat command: one-shot or interactive conversation.
@@ -18,27 +16,18 @@ pub async fn chat(
     let root = project_root
         .unwrap_or_else(|| storage::find_project_root().unwrap_or_else(|| PathBuf::from(".")));
     let api_key = super::login::resolve_or_prompt_api_key(Some(&root))?;
-    let client = DeepSeekClient::new(api_key);
+    let config = crate::storage::Config::load(Some(&root))?;
+    let provider = build_provider(&config.provider, api_key);
+    let client = provider.create_deepseek_client();
 
-    // Resolve model
-    let model = match model_override.as_deref() {
-        Some("pro" | "v4-pro") => DeepSeekModel::Pro,
-        Some("flash" | "v4-flash") | None => DeepSeekModel::Flash,
-        Some(other) => {
-            if let Some(m) = crate::deepseek::migration::migrate_model_name(other) {
-                m
-            } else {
-                eprintln!("Unknown model: {other}. Using flash.");
-                DeepSeekModel::Flash
-            }
-        }
-    };
+    let requested_model =
+        ModelSelection::resolve(&config.provider, &config.model, model_override.as_deref())?.model;
 
     // Create or load session
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?;
     let store = storage::SessionStore::new(home.join(".deepseek-code"));
 
-    let session = if let Some(ref sid) = session_id {
+    let mut session = if let Some(ref sid) = session_id {
         let sid = uuid::Uuid::parse_str(sid)?;
         match store.load(&root, &sid) {
             Ok(s) => {
@@ -66,6 +55,7 @@ pub async fn chat(
                 } else {
                     ThinkingMode::Auto
                 },
+                selected_model: Some(requested_model.clone()),
                 ..Default::default()
             },
             tool_call_history: Vec::new(),
@@ -75,10 +65,12 @@ pub async fn chat(
             metadata: SessionMetadata::default(),
         }
     };
+    if model_override.is_some() {
+        session.reasoning_state.selected_model = Some(requested_model);
+    }
 
     let mut orchestrator = Some(Orchestrator::new(client, root, session));
     if let Some(ref mut orch) = orchestrator {
-        let config = crate::storage::Config::load(Some(&orch.project_root)).unwrap_or_default();
         orch.init_mcp(&config.mcp).await;
     }
 
@@ -279,7 +271,12 @@ pub async fn chat(
     } else {
         // Interactive mode
         println!("DeepSeek-Code interactive chat (Ctrl+C to exit, /help for commands)");
-        println!("Model: {model} | Thinking: {thinking}");
+        if let Some(ref o) = orchestrator {
+            println!(
+                "Model: {} | Thinking: {thinking}",
+                o.session.reasoning_state.effective_model()
+            );
+        }
 
         loop {
             print!("> ");

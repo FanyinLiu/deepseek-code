@@ -420,7 +420,6 @@ fn cmd_status(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     } else {
         parts.push("\nGit: clean".to_string());
     }
-    parts.push("\nCLI: ds features status | ds agent list | ds mission list".to_string());
     Ok(Some(parts.join(" | ")))
 }
 
@@ -650,31 +649,27 @@ fn cmd_auto(_args: &str, ctx: &mut CommandContext) -> CommandResult {
 
 fn cmd_theme(args: &str, ctx: &mut CommandContext) -> CommandResult {
     let requested = args.trim().to_ascii_lowercase();
-    let (mode, label_suffix) = match requested.as_str() {
+    let mode = match requested.as_str() {
         "" => {
             return Ok(Some(format!(
-                "Theme: {}\n\nUsage: /theme auto | light | dark | high-contrast | toggle",
+                "Theme: {}\n\nUsage: /theme light | dark | high-contrast | toggle",
                 ctx.app.theme_mode.label()
             )));
         }
-        "auto" | "system" => {
-            let detected = crate::tui::theme::ThemeMode::detect();
-            (detected, format!(" (auto → {})", detected.label()))
-        }
-        "light" | "droid" => (crate::tui::theme::ThemeMode::Light, String::new()),
-        "dark" | "terminal" => (crate::tui::theme::ThemeMode::Dark, String::new()),
+        "light" | "droid" => crate::tui::theme::ThemeMode::Light,
+        "dark" | "terminal" => crate::tui::theme::ThemeMode::Dark,
         "high-contrast" | "high_contrast" | "contrast" | "hc" => {
-            (crate::tui::theme::ThemeMode::HighContrast, String::new())
+            crate::tui::theme::ThemeMode::HighContrast
         }
-        "toggle" => (ctx.app.theme_mode.toggled(), String::new()),
+        "toggle" => ctx.app.theme_mode.toggled(),
         other => {
             return Err(format!(
-                "Unknown theme: {other}. Use /theme auto, /theme light, /theme dark, /theme high-contrast, or /theme toggle."
+                "Unknown theme: {other}. Use /theme light, /theme dark, /theme high-contrast, or /theme toggle."
             ));
         }
     };
     ctx.app.set_theme_mode(mode);
-    Ok(Some(format!("Theme set to {}{label_suffix}", mode.label())))
+    Ok(Some(format!("Theme set to {}", mode.label())))
 }
 
 fn cmd_tui(args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -705,12 +700,8 @@ fn cmd_tui(args: &str, ctx: &mut CommandContext) -> CommandResult {
 }
 
 fn cmd_settings(_args: &str, ctx: &mut CommandContext) -> CommandResult {
-    let snapshot = crate::tui::settings_panel::SettingsSnapshot {
-        model: &ctx.app.model,
-        thinking: &ctx.app.thinking_mode,
-        theme_label: ctx.app.theme_mode.label(),
-    };
-    Ok(Some(crate::tui::settings_panel::format_inline(snapshot)))
+    ctx.app.open_settings_panel();
+    Ok(None)
 }
 
 fn cmd_mode(args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -1371,10 +1362,6 @@ fn cmd_help(_args: &str, _ctx: &mut CommandContext) -> CommandResult {
         lines.push(format!("    usage: {}", cmd.usage));
         lines.push(String::new());
     }
-    lines.push("CLI discovery:".to_string());
-    lines.push("  ds features status".to_string());
-    lines.push("  ds agent list".to_string());
-    lines.push("  ds mission list".to_string());
     Ok(Some(lines.join("\n")))
 }
 
@@ -2062,14 +2049,35 @@ mod tests {
     }
 
     #[test]
-    fn settings_command_returns_inline_snapshot() {
-        let result = execute_with_test_app("/settings")
-            .expect("settings should run")
-            .expect("settings should emit transcript text");
+    fn settings_command_opens_read_only_panel() {
+        let result = execute_with_test_app("/settings").expect("settings should run");
 
-        assert!(result.contains("Settings (read-only)"));
-        assert!(result.contains("Session defaults"));
-        assert!(result.contains("Theme"));
+        assert!(result.is_none());
+
+        let reg = CommandRegistry::new();
+        let mut app = crate::tui::app::TuiApp::new(
+            crate::deepseek::DeepSeekModel::Flash,
+            crate::deepseek::ThinkingMode::Auto,
+            None,
+            std::path::PathBuf::from("."),
+        );
+        let mut yolo = false;
+        let mut ctx = CommandContext {
+            app: &mut app,
+            project_root: std::path::Path::new("."),
+            yolo_mode: &mut yolo,
+            mcp_status: "MCP: not initialized",
+            background_tasks: &[],
+        };
+
+        let output = reg
+            .execute("/set", &mut ctx)
+            .expect("command should be handled")
+            .expect("settings should run");
+
+        assert!(output.is_none());
+        assert!(ctx.app.settings_open);
+        assert!(ctx.app.status_message.contains("read-only"));
     }
 
     #[test]

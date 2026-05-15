@@ -633,6 +633,8 @@ pub enum MessageVisibility {
 pub struct ReasoningState {
     pub mode: ThinkingMode,
     pub effort: ReasoningEffort,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_model: Option<DeepSeekModel>,
     pub active_tool_turn: Option<ToolTurnId>,
     pub preserved_assistant_messages: Vec<MessageId>,
     pub last_cleanup_at_turn: Option<TurnId>,
@@ -643,9 +645,25 @@ impl Default for ReasoningState {
         Self {
             mode: ThinkingMode::Auto,
             effort: ReasoningEffort::default(),
+            selected_model: None,
             active_tool_turn: None,
             preserved_assistant_messages: Vec::new(),
             last_cleanup_at_turn: None,
+        }
+    }
+}
+
+impl ReasoningState {
+    /// Return the model selected for the current session, falling back to the
+    /// legacy effort-based behavior for older sessions without a selected model.
+    #[must_use]
+    pub fn effective_model(&self) -> DeepSeekModel {
+        if let Some(model) = &self.selected_model {
+            return model.canonical();
+        }
+        match self.effort {
+            ReasoningEffort::Max | ReasoningEffort::High => DeepSeekModel::Pro,
+            _ => DeepSeekModel::Flash,
         }
     }
 }
@@ -758,4 +776,31 @@ pub struct FileSnapshot {
     pub path: PathBuf,
     pub content_hash: String,
     pub backup_path: Option<PathBuf>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selected_model_overrides_legacy_effort_mapping() {
+        let state = ReasoningState {
+            effort: ReasoningEffort::Max,
+            selected_model: Some(DeepSeekModel::Flash),
+            ..ReasoningState::default()
+        };
+
+        assert_eq!(state.effective_model(), DeepSeekModel::Flash);
+    }
+
+    #[test]
+    fn missing_selected_model_preserves_effort_fallback() {
+        let state = ReasoningState {
+            effort: ReasoningEffort::High,
+            selected_model: None,
+            ..ReasoningState::default()
+        };
+
+        assert_eq!(state.effective_model(), DeepSeekModel::Pro);
+    }
 }

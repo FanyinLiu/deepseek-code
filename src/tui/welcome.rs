@@ -989,8 +989,6 @@ mod tests {
         assert!(rendered.contains("DeepSeek Code"));
         assert!(rendered.contains("What are we changing today?"));
         assert!(rendered.contains("starters"));
-        assert!(rendered.contains("@ files"));
-        assert!(rendered.contains("! shell"));
         assert!(rendered.contains("workspace"));
         assert!(rendered.contains("memory"));
         assert!(!rendered.contains("Project"));

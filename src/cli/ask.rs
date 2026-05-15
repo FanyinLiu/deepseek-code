@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
 use crate::agent::orchestrator::{AgentEvent, Orchestrator};
-use crate::deepseek::client::DeepSeekClient;
 use crate::deepseek::{
     MessageContent, MessageId, MessageVisibility, ProtocolMessage, ReasoningState, Role, Session,
     SessionId, SessionMetadata, TurnId,
 };
+use crate::provider::{build_provider, ModelSelection, Provider};
 use crate::storage;
 
 /// Run the ask command: search-first, non-editing query.
@@ -13,14 +13,20 @@ pub async fn ask(question: String, project_root: Option<PathBuf>) -> Result<(), 
     let root = project_root
         .unwrap_or_else(|| storage::find_project_root().unwrap_or_else(|| PathBuf::from(".")));
     let api_key = super::login::resolve_or_prompt_api_key(Some(&root))?;
-    let client = DeepSeekClient::new(api_key);
+    let config = crate::storage::Config::load(Some(&root))?;
+    let provider = build_provider(&config.provider, api_key);
+    let client = provider.create_deepseek_client();
+    let model = ModelSelection::resolve(&config.provider, &config.model, None)?.model;
 
     let mut session = Session {
         id: SessionId::new_v4(),
         name: None,
         project_root: root.clone(),
         messages: Vec::new(),
-        reasoning_state: ReasoningState::default(),
+        reasoning_state: ReasoningState {
+            selected_model: Some(model),
+            ..ReasoningState::default()
+        },
         tool_call_history: Vec::new(),
         checkpoints: Vec::new(),
         created_at: chrono::Utc::now(),
@@ -56,7 +62,6 @@ pub async fn ask(question: String, project_root: Option<PathBuf>) -> Result<(), 
     }
 
     let mut orchestrator = Orchestrator::new(client, root, session);
-    let config = crate::storage::Config::load(Some(&orchestrator.project_root)).unwrap_or_default();
     orchestrator.init_mcp(&config.mcp).await;
 
     // Spawn the turn in the background so we don't deadlock on approval events.

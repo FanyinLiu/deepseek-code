@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::deepseek::{DeepSeekModel, ReasoningEffort, ThinkingMode};
+use crate::provider::ProviderConfig;
 
 /// Full application configuration, resolved from layered sources.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -24,6 +25,8 @@ pub struct Config {
     pub ui: UiConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+    #[serde(default)]
+    pub provider: ProviderConfig,
     #[serde(default)]
     pub router: RouterConfig,
     #[serde(default)]
@@ -121,6 +124,7 @@ struct PartialConfig {
     paths: Option<PathsConfig>,
     ui: Option<UiConfig>,
     telemetry: Option<TelemetryConfig>,
+    provider: Option<ProviderConfig>,
     router: Option<RouterConfig>,
     profiles: Option<std::collections::BTreeMap<String, ProfileConfig>>,
     subagent: Option<SubagentConfig>,
@@ -483,6 +487,7 @@ impl Config {
             paths,
             ui,
             telemetry,
+            provider,
             router,
             profiles,
             subagent,
@@ -529,6 +534,7 @@ impl Config {
             paths,
             ui,
             telemetry,
+            provider: patch.provider.unwrap_or(provider),
             router,
             profiles: patch.profiles.unwrap_or(profiles),
             subagent,
@@ -741,6 +747,28 @@ mod tests {
         let loaded = Config::load(Some(&config_dir)).expect("load config");
 
         assert_eq!(loaded.api_key.as_deref(), Some("sk-local"));
+    }
+
+    #[test]
+    fn provider_config_parses_from_project_config() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config_dir = root.path().join(".deepseek-code");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        std::fs::write(
+            config_dir.join("config.toml"),
+            r#"
+[provider]
+default = "deepseek"
+"#,
+        )
+        .expect("write provider config");
+
+        let loaded = Config::load(Some(root.path())).expect("load config");
+
+        assert_eq!(
+            loaded.provider.default,
+            crate::provider::ProviderKind::DeepSeek
+        );
     }
 
     #[test]

@@ -11,6 +11,7 @@ pub mod mcp;
 pub mod mission;
 pub mod plan;
 pub mod policy;
+pub mod provider;
 pub mod runtime;
 pub mod search;
 pub mod storage;

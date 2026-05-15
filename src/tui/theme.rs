@@ -38,33 +38,6 @@ impl ThemeMode {
         }
     }
 
-    /// Resolve a config string, mapping "auto"/"system"/empty to a runtime
-    /// detection. Concrete names ("light", "dark", "high-contrast") fall
-    /// through to [`Self::from_config`].
-    #[must_use]
-    pub fn resolve(value: &str) -> Self {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "auto" | "system" | "" => Self::detect(),
-            _ => Self::from_config(value),
-        }
-    }
-
-    /// Best-effort detection of the host terminal's brightness.
-    ///
-    /// Order: `COLORFGBG` env var → macOS `AppleInterfaceStyle` → dark.
-    /// Side effects are limited to env reads and (on macOS) a `defaults`
-    /// invocation; both are short and silently ignored on failure.
-    #[must_use]
-    pub fn detect() -> Self {
-        if let Some(mode) = detect_from_colorfgbg() {
-            return mode;
-        }
-        if let Some(mode) = detect_from_macos_interface_style() {
-            return mode;
-        }
-        Self::Dark
-    }
-
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -82,43 +55,6 @@ impl ThemeMode {
             Self::HighContrast => Self::Light,
         }
     }
-}
-
-fn detect_from_colorfgbg() -> Option<ThemeMode> {
-    parse_colorfgbg(&std::env::var("COLORFGBG").ok()?)
-}
-
-fn parse_colorfgbg(raw: &str) -> Option<ThemeMode> {
-    let bg = raw.split(';').nth(1)?.trim().parse::<u8>().ok()?;
-    Some(if bg < 7 {
-        ThemeMode::Dark
-    } else {
-        ThemeMode::Light
-    })
-}
-
-#[cfg(target_os = "macos")]
-fn detect_from_macos_interface_style() -> Option<ThemeMode> {
-    let output = std::process::Command::new("defaults")
-        .args(["read", "-g", "AppleInterfaceStyle"])
-        .output()
-        .ok()?;
-    if output.status.success() {
-        let value = String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .to_ascii_lowercase();
-        if value == "dark" {
-            return Some(ThemeMode::Dark);
-        }
-    }
-    // macOS only sets AppleInterfaceStyle when the system is in dark mode;
-    // a missing key (non-zero exit) means light.
-    Some(ThemeMode::Light)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn detect_from_macos_interface_style() -> Option<ThemeMode> {
-    None
 }
 
 #[cfg(not(test))]
@@ -149,10 +85,10 @@ pub struct ThemePalette {
 }
 
 pub const LIGHT_PALETTE: ThemePalette = ThemePalette {
-    canvas: Color::Reset,
-    surface: Color::Reset,
+    canvas: DROID_CANVAS_BG,
+    surface: DROID_CANVAS_BG,
     surface_alt: Color::Rgb(228, 219, 190),
-    input: Color::Reset,
+    input: DROID_CANVAS_BG,
     text: DROID_INK,
     secondary: Color::Rgb(54, 54, 48),
     dim: DROID_MUTED,
@@ -167,10 +103,10 @@ pub const LIGHT_PALETTE: ThemePalette = ThemePalette {
 };
 
 pub const DARK_PALETTE: ThemePalette = ThemePalette {
-    canvas: Color::Reset,
+    canvas: BG_DEEP,
     surface: BG_CARD,
     surface_alt: BG_CARD_HOVER,
-    input: Color::Reset,
+    input: BG_INPUT,
     text: FG_PRIMARY,
     secondary: FG_SECONDARY,
     dim: FG_DIM,
@@ -185,10 +121,10 @@ pub const DARK_PALETTE: ThemePalette = ThemePalette {
 };
 
 pub const HIGH_CONTRAST_PALETTE: ThemePalette = ThemePalette {
-    canvas: Color::Reset,
+    canvas: Color::Rgb(0, 0, 0),
     surface: Color::Rgb(18, 18, 18),
     surface_alt: Color::Rgb(34, 34, 34),
-    input: Color::Reset,
+    input: Color::Rgb(0, 0, 0),
     text: Color::Rgb(255, 255, 255),
     secondary: Color::Rgb(226, 226, 226),
     dim: Color::Rgb(178, 178, 178),
@@ -448,33 +384,13 @@ mod tests {
     }
 
     #[test]
-    fn resolve_passes_concrete_themes_through_without_detection() {
-        assert_eq!(ThemeMode::resolve("light"), ThemeMode::Light);
-        assert_eq!(ThemeMode::resolve("dark"), ThemeMode::Dark);
-        assert_eq!(ThemeMode::resolve("hc"), ThemeMode::HighContrast);
-    }
-
-    #[test]
-    fn colorfgbg_split_picks_dark_for_low_bg_indices() {
-        assert_eq!(parse_colorfgbg("15;0"), Some(ThemeMode::Dark));
-        assert_eq!(parse_colorfgbg("15;6"), Some(ThemeMode::Dark));
-        assert_eq!(parse_colorfgbg("0;15"), Some(ThemeMode::Light));
-        assert_eq!(parse_colorfgbg("0;7"), Some(ThemeMode::Light));
-        assert_eq!(parse_colorfgbg(""), None);
-        assert_eq!(parse_colorfgbg("15"), None);
-        assert_eq!(parse_colorfgbg("15;abc"), None);
-    }
-
-    #[test]
-    fn palettes_use_terminal_background_and_keep_readable_foreground() {
-        assert_eq!(LIGHT_PALETTE.canvas, Color::Reset);
-        assert_eq!(DARK_PALETTE.canvas, Color::Reset);
-        assert_eq!(HIGH_CONTRAST_PALETTE.canvas, Color::Reset);
-        assert_ne!(LIGHT_PALETTE.text, Color::Reset);
-        assert_ne!(DARK_PALETTE.text, Color::Reset);
-        assert_ne!(HIGH_CONTRAST_PALETTE.text, Color::Reset);
-        assert_ne!(LIGHT_PALETTE.accent, Color::Reset);
-        assert_ne!(DARK_PALETTE.accent, Color::Reset);
-        assert_ne!(HIGH_CONTRAST_PALETTE.accent, Color::Reset);
+    fn palettes_have_distinct_readable_surfaces() {
+        assert_ne!(LIGHT_PALETTE.canvas, DARK_PALETTE.canvas);
+        assert_ne!(LIGHT_PALETTE.text, LIGHT_PALETTE.canvas);
+        assert_ne!(DARK_PALETTE.text, DARK_PALETTE.canvas);
+        assert_ne!(HIGH_CONTRAST_PALETTE.text, HIGH_CONTRAST_PALETTE.canvas);
+        assert_ne!(LIGHT_PALETTE.accent, LIGHT_PALETTE.canvas);
+        assert_ne!(DARK_PALETTE.accent, DARK_PALETTE.canvas);
+        assert_ne!(HIGH_CONTRAST_PALETTE.accent, HIGH_CONTRAST_PALETTE.canvas);
     }
 }
