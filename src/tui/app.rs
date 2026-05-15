@@ -2706,7 +2706,7 @@ impl TuiApp {
                 Constraint::Length(activity_h),
                 Constraint::Length(1),
                 Constraint::Length(prompt_h),
-                Constraint::Length(1),
+                Constraint::Length(2),
             ])
             .split(root);
 
@@ -2722,7 +2722,7 @@ impl TuiApp {
         if prompt_h > 0 {
             self.render_minimal_runtime_prompt(f, rows[4]);
         }
-        render_classic_divider(f, rows[5]);
+        self.render_powerline_footer(f, rows[5]);
     }
 
     fn minimal_runtime_prompt_height(&self) -> u16 {
@@ -2742,10 +2742,24 @@ impl TuiApp {
             return;
         }
 
-        render_classic_status_text(
-            f,
+        let p = theme::palette();
+        let mut activity = self.streaming_status_activity();
+        activity.title = "Thinking";
+        let text = status_bar::activity_hint_text_with_motion(
+            &activity,
+            &self.thinking_mode,
+            self.stream_motion_frame(),
+        );
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                text,
+                Style::default()
+                    .fg(self.current_mode().color())
+                    .bg(p.canvas)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            )))
+            .style(Style::default().fg(p.text).bg(p.canvas)),
             area,
-            &format!("Thinking{}", self.stream_motion_frame().dots()),
         );
     }
 
@@ -3089,6 +3103,19 @@ impl TuiApp {
         );
     }
 
+    fn streaming_status_activity(&self) -> status_bar::StatusActivity<'_> {
+        status_bar::StatusActivity {
+            title: &self.current_task_title,
+            elapsed_ms: self.stream_motion_frame().elapsed_ms,
+            input_tokens: self.activity_input_tokens(),
+            tokens: self.current_turn_output_tokens,
+            agent_tokens: self.live_agent_tokens(),
+            thought_seconds: self.stream_start.map_or(0, |started| {
+                thought_seconds_from_reasoning(&self.reasoning_buffer, started.elapsed().as_secs())
+            }),
+        }
+    }
+
     fn activity_input_tokens(&self) -> u64 {
         self.animated_input_tokens()
     }
@@ -3394,6 +3421,8 @@ pub fn render_preview_snapshot(
         app.current_task_title = "整理系统运行流畅度".into();
         app.total_tokens = 578;
         app.current_turn_tokens = 578;
+        app.current_turn_input_tokens = 41;
+        app.current_turn_output_tokens = 131;
         app.plan_summary = Some("整理系统运行流畅度".into());
         app.plan_current_step = 1;
         app.plan_total_steps = 4;
@@ -6514,7 +6543,8 @@ mod tests {
         assert!(snapshot.contains("Identify entry points"));
         assert!(snapshot.contains("agents"));
         assert!(snapshot.contains("Trace TUI input loop"));
-        assert!(!snapshot.contains("ds-code"));
+        assert!(snapshot.contains("ds-code"));
+        assert!(!snapshot.contains("DS-CODE"));
         assert!(!snapshot.contains("Model:"));
     }
 
@@ -6545,6 +6575,8 @@ mod tests {
         let thinking_idx = thinking_lines[0];
         assert!(thinking_idx < input_idx);
         assert!(input_idx.saturating_sub(thinking_idx) <= 2);
+        assert!(snapshot.contains("↑"));
+        assert!(snapshot.contains("↓ 131 tokens"));
     }
 
     #[test]
