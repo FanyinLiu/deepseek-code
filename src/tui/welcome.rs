@@ -381,8 +381,12 @@ pub fn suggested_prompt(index: usize) -> Option<&'static str> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub fn render_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
-    if area.width < 54 || area.height < 14 {
+    if area.width < 70 || area.height < 18 {
         render_compact_welcome(f, area, data);
+        return;
+    }
+    if area.width < 110 {
+        render_focused_welcome(f, area, data);
         return;
     }
 
@@ -399,6 +403,58 @@ pub fn render_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
     }
 
     render_split_welcome(f, inner, data);
+}
+
+fn render_focused_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
+    f.render_widget(Paragraph::new("").style(welcome_bg()), area);
+    let inner = area.inner(Margin {
+        horizontal: 4,
+        vertical: 1,
+    });
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(7),
+            Constraint::Length(5),
+            Constraint::Length(5),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+
+    render_product_mark(f, chunks[0]);
+
+    let tips = vec![
+        Line::from(vec![
+            Span::styled("◇ ", welcome_accent()),
+            Span::styled(
+                "Ask questions, edit files, or run commands.",
+                welcome_muted(),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("◇ ", welcome_accent()),
+            Span::styled("Be specific for the best results.", welcome_muted()),
+        ]),
+        Line::from(vec![
+            Span::styled("◇ ", welcome_accent()),
+            Span::styled("/help for more information.", welcome_muted()),
+        ]),
+    ];
+    f.render_widget(
+        Paragraph::new(Text::from(tips))
+            .style(welcome_bg())
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        chunks[1],
+    );
+
+    if data.api_key_status == "missing" {
+        render_api_key_setup(f, chunks[2], data);
+    } else {
+        render_context(f, chunks[2], data);
+    }
+
+    render_invitation_and_footer(f, chunks[3], data);
 }
 
 pub fn render_classic_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
@@ -628,7 +684,7 @@ fn render_actions(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
                 Constraint::Min(1),
             ])
             .split(area);
-        render_api_key_setup(f, chunks[0]);
+        render_api_key_setup(f, chunks[0], data);
         render_context(f, chunks[1], data);
         render_invitation_and_footer(f, chunks[2], data);
     } else {
@@ -674,9 +730,10 @@ fn render_invitation_and_footer(f: &mut Frame, area: Rect, data: &WelcomeDashboa
         (
             "What are we changing today?",
             "Type below, or press 1-3 to load a starter.",
-            "1-3 starters · / commands · @ files · ! shell · enter send",
+            "1-3 starters · plan/agents/approvals appear on demand",
         )
     };
+    let model = format!("{} ({})", model_label(&data.model), data.thinking);
     let lines = vec![
         Line::from(vec![Span::styled(
             title,
@@ -685,6 +742,7 @@ fn render_invitation_and_footer(f: &mut Frame, area: Rect, data: &WelcomeDashboa
         Line::from(vec![Span::styled(hint, welcome_muted())]),
         Line::from(""),
         Line::from(vec![Span::styled(footer, welcome_accent())]),
+        Line::from(vec![Span::styled(model, welcome_muted())]),
     ];
 
     f.render_widget(
@@ -696,7 +754,7 @@ fn render_invitation_and_footer(f: &mut Frame, area: Rect, data: &WelcomeDashboa
     );
 }
 
-fn render_api_key_setup(f: &mut Frame, area: Rect) {
+fn render_api_key_setup(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
     let lines = vec![
         Line::from(vec![Span::styled(
             "API setup required",
@@ -714,6 +772,10 @@ fn render_api_key_setup(f: &mut Frame, area: Rect) {
             Span::styled("3 ", welcome_accent().add_modifier(Modifier::BOLD)),
             Span::styled("Continue with your coding task", welcome_text()),
         ]),
+        Line::from(vec![Span::styled(
+            format!("{} ({})", model_label(&data.model), data.thinking),
+            welcome_muted(),
+        )]),
     ];
 
     f.render_widget(
@@ -895,6 +957,78 @@ fn action_span(text: &str) -> Span<'static> {
     Span::styled(text.to_string(), welcome_muted())
 }
 
+fn render_product_mark(f: &mut Frame, area: Rect) {
+    if area.width < 48 || area.height < 6 {
+        let lines = vec![
+            Line::from(vec![Span::styled(ascii_art::WHALE_TINY, welcome_badge())]),
+            Line::from(vec![Span::styled(
+                "DeepSeek Code",
+                welcome_text().add_modifier(Modifier::BOLD),
+            )]),
+        ];
+        f.render_widget(
+            Paragraph::new(Text::from(lines))
+                .style(welcome_bg())
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true }),
+            area,
+        );
+        return;
+    }
+
+    let whale_width = ascii_art::WELCOME_WHALE
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0);
+    let title_width = 30;
+    let lockup_width = whale_width + 4 + title_width;
+    let left_x = area.x + ((area.width as usize).saturating_sub(lockup_width) / 2) as u16;
+    let title_x = left_x + whale_width as u16 + 4;
+    let title_rows: [Vec<Span<'static>>; 6] = [
+        vec![],
+        vec![
+            Span::styled("DeepSeek ", welcome_accent().add_modifier(Modifier::BOLD)),
+            Span::styled("Code", welcome_brand_alt().add_modifier(Modifier::BOLD)),
+        ],
+        vec![Span::styled("Your AI Coding Partner", welcome_muted())],
+        vec![],
+        vec![Span::styled("Think Deeper. Code Smarter.", welcome_muted())],
+        vec![],
+    ];
+
+    for (idx, whale) in ascii_art::WELCOME_WHALE.iter().enumerate() {
+        let row_y = area.y + idx as u16;
+        if row_y >= area.y + area.height {
+            break;
+        }
+
+        let indent = whale.chars().take_while(|ch| *ch == ' ').count() as u16;
+        let whale_body = whale.trim_start();
+        if !whale_body.is_empty() {
+            let whale_area = Rect::new(
+                left_x + indent,
+                row_y,
+                area.right().saturating_sub(left_x + indent),
+                1,
+            );
+            f.render_widget(
+                Paragraph::new(whale_body.to_string())
+                    .style(welcome_accent().add_modifier(Modifier::BOLD)),
+                whale_area,
+            );
+        }
+
+        if let Some(title_line) = title_rows.get(idx) {
+            let title_area = Rect::new(title_x, row_y, area.right().saturating_sub(title_x), 1);
+            f.render_widget(
+                Paragraph::new(Line::from(title_line.clone())).style(welcome_bg()),
+                title_area,
+            );
+        }
+    }
+}
+
 fn render_capability_line(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
     let lines = vec![capability_line(data)];
     f.render_widget(
@@ -957,6 +1091,10 @@ fn welcome_label() -> Style {
 
 fn welcome_accent() -> Style {
     welcome_bg().fg(theme::palette().accent)
+}
+
+fn welcome_brand_alt() -> Style {
+    welcome_bg().fg(theme::palette().text)
 }
 
 fn welcome_badge() -> Style {

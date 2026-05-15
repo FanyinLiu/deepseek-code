@@ -152,7 +152,7 @@ fn mask_secret(input_text: &str) -> String {
 
 fn prompt_span() -> Span<'static> {
     let p = theme::palette();
-    Span::styled("› ", Style::default().fg(p.accent).bg(p.canvas))
+    Span::styled("> ", Style::default().fg(p.accent).bg(p.canvas))
 }
 
 fn input_style() -> Style {
@@ -236,7 +236,7 @@ mod tests {
             .expect("draw");
 
         let rendered = buffer_text(terminal.backend());
-        assert!(rendered.contains("› ▌"));
+        assert!(rendered.contains("> ▌"));
     }
 
     #[test]
@@ -247,7 +247,7 @@ mod tests {
             .expect("draw");
 
         let rendered = buffer_text(terminal.backend());
-        assert!(rendered.contains("› ask▌"));
+        assert!(rendered.contains("> ask▌"));
     }
 
     #[test]
@@ -263,7 +263,7 @@ mod tests {
             .draw(|f| render_api_key_input(f, f.area(), "", 0))
             .expect("draw");
         let rendered = buffer_text(terminal.backend());
-        assert!(rendered.contains("› ▌"));
+        assert!(rendered.contains("> ▌"));
         assert!(rendered.contains("paste API key"));
     }
 

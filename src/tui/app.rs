@@ -2633,7 +2633,7 @@ impl TuiApp {
                 },
             );
         } else if showing_welcome {
-            welcome::render_classic_welcome(f, content_area, &self.welcome);
+            welcome::render_welcome(f, content_area, &self.welcome);
         } else {
             let elapsed = self.stream_motion_frame().elapsed_ms;
             let empty_subagents: &[subagent_cards::SubagentCard] = &[];
@@ -2755,7 +2755,9 @@ impl TuiApp {
                 self.motion_frame(),
             );
         }
-        render_classic_divider(f, bottom_divider_area);
+        if !showing_welcome {
+            render_classic_divider(f, bottom_divider_area);
+        }
 
         let (cursor_x, cursor_y) = input::terminal_cursor_position(
             input_area,
