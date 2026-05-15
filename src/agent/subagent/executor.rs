@@ -364,7 +364,7 @@ impl SubagentExecutor {
             // The free function `run_nested_subagent` breaks the opaque-type-in-defining-scope
             // limitation, allowing Rust to verify the Send bound without a circular inference.
             if tc.function.name == "run_subagent" {
-                let result_text: String = if self.config.spawn_depth < MAX_SPAWN_DEPTH {
+                let (result_text, is_error) = if self.config.spawn_depth < MAX_SPAWN_DEPTH {
                     run_nested_subagent(
                         self.client.clone(),
                         self.project_root.clone(),
@@ -374,7 +374,10 @@ impl SubagentExecutor {
                     )
                     .await
                 } else {
-                    "Subagent spawning is not allowed at this nesting depth.".to_string()
+                    (
+                        "Subagent spawning is not allowed at this nesting depth.".to_string(),
+                        true,
+                    )
                 };
                 results.push((
                     tc.clone(),
@@ -382,7 +385,7 @@ impl SubagentExecutor {
                         tool_call_id: tc.id.clone(),
                         name: tc.function.name.clone(),
                         result: result_text,
-                        is_error: false,
+                        is_error,
                     },
                 ));
                 continue;
@@ -408,11 +411,7 @@ impl SubagentExecutor {
             // Filter by permission mode
             match self.config.permission_mode {
                 PermissionMode::ReadOnly => {
-                    if tc.function.name == "write_file"
-                        || tc.function.name == "edit_file"
-                        || tc.function.name == "apply_patch"
-                        || tc.function.name == "run_command"
-                    {
+                    if !read_only_allows_tool(&tc.function.name) {
                         let record = ToolResultRecord {
                             tool_call_id: tc.id.clone(),
                             name: tc.function.name.clone(),
@@ -636,6 +635,20 @@ fn subagent_tool_record_was_approved(record: &ToolResultRecord) -> bool {
         || lower.contains("policy"))
 }
 
+fn read_only_allows_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "read_file"
+            | "list_dir"
+            | "search_files"
+            | "search_code"
+            | "git_status"
+            | "git_diff"
+            | "semantic_search"
+            | "think"
+    )
+}
+
 fn structured_subagent_limit_message(task: &SubagentTask, _max_turns: u32) -> String {
     if subagent_task_uses_chinese(task) {
         format!(
@@ -711,7 +724,7 @@ fn run_nested_subagent(
     child_depth: u8,
     args_str: String,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = (String, bool)> + Send>> {
     Box::pin(async move {
         let handler = crate::agent::task_tool::TaskToolHandler::new(
             client,
@@ -721,10 +734,10 @@ fn run_nested_subagent(
         );
         match serde_json::from_str::<SubagentToolArgs>(&args_str) {
             Ok(args) => {
-                let (text, _) = handler.handle(&args, &event_tx, None).await;
-                text
+                let (text, is_error) = handler.handle(&args, &event_tx, None).await;
+                (text, is_error)
             }
-            Err(e) => format!("Failed to parse run_subagent arguments: {e}"),
+            Err(e) => (format!("Failed to parse run_subagent arguments: {e}"), true),
         }
     })
 }
@@ -816,12 +829,14 @@ fn dedupe_preserving_order(values: Vec<String>) -> Vec<String> {
 mod tests {
     use super::{
         collect_successful_file_access, dedupe_preserving_order, emit_subagent_chunk_delta,
-        structured_subagent_error_message, structured_subagent_limit_message,
-        subagent_tool_record_was_approved,
+        read_only_allows_tool, run_nested_subagent, structured_subagent_error_message,
+        structured_subagent_limit_message, subagent_tool_record_was_approved,
     };
     use crate::agent::orchestrator::AgentEvent;
     use crate::agent::subagent::types::SubagentTask;
+    use crate::deepseek::client::DeepSeekClient;
     use crate::deepseek::models::StreamChunk;
+    use std::sync::Arc;
 
     #[test]
     fn dedupe_preserving_order_keeps_first_occurrence() {
@@ -929,5 +944,60 @@ mod tests {
 
         assert!(!subagent_tool_record_was_approved(&blocked));
         assert!(subagent_tool_record_was_approved(&runtime_error));
+    }
+
+    #[test]
+    fn read_only_only_allows_safe_read_tools() {
+        for tool_name in [
+            "read_file",
+            "list_dir",
+            "search_files",
+            "search_code",
+            "git_status",
+            "git_diff",
+            "semantic_search",
+            "think",
+        ] {
+            assert!(
+                read_only_allows_tool(tool_name),
+                "{tool_name} should be allowed"
+            );
+        }
+
+        for tool_name in [
+            "write_file",
+            "edit_file",
+            "apply_patch",
+            "run_command",
+            "git_add",
+            "git_commit",
+            "run_subagent",
+            "fetch_url",
+            "web_search",
+            "github_pr",
+        ] {
+            assert!(
+                !read_only_allows_tool(tool_name),
+                "{tool_name} should be blocked"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_subagent_parse_failure_is_error() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let (text, is_error) = run_nested_subagent(
+            Arc::new(DeepSeekClient::new("test-key".to_string())),
+            root.path().to_path_buf(),
+            1,
+            "{".to_string(),
+            tx,
+        )
+        .await;
+
+        assert!(is_error);
+        assert!(text.contains("Failed to parse run_subagent arguments"));
     }
 }

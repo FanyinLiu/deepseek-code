@@ -103,6 +103,25 @@ fn test_multiple_tool_calls() {
     assert_eq!(result.tool_calls[1].id, "call_b");
 }
 
+#[test]
+fn sparse_tool_call_index_should_not_emit_placeholder() {
+    let mut acc = StreamAccumulator::new();
+
+    let chunk = serde_json::from_str::<StreamChunk>(
+        r#"{"choices":[{"index":0,"delta":{"tool_calls":[
+            {"index":1,"id":"call_b","function":{"name":"read_file","arguments":"{\"path\":\"b.rs\"}"}}
+        ]},"finish_reason":"tool_calls"}],"usage":null}"#,
+    )
+    .expect("valid stream chunk");
+
+    acc.apply_chunk(&chunk).unwrap();
+
+    let result = acc.finalize();
+    assert_eq!(result.tool_calls.len(), 1);
+    assert_eq!(result.tool_calls[0].id, "call_b");
+    assert_eq!(result.tool_calls[0].function.name, "read_file");
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Tool call arguments accumulate across deltas
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

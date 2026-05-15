@@ -2,9 +2,10 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use reqwest::Client as HttpClient;
+use tokio_stream::Stream;
 
 use super::errors::DeepSeekError;
-use super::models::{ChatRequest, ChatResponse, StreamResult};
+use super::models::{ChatRequest, ChatResponse, StreamChunk, StreamResult};
 use super::stream::{parse_stream, StreamAccumulator, StreamEvent};
 
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
@@ -130,29 +131,7 @@ impl DeepSeekClient {
         F: FnMut(&super::models::StreamChunk),
     {
         let stream = self.chat_stream(req).await?;
-        tokio::pin!(stream);
-        let mut accum = StreamAccumulator::new();
-
-        const CHUNK_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-
-        loop {
-            let event = tokio::time::timeout(CHUNK_IDLE_TIMEOUT, stream.next())
-                .await
-                .map_err(|_| {
-                    DeepSeekError::Other("stream idle timeout — no data received for 30s".into())
-                })?;
-            match event {
-                Some(Ok(StreamEvent::Chunk(chunk))) => {
-                    on_chunk(&chunk);
-                    accum.apply_chunk(&chunk)?;
-                }
-                Some(Ok(StreamEvent::Done)) => break,
-                Some(Err(e)) => return Err(e),
-                None => break,
-            }
-        }
-
-        Ok(accum.finalize())
+        accumulate_stream_events(stream, &mut on_chunk).await
     }
 
     /// Health check — returns raw JSON of available models.
@@ -185,5 +164,72 @@ impl DeepSeekClient {
 
         let response = Self::require_success(response).await?;
         Ok(response.json().await?)
+    }
+}
+
+async fn accumulate_stream_events<S, F>(
+    stream: S,
+    mut on_chunk: F,
+) -> Result<StreamResult, DeepSeekError>
+where
+    S: Stream<Item = Result<StreamEvent, DeepSeekError>>,
+    F: FnMut(&StreamChunk),
+{
+    tokio::pin!(stream);
+    let mut accum = StreamAccumulator::new();
+
+    const CHUNK_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+    loop {
+        let event = tokio::time::timeout(CHUNK_IDLE_TIMEOUT, stream.next())
+            .await
+            .map_err(|_| {
+                DeepSeekError::Other("stream idle timeout — no data received for 30s".into())
+            })?;
+        match event {
+            Some(Ok(StreamEvent::Chunk(chunk))) => {
+                on_chunk(&chunk);
+                accum.apply_chunk(&chunk)?;
+            }
+            Some(Ok(StreamEvent::Done)) => return Ok(accum.finalize()),
+            Some(Err(e)) => return Err(e),
+            None => return Err(DeepSeekError::StreamEnd),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{accumulate_stream_events, DeepSeekError, StreamEvent};
+    use crate::deepseek::models::StreamChunk;
+
+    fn chunk(content: &str) -> StreamChunk {
+        serde_json::from_str::<StreamChunk>(&format!(
+            r#"{{"choices":[{{"index":0,"delta":{{"content":"{content}"}},"finish_reason":null}}],"usage":null}}"#
+        ))
+        .expect("valid stream chunk")
+    }
+
+    #[tokio::test]
+    async fn eof_without_done_returns_stream_end() {
+        let stream = futures::stream::iter([Ok(StreamEvent::Chunk(chunk("partial")))]);
+
+        let err = accumulate_stream_events(stream, |_| {})
+            .await
+            .expect_err("missing DONE should fail");
+
+        assert!(matches!(err, DeepSeekError::StreamEnd));
+    }
+
+    #[tokio::test]
+    async fn done_finishes_accumulated_stream() {
+        let stream =
+            futures::stream::iter([Ok(StreamEvent::Chunk(chunk("ok"))), Ok(StreamEvent::Done)]);
+
+        let result = accumulate_stream_events(stream, |_| {})
+            .await
+            .expect("DONE should finish stream");
+
+        assert_eq!(result.content, "ok");
     }
 }

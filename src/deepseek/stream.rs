@@ -16,41 +16,83 @@ where
     struct ParseState<S> {
         stream: Pin<Box<S>>,
         buffer: Vec<u8>,
+        event: SseEvent,
         queued: VecDeque<Result<StreamEvent, DeepSeekError>>,
         eof: bool,
     }
 
-    fn queue_line(queued: &mut VecDeque<Result<StreamEvent, DeepSeekError>>, line: &[u8]) {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        let line = String::from_utf8_lossy(line);
-        let line = line.trim();
+    #[derive(Debug, Default)]
+    struct SseEvent {
+        data_lines: Vec<String>,
+    }
 
-        if line.is_empty() || line.starts_with(':') {
+    fn dispatch_event(
+        event: &mut SseEvent,
+        queued: &mut VecDeque<Result<StreamEvent, DeepSeekError>>,
+    ) {
+        if event.data_lines.is_empty() {
             return;
         }
 
-        if let Some(data) = line.strip_prefix("data: ") {
-            if data == "[DONE]" {
-                queued.push_back(Ok(StreamEvent::Done));
-            } else {
-                match serde_json::from_str::<StreamChunk>(data) {
-                    Ok(chunk) => queued.push_back(Ok(StreamEvent::Chunk(chunk))),
-                    Err(e) => queued.push_back(Err(DeepSeekError::Parse(e))),
-                }
+        let data = event.data_lines.join("\n");
+        event.data_lines.clear();
+        if data == "[DONE]" {
+            queued.push_back(Ok(StreamEvent::Done));
+        } else {
+            match serde_json::from_str::<StreamChunk>(&data) {
+                Ok(chunk) => queued.push_back(Ok(StreamEvent::Chunk(chunk))),
+                Err(e) => queued.push_back(Err(DeepSeekError::Parse(e))),
             }
         }
     }
 
+    fn process_line(
+        event: &mut SseEvent,
+        queued: &mut VecDeque<Result<StreamEvent, DeepSeekError>>,
+        line: &[u8],
+    ) {
+        let line = String::from_utf8_lossy(line);
+        if line.is_empty() {
+            dispatch_event(event, queued);
+            return;
+        }
+        if line.starts_with(':') {
+            return;
+        }
+
+        let Some((field, value)) = line.split_once(':') else {
+            return;
+        };
+        if field != "data" {
+            return;
+        }
+
+        let value = value.strip_prefix(' ').unwrap_or(value);
+        event.data_lines.push(value.to_string());
+    }
+
     fn drain_complete_lines(
         buffer: &mut Vec<u8>,
+        event: &mut SseEvent,
         queued: &mut VecDeque<Result<StreamEvent, DeepSeekError>>,
+        eof: bool,
     ) {
-        while let Some(pos) = buffer.iter().position(|byte| *byte == b'\n') {
-            let mut line: Vec<u8> = buffer.drain(..=pos).collect();
-            if line.ends_with(b"\n") {
-                line.pop();
+        while let Some(pos) = buffer
+            .iter()
+            .position(|byte| *byte == b'\n' || *byte == b'\r')
+        {
+            let delimiter = buffer[pos];
+            if delimiter == b'\r' && pos + 1 == buffer.len() && !eof {
+                break;
             }
-            queue_line(queued, &line);
+            let line = buffer[..pos].to_vec();
+            let drain_to = if delimiter == b'\r' && buffer.get(pos + 1) == Some(&b'\n') {
+                pos + 2
+            } else {
+                pos + 1
+            };
+            buffer.drain(..drain_to);
+            process_line(event, queued, &line);
         }
     }
 
@@ -58,6 +100,7 @@ where
         ParseState {
             stream: Box::pin(stream),
             buffer: Vec::new(),
+            event: SseEvent::default(),
             queued: VecDeque::new(),
             eof: false,
         },
@@ -74,7 +117,12 @@ where
                 match state.stream.next().await {
                     Some(Ok(bytes)) => {
                         state.buffer.extend_from_slice(&bytes);
-                        drain_complete_lines(&mut state.buffer, &mut state.queued);
+                        drain_complete_lines(
+                            &mut state.buffer,
+                            &mut state.event,
+                            &mut state.queued,
+                            false,
+                        );
                     }
                     Some(Err(e)) => {
                         return Some((Err(DeepSeekError::Network(e)), state));
@@ -82,8 +130,9 @@ where
                     None => {
                         if !state.buffer.is_empty() {
                             let line = std::mem::take(&mut state.buffer);
-                            queue_line(&mut state.queued, &line);
+                            process_line(&mut state.event, &mut state.queued, &line);
                         }
+                        dispatch_event(&mut state.event, &mut state.queued);
                         state.eof = true;
                     }
                 }
@@ -102,7 +151,7 @@ pub enum StreamEvent {
 #[derive(Debug, Default)]
 pub struct StreamAccumulator {
     result: StreamResult,
-    pending_tool_calls: Vec<PendingToolCall>,
+    pending_tool_calls: Vec<Option<PendingToolCall>>,
 }
 
 #[derive(Debug, Default)]
@@ -161,9 +210,12 @@ impl StreamAccumulator {
 
         let idx = td.index as usize;
         while self.pending_tool_calls.len() <= idx {
-            self.pending_tool_calls.push(PendingToolCall::default());
+            self.pending_tool_calls.push(None);
         }
-        let pending = &mut self.pending_tool_calls[idx];
+        let pending = self.pending_tool_calls[idx].get_or_insert_with(|| PendingToolCall {
+            index: td.index,
+            ..PendingToolCall::default()
+        });
         pending.index = td.index;
         if let Some(ref id) = td.id {
             pending.id = id.clone();
@@ -186,7 +238,10 @@ impl StreamAccumulator {
 
     #[must_use]
     pub fn finalize(mut self) -> StreamResult {
-        for p in self.pending_tool_calls {
+        for p in self.pending_tool_calls.into_iter().flatten() {
+            if p.id.is_empty() || p.name.is_empty() {
+                continue;
+            }
             self.result.tool_calls.push(ToolCall {
                 id: p.id,
                 call_type: "function".into(),
@@ -230,5 +285,69 @@ mod tests {
             StreamEvent::Done
         ));
         assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn parse_stream_accepts_data_without_space() {
+        let payload = r#"data:{"id":"1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}"#;
+        let chunks = vec![
+            Ok(Bytes::from(format!("{payload}\n\n"))),
+            Ok(Bytes::from("data:[DONE]\n\n")),
+        ];
+
+        let mut stream = Box::pin(parse_stream(futures::stream::iter(chunks)));
+        let first = stream.next().await.expect("first event").expect("chunk");
+        match first {
+            StreamEvent::Chunk(chunk) => {
+                assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("ok"));
+            }
+            StreamEvent::Done => panic!("expected chunk before done"),
+        }
+        assert!(matches!(
+            stream.next().await.expect("done event").expect("done"),
+            StreamEvent::Done
+        ));
+    }
+
+    #[tokio::test]
+    async fn parse_stream_multiline_data_event() {
+        let chunks = vec![
+            Ok(Bytes::from(
+                "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\n",
+            )),
+            Ok(Bytes::from(
+                "data: \"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+            )),
+            Ok(Bytes::from("data: [DONE]\n\n")),
+        ];
+
+        let mut stream = Box::pin(parse_stream(futures::stream::iter(chunks)));
+        let first = stream.next().await.expect("first event").expect("chunk");
+        match first {
+            StreamEvent::Chunk(chunk) => {
+                assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("ok"));
+            }
+            StreamEvent::Done => panic!("expected chunk before done"),
+        }
+        assert!(matches!(
+            stream.next().await.expect("done event").expect("done"),
+            StreamEvent::Done
+        ));
+    }
+
+    #[tokio::test]
+    async fn parse_stream_cr_only_line_endings() {
+        let payload = r#"data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}"#;
+        let chunks = vec![Ok(Bytes::from(format!("{payload}\r\rdata: [DONE]\r\r")))];
+
+        let mut stream = Box::pin(parse_stream(futures::stream::iter(chunks)));
+        assert!(matches!(
+            stream.next().await.expect("chunk event").expect("chunk"),
+            StreamEvent::Chunk(_)
+        ));
+        assert!(matches!(
+            stream.next().await.expect("done event").expect("done"),
+            StreamEvent::Done
+        ));
     }
 }

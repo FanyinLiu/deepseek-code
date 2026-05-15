@@ -2407,12 +2407,9 @@ impl Orchestrator {
                     .await?;
                 } else {
                     if !followup_result.tool_calls.is_empty() {
-                        send_event(
-                            event_tx,
-                            AgentEvent::Error(
-                                "Tool call recursion limit reached for this turn".into(),
-                            ),
-                        );
+                        let error = "Tool call recursion limit reached for this turn".to_string();
+                        send_event(event_tx, AgentEvent::Error(error.clone()));
+                        return Err(anyhow::anyhow!(error));
                     }
                     ReasoningManager::complete_tool_loop(
                         &mut self.session.reasoning_state,

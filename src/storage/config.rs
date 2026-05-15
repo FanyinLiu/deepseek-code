@@ -126,8 +126,8 @@ struct PartialConfig {
     router: Option<PartialRouterConfig>,
     profiles: Option<std::collections::BTreeMap<String, ProfileConfig>>,
     subagent: Option<PartialSubagentConfig>,
-    mcp: Option<McpConfig>,
-    hooks: Option<HooksConfig>,
+    mcp: Option<PartialMcpConfig>,
+    hooks: Option<PartialHooksConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -194,6 +194,30 @@ struct PartialSubagentConfig {
     default_model: Option<String>,
     allow_custom_agents: Option<bool>,
     custom_agents_dir: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialHooksConfig {
+    pre_tool: Option<Vec<String>>,
+    post_tool: Option<Vec<String>>,
+    stop: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialMcpConfig {
+    enabled: Option<bool>,
+    servers: Option<std::collections::BTreeMap<String, PartialMcpServerEntryConfig>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialMcpServerEntryConfig {
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    env: Option<std::collections::HashMap<String, String>>,
+    include_tools: Option<Vec<String>>,
+    exclude_tools: Option<Vec<String>>,
+    trust: Option<bool>,
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -613,12 +637,33 @@ impl Config {
             telemetry,
             provider: provider.merge_provider(patch.provider),
             router,
-            profiles: patch.profiles.unwrap_or(profiles),
+            profiles: merge_profiles(profiles, patch.profiles),
             subagent,
-            mcp: patch.mcp.unwrap_or(mcp),
-            hooks: patch.hooks.unwrap_or(hooks),
+            mcp: mcp.merge_mcp(patch.mcp),
+            hooks: hooks.merge_hooks(patch.hooks),
         }
     }
+}
+
+fn merge_profiles(
+    mut base: std::collections::BTreeMap<String, ProfileConfig>,
+    patch: Option<std::collections::BTreeMap<String, ProfileConfig>>,
+) -> std::collections::BTreeMap<String, ProfileConfig> {
+    let Some(patch) = patch else {
+        return base;
+    };
+
+    for (name, profile_patch) in patch {
+        match base.remove(&name) {
+            Some(existing) => {
+                base.insert(name, existing.merge_profile(profile_patch));
+            }
+            None => {
+                base.insert(name, profile_patch);
+            }
+        }
+    }
+    base
 }
 
 fn parse_config_patch(content: &str) -> Result<PartialConfig, anyhow::Error> {
@@ -821,6 +866,84 @@ impl SubagentConfig {
     }
 }
 
+impl ProfileConfig {
+    fn merge_profile(self, patch: Self) -> Self {
+        Self {
+            api_key: patch.api_key.or(self.api_key),
+            model: patch.model.or(self.model),
+            thinking_mode: patch.thinking_mode.or(self.thinking_mode),
+        }
+    }
+}
+
+impl HooksConfig {
+    fn merge_hooks(self, patch: Option<PartialHooksConfig>) -> Self {
+        let Some(patch) = patch else {
+            return self;
+        };
+        Self {
+            pre_tool: patch.pre_tool.unwrap_or(self.pre_tool),
+            post_tool: patch.post_tool.unwrap_or(self.post_tool),
+            stop: patch.stop.unwrap_or(self.stop),
+        }
+    }
+}
+
+impl McpConfig {
+    fn merge_mcp(self, patch: Option<PartialMcpConfig>) -> Self {
+        let Some(patch) = patch else {
+            return self;
+        };
+        let mut servers = self.servers;
+        if let Some(server_patches) = patch.servers {
+            for (name, server_patch) in server_patches {
+                match servers.remove(&name) {
+                    Some(existing) => {
+                        servers.insert(name, existing.merge_mcp_server(server_patch));
+                    }
+                    None => {
+                        if let Some(new_server) = server_patch.into_mcp_server() {
+                            servers.insert(name, new_server);
+                        }
+                    }
+                }
+            }
+        }
+        Self {
+            enabled: patch.enabled.unwrap_or(self.enabled),
+            servers,
+        }
+    }
+}
+
+impl McpServerEntryConfig {
+    fn merge_mcp_server(self, patch: PartialMcpServerEntryConfig) -> Self {
+        Self {
+            command: patch.command.unwrap_or(self.command),
+            args: patch.args.unwrap_or(self.args),
+            env: patch.env.or(self.env),
+            include_tools: patch.include_tools.unwrap_or(self.include_tools),
+            exclude_tools: patch.exclude_tools.unwrap_or(self.exclude_tools),
+            trust: patch.trust.unwrap_or(self.trust),
+            timeout_ms: patch.timeout_ms.unwrap_or(self.timeout_ms),
+        }
+    }
+}
+
+impl PartialMcpServerEntryConfig {
+    fn into_mcp_server(self) -> Option<McpServerEntryConfig> {
+        Some(McpServerEntryConfig {
+            command: self.command?,
+            args: self.args.unwrap_or_default(),
+            env: self.env,
+            include_tools: self.include_tools.unwrap_or_default(),
+            exclude_tools: self.exclude_tools.unwrap_or_default(),
+            trust: self.trust.unwrap_or(false),
+            timeout_ms: self.timeout_ms.unwrap_or_else(default_mcp_timeout_ms),
+        })
+    }
+}
+
 fn default_subagent_enabled() -> bool {
     true
 }
@@ -880,12 +1003,16 @@ fn default_mcp_timeout_ms() -> u64 {
 #[must_use]
 pub fn find_project_root() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
+    Some(find_project_root_from(&cwd))
+}
+
+fn find_project_root_from(cwd: &Path) -> PathBuf {
     for ancestor in cwd.ancestors() {
-        if ancestor.join(".deepseek-code").is_dir() || ancestor.join(".git").is_dir() {
-            return Some(ancestor.to_path_buf());
+        if ancestor.join(".deepseek-code").is_dir() || ancestor.join(".git").exists() {
+            return ancestor.to_path_buf();
         }
     }
-    Some(cwd)
+    cwd.to_path_buf()
 }
 
 pub(crate) fn normalize_project_root(project_root: &Path) -> &Path {
@@ -1069,6 +1196,115 @@ default_model = "deepseek-v4-pro"
         assert_eq!(merged.subagent.max_parallel, 2);
         assert!(merged.subagent.allow_custom_agents);
         assert_eq!(merged.subagent.default_model, "deepseek-v4-pro");
+    }
+
+    #[test]
+    fn profiles_layer_merge_preserves_unspecified_fields() {
+        let mut profiles = std::collections::BTreeMap::new();
+        profiles.insert(
+            "default".to_string(),
+            ProfileConfig {
+                api_key: Some("sk-base".to_string()),
+                model: Some(DeepSeekModel::Flash),
+                thinking_mode: Some(ThinkingMode::On),
+            },
+        );
+        let base = Config {
+            profiles,
+            ..Config::default()
+        };
+        let patch = parse_config_patch(
+            r#"
+[profiles.default]
+model = "deepseek-v4-pro"
+"#,
+        )
+        .expect("parse patch");
+
+        let merged = base.merge_with_config_patch(patch);
+        let profile = merged.profiles.get("default").expect("profile");
+
+        assert_eq!(profile.api_key.as_deref(), Some("sk-base"));
+        assert_eq!(profile.model, Some(DeepSeekModel::Pro));
+        assert_eq!(profile.thinking_mode, Some(ThinkingMode::On));
+    }
+
+    #[test]
+    fn hooks_layer_partial_override_preserves_unspecified_lists() {
+        let base = Config {
+            hooks: HooksConfig {
+                pre_tool: vec!["pre".to_string()],
+                post_tool: vec!["post".to_string()],
+                stop: Vec::new(),
+            },
+            ..Config::default()
+        };
+        let patch = parse_config_patch(
+            r#"
+[hooks]
+stop = ["stop"]
+"#,
+        )
+        .expect("parse patch");
+
+        let merged = base.merge_with_config_patch(patch);
+
+        assert_eq!(merged.hooks.pre_tool, ["pre"]);
+        assert_eq!(merged.hooks.post_tool, ["post"]);
+        assert_eq!(merged.hooks.stop, ["stop"]);
+    }
+
+    #[test]
+    fn mcp_layer_partial_server_override_does_not_require_command() {
+        let mut servers = std::collections::BTreeMap::new();
+        servers.insert(
+            "filesystem".to_string(),
+            McpServerEntryConfig {
+                command: "mcp-filesystem".to_string(),
+                args: vec!["--root".to_string(), ".".to_string()],
+                env: None,
+                include_tools: vec!["read".to_string()],
+                exclude_tools: Vec::new(),
+                trust: false,
+                timeout_ms: 1_000,
+            },
+        );
+        let base = Config {
+            mcp: McpConfig {
+                enabled: true,
+                servers,
+            },
+            ..Config::default()
+        };
+        let patch = parse_config_patch(
+            r#"
+[mcp.servers.filesystem]
+timeout_ms = 2000
+"#,
+        )
+        .expect("parse patch");
+
+        let merged = base.merge_with_config_patch(patch);
+        let server = merged.mcp.servers.get("filesystem").expect("server");
+
+        assert_eq!(server.command, "mcp-filesystem");
+        assert_eq!(server.args, ["--root", "."]);
+        assert_eq!(server.include_tools, ["read"]);
+        assert_eq!(server.timeout_ms, 2_000);
+    }
+
+    #[test]
+    fn find_project_root_handles_git_file_worktree() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let child = root.path().join("src").join("nested");
+        std::fs::create_dir_all(&child).expect("create child");
+        std::fs::write(
+            root.path().join(".git"),
+            "gitdir: ../main/.git/worktrees/wt\n",
+        )
+        .expect("write git file");
+
+        assert_eq!(find_project_root_from(&child), root.path());
     }
 
     #[test]
