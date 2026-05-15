@@ -2,16 +2,13 @@
 /// Redact API keys from a string.
 #[must_use]
 pub fn redact_api_keys(text: &str) -> String {
-    // Pattern: sk- followed by alphanumeric characters
-    let re = regex_find(text, "sk-[a-zA-Z0-9]{10,}");
-    redact_matches(text, &re, "sk-****")
+    replace_regex(text, r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{9,}\b", "sk-****")
 }
 
 /// Redact Bearer tokens.
 #[must_use]
 pub fn redact_bearer_tokens(text: &str) -> String {
-    let re = regex_find(text, "Bearer [a-zA-Z0-9._\\-]+");
-    redact_matches(text, &re, "Bearer ****")
+    replace_regex(text, r"(?i)\bBearer\s+[A-Za-z0-9._\-]+", "Bearer ****")
 }
 
 /// Redact environment variable values.
@@ -28,16 +25,14 @@ pub fn redact_env_vars(text: &str) -> String {
     ];
 
     for pattern in &patterns {
-        // Match: PATTERN=value (with optional quotes)
-        let regex_str = format!("{pattern}=[\"']?[^\"'\\s]+[\"']?");
-        let matches: Vec<String> = regex_find(&result, &regex_str)
-            .into_iter()
-            .map(std::string::ToString::to_string)
-            .collect();
-        for m in &matches {
-            let replacement = format!("{pattern}=****");
-            result = result.replace(m.as_str(), &replacement);
-        }
+        let regex = regex::Regex::new(&format!(
+            r#"(?i)\b{}=(?:"[^"]*"|'[^']*'|[^\s"'=]+)"#,
+            regex::escape(pattern)
+        ))
+        .expect("redaction regex compiles");
+        result = regex
+            .replace_all(&result, format!("{pattern}=****"))
+            .into_owned();
     }
 
     result
@@ -78,54 +73,11 @@ pub fn redact_all(text: &str) -> String {
     result
 }
 
-/// Simple regex-like pattern matching without a regex dependency.
-/// Returns all substrings that match the pattern.
-fn regex_find<'a>(text: &'a str, pattern: &str) -> Vec<&'a str> {
-    let mut matches = Vec::new();
-    let mut search_start = 0;
-
-    while search_start < text.len() {
-        if let Some(pos) = find_pattern_match(&text[search_start..], pattern) {
-            let match_start = search_start + pos;
-            let matched = &text[match_start..];
-            // Find the end of the match
-            let end = find_pattern_end(matched, pattern);
-            let matched_text = &text[match_start..match_start + end];
-            matches.push(matched_text);
-            search_start = match_start + end;
-        } else {
-            break;
-        }
-    }
-
-    matches
-}
-
-fn find_pattern_match(text: &str, pattern: &str) -> Option<usize> {
-    // Very simplified: look for the first literal portion of the pattern
-    let literal = pattern
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '/')
-        .collect::<String>();
-
-    if literal.is_empty() {
-        return Some(0);
-    }
-
-    text.find(&literal)
-}
-
-fn find_pattern_end(text: &str, _pattern: &str) -> usize {
-    // For redaction purposes, find the next whitespace or end of string
-    text.find(|c: char| c.is_whitespace()).unwrap_or(text.len())
-}
-
-fn redact_matches(text: &str, matches: &[&str], replacement: &str) -> String {
-    let mut result = text.to_string();
-    for m in matches {
-        result = result.replace(m, replacement);
-    }
-    result
+fn replace_regex(text: &str, pattern: &str, replacement: &str) -> String {
+    regex::Regex::new(pattern)
+        .expect("redaction regex compiles")
+        .replace_all(text, replacement)
+        .into_owned()
 }
 
 #[cfg(test)]
@@ -142,5 +94,26 @@ mod tests {
     fn test_redact_env_vars() {
         let redacted = redact_env_vars("DEEPSEEK_API_KEY=sk-secret-key");
         assert!(!redacted.contains("sk-secret-key"));
+    }
+
+    #[test]
+    fn redaction_does_not_replace_plain_words_containing_sk() {
+        assert_eq!(redact_api_keys("run risky task"), "run risky task");
+    }
+
+    #[test]
+    fn redaction_handles_quoted_env_values_with_spaces() {
+        let redacted = redact_env_vars(r#"PASSWORD="abc def" TOKEN='secret token'"#);
+
+        assert_eq!(redacted, "PASSWORD=**** TOKEN=****");
+        assert!(!redacted.contains("abc def"));
+        assert!(!redacted.contains("secret token"));
+    }
+
+    #[test]
+    fn redaction_handles_bearer_tokens_without_overmatching_neighbors() {
+        let redacted = redact_bearer_tokens("Authorization: Bearer abc.def-123 next");
+
+        assert_eq!(redacted, "Authorization: Bearer **** next");
     }
 }

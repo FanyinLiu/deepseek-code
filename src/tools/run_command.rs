@@ -48,7 +48,8 @@ pub async fn run_command(
         ("sh", "-c")
     };
 
-    let mut child = match Command::new(shell)
+    let mut command_builder = Command::new(shell);
+    command_builder
         .arg(shell_arg)
         .arg(command)
         .current_dir(&working_dir)
@@ -56,8 +57,13 @@ pub async fn run_command(
         .envs(sanitized_command_env())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn()
+        .kill_on_drop(true);
+    #[cfg(unix)]
     {
+        command_builder.process_group(0);
+    }
+
+    let mut child = match command_builder.spawn() {
         Ok(c) => c,
         Err(e) => {
             return Ok(CommandResult {
@@ -69,6 +75,7 @@ pub async fn run_command(
             });
         }
     };
+    let mut process_guard = ProcessTreeGuard::new(child.id());
 
     // Spawn background tasks to drain stdout/stderr so the pipe doesn't back-pressure.
     const MAX_OUTPUT_BYTES: u64 = 1024 * 1024; // 1 MiB
@@ -94,6 +101,7 @@ pub async fn run_command(
     tokio::select! {
         status = child.wait() => {
             let status = status?;
+            process_guard.disarm();
             let stdout = match stdout_handle {
                 Some(h) => String::from_utf8_lossy(&h.await.unwrap_or_default()).to_string(),
                 None => String::new(),
@@ -111,8 +119,10 @@ pub async fn run_command(
             })
         }
         () = sleep(Duration::from_secs(timeout_seconds)) => {
+            process_guard.terminate();
             let _ = child.kill().await;
             let _ = child.wait().await;
+            process_guard.disarm();
             if let Some(h) = stdout_handle { h.abort(); }
             if let Some(h) = stderr_handle { h.abort(); }
             Ok(CommandResult {
@@ -125,6 +135,47 @@ pub async fn run_command(
         }
     }
 }
+
+struct ProcessTreeGuard {
+    pid: Option<u32>,
+}
+
+impl ProcessTreeGuard {
+    fn new(pid: Option<u32>) -> Self {
+        Self { pid }
+    }
+
+    fn disarm(&mut self) {
+        self.pid = None;
+    }
+
+    fn terminate(&mut self) {
+        terminate_process_tree(self.pid);
+    }
+}
+
+impl Drop for ProcessTreeGuard {
+    fn drop(&mut self) {
+        terminate_process_tree(self.pid);
+    }
+}
+
+#[cfg(unix)]
+fn terminate_process_tree(pid: Option<u32>) {
+    let Some(pid) = pid else {
+        return;
+    };
+    let pgid = -(pid as libc::pid_t);
+    // SAFETY: kill(2) is called with a negative process-group id created for
+    // this command. The call does not dereference pointers or share memory.
+    unsafe {
+        libc::kill(pgid, libc::SIGTERM);
+        libc::kill(pgid, libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_process_tree(_pid: Option<u32>) {}
 
 fn sanitized_command_env() -> Vec<(String, String)> {
     sanitized_command_env_from(std::env::vars())
@@ -232,6 +283,32 @@ mod tests {
             .unwrap();
         assert!(result.is_success());
         assert!(result.stdout.contains("hello"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_kills_shell_child_process_group() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let pid_file = root.path().join("child.pid");
+        let command = format!(
+            "sleep 20 & printf '%s' \"$!\" > '{}'; wait",
+            pid_file.display()
+        );
+
+        let result = run_command(root.path(), &command, None, 1).await.unwrap();
+
+        assert!(result.timed_out);
+        let pid = std::fs::read_to_string(&pid_file)
+            .expect("pid file")
+            .trim()
+            .to_string();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let status = std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("kill -0");
+        assert!(!status.success(), "child process {pid} should be gone");
     }
 
     #[test]

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::deepseek::{DeepSeekModel, ReasoningEffort, ThinkingMode};
-use crate::provider::ProviderConfig;
+use crate::provider::{ProviderConfig, ProviderKind};
 
 /// Full application configuration, resolved from layered sources.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -114,20 +114,86 @@ pub struct PolicyConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 struct PartialConfig {
     api_key: Option<String>,
-    model: Option<ModelConfig>,
-    execution: Option<ExecutionConfig>,
-    search: Option<SearchConfig>,
-    cache: Option<CacheConfig>,
+    model: Option<PartialModelConfig>,
+    execution: Option<PartialExecutionConfig>,
+    search: Option<PartialSearchConfig>,
+    cache: Option<PartialCacheConfig>,
     policy: Option<PartialPolicyConfig>,
     paths: Option<PathsConfig>,
     ui: Option<PartialUiConfig>,
-    telemetry: Option<TelemetryConfig>,
-    provider: Option<ProviderConfig>,
-    router: Option<RouterConfig>,
+    telemetry: Option<PartialTelemetryConfig>,
+    provider: Option<PartialProviderConfig>,
+    router: Option<PartialRouterConfig>,
     profiles: Option<std::collections::BTreeMap<String, ProfileConfig>>,
-    subagent: Option<SubagentConfig>,
+    subagent: Option<PartialSubagentConfig>,
     mcp: Option<McpConfig>,
     hooks: Option<HooksConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialModelConfig {
+    default: Option<DeepSeekModel>,
+    heavy: Option<DeepSeekModel>,
+    thinking_mode: Option<ThinkingMode>,
+    reasoning_effort: Option<ReasoningEffort>,
+    allow_legacy_model_alias: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialExecutionConfig {
+    default_lane: Option<String>,
+    plan_lane: Option<String>,
+    fim_lane: Option<String>,
+    json_output_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialSearchConfig {
+    engine: Option<String>,
+    use_deepseek_rerank: Option<bool>,
+    max_results: Option<usize>,
+    max_context_tokens: Option<usize>,
+    include_git_diff: Option<bool>,
+    include_sessions: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialCacheConfig {
+    stable_prefix_enabled: Option<bool>,
+    warn_on_low_cache_hit: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialProviderConfig {
+    default: Option<ProviderKind>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialTelemetryConfig {
+    enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialRouterConfig {
+    enabled: Option<bool>,
+    conservative: Option<bool>,
+    use_model_classifier: Option<bool>,
+    simple_threshold: Option<u32>,
+    confidence_threshold: Option<f64>,
+    shadow_mode: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialSubagentConfig {
+    enabled: Option<bool>,
+    swarm_enabled: Option<bool>,
+    max_parallel: Option<usize>,
+    auto_decompose: Option<bool>,
+    write_requires_approval: Option<bool>,
+    command_requires_approval: Option<bool>,
+    default_model: Option<String>,
+    allow_custom_agents: Option<bool>,
+    custom_agents_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -537,15 +603,15 @@ impl Config {
 
         Self {
             api_key: patch.api_key.or(api_key),
-            model: patch.model.unwrap_or(model),
-            execution: patch.execution.unwrap_or(execution),
+            model: model.merge_model(patch.model),
+            execution: execution.merge_execution(patch.execution),
             search,
             cache,
             policy: policy.merge_policy(patch.policy),
             paths,
             ui,
             telemetry,
-            provider: patch.provider.unwrap_or(provider),
+            provider: provider.merge_provider(patch.provider),
             router,
             profiles: patch.profiles.unwrap_or(profiles),
             subagent,
@@ -565,13 +631,73 @@ fn parse_policy_patch(content: &str) -> Result<Option<PartialPolicyConfig>, anyh
 }
 
 impl SearchConfig {
-    fn merge_search(self, other: Self) -> Self {
-        other
+    fn merge_search(self, patch: PartialSearchConfig) -> Self {
+        Self {
+            engine: patch.engine.unwrap_or(self.engine),
+            use_deepseek_rerank: patch
+                .use_deepseek_rerank
+                .unwrap_or(self.use_deepseek_rerank),
+            max_results: patch.max_results.unwrap_or(self.max_results),
+            max_context_tokens: patch.max_context_tokens.unwrap_or(self.max_context_tokens),
+            include_git_diff: patch.include_git_diff.unwrap_or(self.include_git_diff),
+            include_sessions: patch.include_sessions.unwrap_or(self.include_sessions),
+        }
     }
 }
 impl CacheConfig {
-    fn merge_cache(self, other: Self) -> Self {
-        other
+    fn merge_cache(self, patch: PartialCacheConfig) -> Self {
+        Self {
+            stable_prefix_enabled: patch
+                .stable_prefix_enabled
+                .unwrap_or(self.stable_prefix_enabled),
+            warn_on_low_cache_hit: patch
+                .warn_on_low_cache_hit
+                .unwrap_or(self.warn_on_low_cache_hit),
+        }
+    }
+}
+
+impl ModelConfig {
+    fn merge_model(self, patch: Option<PartialModelConfig>) -> Self {
+        let Some(patch) = patch else {
+            return self;
+        };
+        Self {
+            default: patch.default.unwrap_or(self.default),
+            heavy: patch.heavy.unwrap_or(self.heavy),
+            thinking_mode: patch.thinking_mode.unwrap_or(self.thinking_mode),
+            reasoning_effort: patch.reasoning_effort.unwrap_or(self.reasoning_effort),
+            allow_legacy_model_alias: patch
+                .allow_legacy_model_alias
+                .unwrap_or(self.allow_legacy_model_alias),
+        }
+    }
+}
+
+impl ExecutionConfig {
+    fn merge_execution(self, patch: Option<PartialExecutionConfig>) -> Self {
+        let Some(patch) = patch else {
+            return self;
+        };
+        Self {
+            default_lane: patch.default_lane.unwrap_or(self.default_lane),
+            plan_lane: patch.plan_lane.unwrap_or(self.plan_lane),
+            fim_lane: patch.fim_lane.unwrap_or(self.fim_lane),
+            json_output_enabled: patch
+                .json_output_enabled
+                .unwrap_or(self.json_output_enabled),
+        }
+    }
+}
+
+impl ProviderConfig {
+    fn merge_provider(self, patch: Option<PartialProviderConfig>) -> Self {
+        let Some(patch) = patch else {
+            return self;
+        };
+        Self {
+            default: patch.default.unwrap_or(self.default),
+        }
     }
 }
 impl PolicyConfig {
@@ -634,13 +760,26 @@ impl UiConfig {
     }
 }
 impl TelemetryConfig {
-    fn merge_telemetry(self, other: Self) -> Self {
-        other
+    fn merge_telemetry(self, patch: PartialTelemetryConfig) -> Self {
+        Self {
+            enabled: patch.enabled.unwrap_or(self.enabled),
+        }
     }
 }
 impl RouterConfig {
-    fn merge_router(self, other: Self) -> Self {
-        other
+    fn merge_router(self, patch: PartialRouterConfig) -> Self {
+        Self {
+            enabled: patch.enabled.unwrap_or(self.enabled),
+            conservative: patch.conservative.unwrap_or(self.conservative),
+            use_model_classifier: patch
+                .use_model_classifier
+                .unwrap_or(self.use_model_classifier),
+            simple_threshold: patch.simple_threshold.unwrap_or(self.simple_threshold),
+            confidence_threshold: patch
+                .confidence_threshold
+                .unwrap_or(self.confidence_threshold),
+            shadow_mode: patch.shadow_mode.unwrap_or(self.shadow_mode),
+        }
     }
 }
 
@@ -661,17 +800,23 @@ impl Default for SubagentConfig {
 }
 
 impl SubagentConfig {
-    fn merge_subagent(self, other: Self) -> Self {
+    fn merge_subagent(self, patch: PartialSubagentConfig) -> Self {
         Self {
-            enabled: other.enabled,
-            swarm_enabled: other.swarm_enabled,
-            max_parallel: other.max_parallel,
-            auto_decompose: other.auto_decompose,
-            write_requires_approval: other.write_requires_approval,
-            command_requires_approval: other.command_requires_approval,
-            default_model: other.default_model,
-            allow_custom_agents: other.allow_custom_agents,
-            custom_agents_dir: other.custom_agents_dir.or(self.custom_agents_dir),
+            enabled: patch.enabled.unwrap_or(self.enabled),
+            swarm_enabled: patch.swarm_enabled.unwrap_or(self.swarm_enabled),
+            max_parallel: patch.max_parallel.unwrap_or(self.max_parallel),
+            auto_decompose: patch.auto_decompose.unwrap_or(self.auto_decompose),
+            write_requires_approval: patch
+                .write_requires_approval
+                .unwrap_or(self.write_requires_approval),
+            command_requires_approval: patch
+                .command_requires_approval
+                .unwrap_or(self.command_requires_approval),
+            default_model: patch.default_model.unwrap_or(self.default_model),
+            allow_custom_agents: patch
+                .allow_custom_agents
+                .unwrap_or(self.allow_custom_agents),
+            custom_agents_dir: patch.custom_agents_dir.or(self.custom_agents_dir),
         }
     }
 }
@@ -838,6 +983,92 @@ renderer = "fullscreen"
         assert_eq!(merged.theme, "dark");
         assert_eq!(merged.motion, "off");
         assert_eq!(merged.renderer, "fullscreen");
+    }
+
+    #[test]
+    fn layered_config_sections_only_override_declared_fields() {
+        let base = Config {
+            model: ModelConfig {
+                default: DeepSeekModel::Pro,
+                heavy: DeepSeekModel::Pro,
+                allow_legacy_model_alias: true,
+                ..ModelConfig::default()
+            },
+            execution: ExecutionConfig {
+                default_lane: "custom_chat".into(),
+                plan_lane: "custom_plan".into(),
+                ..ExecutionConfig::default()
+            },
+            search: SearchConfig {
+                include_sessions: false,
+                include_git_diff: false,
+                use_deepseek_rerank: false,
+                ..SearchConfig::default()
+            },
+            cache: CacheConfig {
+                stable_prefix_enabled: false,
+                warn_on_low_cache_hit: false,
+            },
+            router: RouterConfig {
+                enabled: false,
+                conservative: false,
+                simple_threshold: 10,
+                ..RouterConfig::default()
+            },
+            subagent: SubagentConfig {
+                enabled: false,
+                max_parallel: 2,
+                allow_custom_agents: true,
+                ..SubagentConfig::default()
+            },
+            ..Config::default()
+        };
+        let patch = parse_config_patch(
+            r#"
+[model]
+thinking_mode = "on"
+
+[execution]
+json_output_enabled = true
+
+[search]
+max_results = 7
+
+[cache]
+warn_on_low_cache_hit = true
+
+[router]
+confidence_threshold = 0.5
+
+[subagent]
+default_model = "deepseek-v4-pro"
+"#,
+        )
+        .expect("parse patch");
+
+        let merged = base.merge_with_config_patch(patch);
+
+        assert_eq!(merged.model.default, DeepSeekModel::Pro);
+        assert_eq!(merged.model.heavy, DeepSeekModel::Pro);
+        assert!(merged.model.allow_legacy_model_alias);
+        assert_eq!(merged.model.thinking_mode, ThinkingMode::On);
+        assert_eq!(merged.execution.default_lane, "custom_chat");
+        assert_eq!(merged.execution.plan_lane, "custom_plan");
+        assert!(merged.execution.json_output_enabled);
+        assert!(!merged.search.include_sessions);
+        assert!(!merged.search.include_git_diff);
+        assert!(!merged.search.use_deepseek_rerank);
+        assert_eq!(merged.search.max_results, 7);
+        assert!(!merged.cache.stable_prefix_enabled);
+        assert!(merged.cache.warn_on_low_cache_hit);
+        assert!(!merged.router.enabled);
+        assert!(!merged.router.conservative);
+        assert_eq!(merged.router.simple_threshold, 10);
+        assert_eq!(merged.router.confidence_threshold, 0.5);
+        assert!(!merged.subagent.enabled);
+        assert_eq!(merged.subagent.max_parallel, 2);
+        assert!(merged.subagent.allow_custom_agents);
+        assert_eq!(merged.subagent.default_model, "deepseek-v4-pro");
     }
 
     #[test]

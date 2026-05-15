@@ -73,13 +73,7 @@ pub async fn plan(task: String, project_root: Option<PathBuf>) -> Result<(), any
                 respond,
             } => {
                 output_blocks::print_option_block(&title, &options);
-                let preview_choice = options
-                    .iter()
-                    .position(|option| {
-                        let option = option.to_ascii_lowercase();
-                        option.contains("preview") || option.contains("show")
-                    })
-                    .unwrap_or_else(|| options.len().saturating_sub(1));
+                let preview_choice = plan_preview_choice(&options);
                 println!(
                     "CLI plan is read-only; selecting {}. {}",
                     preview_choice + 1,
@@ -103,4 +97,41 @@ pub async fn plan(task: String, project_root: Option<PathBuf>) -> Result<(), any
     output_blocks::print_kv("run", "ds run \"<your approved steps>\"");
 
     Ok(())
+}
+
+fn plan_preview_choice(options: &[String]) -> usize {
+    options
+        .iter()
+        .position(|option| {
+            let english = option.to_ascii_lowercase();
+            english.contains("preview")
+                || english.contains("show")
+                || option.contains("预览")
+                || option.contains("显示")
+                || option.contains("查看")
+        })
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plan_preview_choice;
+
+    #[test]
+    fn plan_preview_choice_handles_chinese_options() {
+        let options = vec![
+            "执行计划".to_string(),
+            "预览计划".to_string(),
+            "取消".to_string(),
+        ];
+
+        assert_eq!(plan_preview_choice(&options), 1);
+    }
+
+    #[test]
+    fn plan_preview_choice_does_not_default_to_cancel() {
+        let options = vec!["继续".to_string(), "取消".to_string()];
+
+        assert_eq!(plan_preview_choice(&options), 0);
+    }
 }
