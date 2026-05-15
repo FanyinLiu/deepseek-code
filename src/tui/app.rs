@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -3171,6 +3171,59 @@ struct TerminalSession {
     renderer: RendererMode,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TerminalEnvironment {
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+    term: Option<String>,
+    codex_shell: bool,
+}
+
+impl TerminalEnvironment {
+    fn current() -> Self {
+        Self {
+            stdin_is_terminal: io::stdin().is_terminal(),
+            stdout_is_terminal: io::stdout().is_terminal(),
+            term: std::env::var("TERM").ok(),
+            codex_shell: std::env::var_os("CODEX_SHELL").is_some()
+                || std::env::var_os("CODEX_THREAD_ID").is_some(),
+        }
+    }
+
+    fn ensure_tui_supported(&self) -> Result<(), anyhow::Error> {
+        if self.stdin_is_terminal && self.stdout_is_terminal {
+            return Ok(());
+        }
+
+        let stdin = if self.stdin_is_terminal {
+            "tty"
+        } else {
+            "not a tty"
+        };
+        let stdout = if self.stdout_is_terminal {
+            "tty"
+        } else {
+            "not a tty"
+        };
+        let term = self.term.as_deref().unwrap_or("<unset>");
+        anyhow::bail!(
+            "TUI requires an interactive terminal (stdin: {stdin}, stdout: {stdout}, TERM: {term}). \
+Run `ds` from a real terminal/PTY, or use `ds preview-tui` for a non-interactive snapshot."
+        );
+    }
+
+    fn skips_cursor_position_probe(&self) -> bool {
+        self.codex_shell
+            || match self.term.as_deref() {
+                Some(term) => {
+                    let normalized = term.trim().to_ascii_lowercase();
+                    normalized.is_empty() || normalized == "dumb"
+                }
+                None => true,
+            }
+    }
+}
+
 impl TerminalSession {
     fn enter(renderer: RendererMode) -> Result<Self, anyhow::Error> {
         crossterm::terminal::enable_raw_mode()?;
@@ -3245,6 +3298,15 @@ fn tui_terminal(
 ) -> Result<Terminal<CrosstermBackend<std::io::Stdout>>, anyhow::Error> {
     let backend = CrosstermBackend::new(std::io::stdout());
     if renderer.uses_inline_viewport() {
+        if TerminalEnvironment::current().skips_cursor_position_probe() {
+            let (width, height) = crossterm::terminal::size().unwrap_or((100, 24));
+            return Ok(Terminal::with_options(
+                backend,
+                TerminalOptions {
+                    viewport: Viewport::Fixed(Rect::new(0, 0, width.max(1), height.max(1))),
+                },
+            )?);
+        }
         if let Some(area) = classic_fixed_viewport_area() {
             return Ok(Terminal::with_options(
                 backend,
@@ -3265,6 +3327,9 @@ fn tui_terminal(
 }
 
 fn classic_fixed_viewport_area() -> Option<Rect> {
+    if TerminalEnvironment::current().skips_cursor_position_probe() {
+        return None;
+    }
     let (width, height) = crossterm::terminal::size().ok()?;
     let (_, cursor_y) = cursor_position().ok()?;
     classic_fixed_viewport_area_for_terminal(width, height, cursor_y)
@@ -4012,6 +4077,9 @@ pub async fn run_tui(
     model_override: Option<String>,
     session_id: Option<String>,
 ) -> Result<(), anyhow::Error> {
+    let terminal_env = TerminalEnvironment::current();
+    terminal_env.ensure_tui_supported()?;
+
     let root = project_root
         .unwrap_or_else(|| storage::find_project_root().unwrap_or_else(|| PathBuf::from(".")));
     let (startup, api_key) = TuiStartupData::load(&root);
@@ -4505,6 +4573,45 @@ mod tests {
             Some(Rect::new(0, 5, 120, 35))
         );
         assert_eq!(classic_fixed_viewport_area_for_terminal(120, 40, 30), None);
+    }
+
+    #[test]
+    fn terminal_environment_rejects_non_tty_tui() {
+        let env = TerminalEnvironment {
+            stdin_is_terminal: false,
+            stdout_is_terminal: true,
+            term: Some("xterm-256color".to_string()),
+            codex_shell: false,
+        };
+
+        let error = env
+            .ensure_tui_supported()
+            .expect_err("non-tty stdin should not start TUI")
+            .to_string();
+
+        assert!(error.contains("TUI requires an interactive terminal"));
+        assert!(error.contains("stdin: not a tty"));
+    }
+
+    #[test]
+    fn codex_and_dumb_term_skip_cursor_position_probe() {
+        let codex = TerminalEnvironment {
+            stdin_is_terminal: true,
+            stdout_is_terminal: true,
+            term: Some("xterm-256color".to_string()),
+            codex_shell: true,
+        };
+        let dumb = TerminalEnvironment {
+            stdin_is_terminal: true,
+            stdout_is_terminal: true,
+            term: Some("dumb".to_string()),
+            codex_shell: false,
+        };
+
+        assert!(codex.ensure_tui_supported().is_ok());
+        assert!(codex.skips_cursor_position_probe());
+        assert!(dumb.ensure_tui_supported().is_ok());
+        assert!(dumb.skips_cursor_position_probe());
     }
 
     #[test]
