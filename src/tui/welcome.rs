@@ -156,11 +156,7 @@ fn load_agents_md(root: &Path) -> AgentsMdInfo {
                 .find(|l| !l.trim().is_empty() && !l.starts_with('#'))
                 .map(|l| {
                     let trimmed = l.trim();
-                    if trimmed.len() > 60 {
-                        format!("{}...", &trimmed[..60])
-                    } else {
-                        trimmed.to_string()
-                    }
+                    truncate_chars(trimmed, 60)
                 })
                 .unwrap_or_else(|| "Project agent preferences loaded.".to_string());
             AgentsMdInfo {
@@ -175,6 +171,18 @@ fn load_agents_md(root: &Path) -> AgentsMdInfo {
             summary: "Failed to read AGENTS.md.".to_string(),
         },
     }
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut out = value
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    out.push_str("...");
+    out
 }
 
 impl WelcomeDashboardData {

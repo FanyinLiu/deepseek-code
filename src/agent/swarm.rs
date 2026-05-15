@@ -685,7 +685,7 @@ impl SwarmCoordinator {
     ) -> Result<SwarmPlanDraft, crate::deepseek::errors::DeepSeekError> {
         let intent = SwarmIntent::classify(description, prompt);
         let allowed_roles = allowed_roles_for_intent(&intent, !focus_files.is_empty());
-        let schema = "Return JSON only with shape {\"goal\": string, \"tasks\": [{\"role\": \"explorer|reviewer|planner|tester|worker|verifier\", \"description\": string, \"prompt\": string, \"focus_files\": [string], \"write_mode\": \"read_only|pending_patch\", \"depends_on\": [string]}], \"validation_commands\": [string], \"risks\": [string]}. Roles must be complementary and non-duplicated.";
+        let schema = "Return JSON only with shape {\"goal\": string, \"tasks\": [{\"role\": \"explorer|reviewer|planner|tester|worker|verifier\", \"description\": string, \"prompt\": string, \"focus_files\": [string], \"write_mode\": \"read_only|pending_patch\", \"depends_on\": []}], \"validation_commands\": [string], \"risks\": [string]}. Roles must be complementary and non-duplicated. Leave depends_on empty; dependent scheduling is not supported.";
         let fallback_focus_files = dedupe(
             fallback
                 .tasks
@@ -1024,12 +1024,15 @@ fn validate_draft_plan(draft: &SwarmPlanDraft, fallback: &SwarmPlan) -> Result<S
         } else if !write_mode.is_empty() && write_mode != "read_only" {
             return Err("non-worker tasks must be read_only".into());
         }
+        if !draft_task.depends_on.is_empty() {
+            return Err("swarm draft depends_on is not supported".into());
+        }
         tasks.push(make_task(
             draft_task.role.clone(),
             description.to_string(),
             prompt.to_string(),
             draft_task.focus_files.clone(),
-            draft_task.depends_on.clone(),
+            Vec::new(),
         ));
     }
     Ok(SwarmPlan {
@@ -1939,6 +1942,31 @@ mod tests {
 
         let err = validate_draft_plan(&draft, &fallback).expect_err("duplicate target");
         assert!(err.contains("duplicate task target"));
+    }
+
+    #[test]
+    fn model_draft_dependencies_are_rejected_until_scheduler_support_exists() {
+        let fallback = coordinator().plan(
+            "开蜂群，审查 src/agent/swarm.rs，不要写文件",
+            "开蜂群，审查 src/agent/swarm.rs，不要写文件",
+            &[],
+        );
+        let draft = SwarmPlanDraft {
+            goal: "审查 swarm".into(),
+            tasks: vec![SwarmPlanDraftTask {
+                role: SwarmAgentRole::Explorer,
+                description: "定位入口".into(),
+                prompt: "审查 src/agent/swarm.rs".into(),
+                focus_files: vec!["src/agent/swarm.rs".into()],
+                write_mode: "read_only".into(),
+                depends_on: vec!["task-previous".into()],
+            }],
+            validation_commands: Vec::new(),
+            risks: Vec::new(),
+        };
+
+        let err = validate_draft_plan(&draft, &fallback).expect_err("depends_on unsupported");
+        assert!(err.contains("depends_on"));
     }
 
     #[test]

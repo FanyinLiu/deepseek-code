@@ -689,7 +689,7 @@ fn default_subagent_auto_decompose() -> bool {
     true
 }
 fn default_subagent_write_requires_approval() -> bool {
-    false
+    true
 }
 fn default_subagent_command_requires_approval() -> bool {
     true

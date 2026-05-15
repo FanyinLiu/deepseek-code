@@ -5,6 +5,7 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
     Frame,
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::agent::orchestrator::DecisionKind;
 
@@ -249,7 +250,7 @@ pub fn render_plan_tracker_with_warnings_and_motion(
         let duration = duration_label(step);
         let desc_width = area
             .width
-            .saturating_sub(23 + duration.chars().count() as u16) as usize;
+            .saturating_sub(23 + display_width(&duration) as u16) as usize;
         let desc = truncate(&step.description, desc_width);
 
         let (prefix, text_style) = match step.status {
@@ -622,21 +623,33 @@ fn divider_line(width: u16) -> Line<'static> {
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
+    if display_width(value) <= max_chars {
         return value.to_string();
     }
-    let mut out: String = value.chars().take(max_chars.saturating_sub(1)).collect();
+    let target = max_chars.saturating_sub(1);
+    let mut out = String::new();
+    for ch in value.chars() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if display_width(&out) + width > target {
+            break;
+        }
+        out.push(ch);
+    }
     out.push('…');
     out
 }
 
 fn pad_to_width(value: &str, width: usize) -> String {
-    let used = value.chars().count();
+    let used = display_width(value);
     if used >= width {
         value.to_string()
     } else {
         format!("{value}{}", " ".repeat(width - used))
     }
+}
+
+fn display_width(value: &str) -> usize {
+    UnicodeWidthStr::width(value)
 }
 
 /// ━━━●─── style progress bar.
@@ -688,7 +701,8 @@ mod tests {
 
     #[test]
     fn truncate_is_char_safe() {
-        assert_eq!(truncate("计划任务界面", 4), "计划任…");
+        assert_eq!(truncate("计划任务界面", 4), "计…");
+        assert!(display_width(&truncate("计划任务界面", 4)) <= 4);
     }
 
     #[test]

@@ -69,6 +69,7 @@ pub async fn chat(
         session.reasoning_state.selected_model = Some(requested_model);
     }
 
+    let policy_root = root.clone();
     let mut orchestrator = Some(Orchestrator::new(client, root, session));
     if let Some(ref mut orch) = orchestrator {
         orch.init_mcp(&config.mcp).await;
@@ -91,7 +92,7 @@ pub async fn chat(
                 AgentEvent::ReasoningDelta(_) => {}
                 AgentEvent::TokenDelta { .. } => {}
                 AgentEvent::ToolApprovalNeeded {
-                    tool_name,
+                    tool_name: _,
                     display,
                     respond,
                 } => {
@@ -102,8 +103,10 @@ pub async fn chat(
                     if !display.details.is_empty() {
                         println!("{}", display.details);
                     }
-                    // In one-shot mode, only auto-approve safe read operations.
-                    let is_safe_read = crate::policy::is_safe_read_tool(&tool_name);
+                    // In one-shot mode, only auto-approve reads that policy has
+                    // classified as safe, not every read_file/list_dir request.
+                    let is_safe_read =
+                        matches!(display.risk_level, crate::policy::RiskLevel::SafeRead);
                     let _ = respond.send(is_safe_read);
                     if !is_safe_read {
                         println!(
@@ -175,7 +178,16 @@ pub async fn chat(
                     respond,
                 } => {
                     println!("\n[Subagent {agent_id} tool: {tool_name}] {arguments}");
-                    let is_safe_read = crate::policy::is_safe_read_tool(&tool_name);
+                    let decision = crate::policy::evaluate_tool(
+                        &tool_name,
+                        &arguments,
+                        &policy_root,
+                        &config.policy,
+                    );
+                    let is_safe_read = matches!(
+                        decision.display.risk_level,
+                        crate::policy::RiskLevel::SafeRead
+                    );
                     let _ = respond.send(is_safe_read);
                     if !is_safe_read {
                         println!(

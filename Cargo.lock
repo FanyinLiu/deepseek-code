@@ -537,6 +537,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-normalization",
+ "unicode-width",
  "uuid",
  "walkdir",
  "wiremock",

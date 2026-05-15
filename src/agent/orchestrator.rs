@@ -757,7 +757,48 @@ impl Orchestrator {
             });
         }
 
-        if write_requires_approval {
+        let call = ToolCall {
+            id: format!("swarm-patch-{}", uuid::Uuid::new_v4()),
+            call_type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "apply_patch".to_string(),
+                arguments: serde_json::json!({ "patch": combined_patch }).to_string(),
+            },
+        };
+        let policy_config = crate::storage::Config::load(Some(&self.project_root))
+            .map(|c| c.policy)
+            .unwrap_or_default();
+        let patch_policy = policy::evaluate_tool(
+            &call.function.name,
+            &call.function.arguments,
+            &self.project_root,
+            &policy_config,
+        );
+        if patch_policy.action == policy::PolicyAction::Deny {
+            return Some(PatchHandlingReport {
+                text: if use_chinese {
+                    format!(
+                        "未自动写入：策略阻止 pending patch：{}。",
+                        patch_policy.reason
+                    )
+                } else {
+                    format!(
+                        "Pending patch was not applied: policy blocked it: {}.",
+                        patch_policy.reason
+                    )
+                },
+                validation_failed: true,
+                changed_files: Vec::new(),
+            });
+        }
+
+        if write_requires_approval
+            || (!self.yolo_mode
+                && matches!(
+                    patch_policy.action,
+                    policy::PolicyAction::AskOnce | policy::PolicyAction::AskSession
+                ))
+        {
             let (tx, rx) = tokio::sync::oneshot::channel();
             self.emit_event(
                 event_tx,
@@ -811,14 +852,6 @@ impl Orchestrator {
             }
         }
 
-        let call = ToolCall {
-            id: format!("swarm-patch-{}", uuid::Uuid::new_v4()),
-            call_type: "function".to_string(),
-            function: ToolCallFunction {
-                name: "apply_patch".to_string(),
-                arguments: serde_json::json!({ "patch": combined_patch }).to_string(),
-            },
-        };
         self.record_event(
             Some(turn_id),
             SessionEventKind::ToolCallStarted {
@@ -827,9 +860,6 @@ impl Orchestrator {
                 arguments: call.function.arguments.clone(),
             },
         );
-        let policy_config = crate::storage::Config::load(Some(&self.project_root))
-            .map(|c| c.policy)
-            .unwrap_or_default();
         let backend = crate::tools::backend::LocalToolBackend;
         let execution = crate::tools::backend::ToolBackend::execute(
             &backend,
@@ -872,7 +902,7 @@ impl Orchestrator {
             },
         );
         let validation_report = if execution.success {
-            self.run_swarm_post_apply_validation(result, turn_id, use_chinese)
+            self.run_swarm_post_apply_validation(result, event_tx, turn_id, use_chinese)
                 .await
         } else {
             None
@@ -918,6 +948,7 @@ impl Orchestrator {
     async fn run_swarm_post_apply_validation(
         &self,
         result: &crate::agent::swarm::SwarmResult,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
         turn_id: TurnId,
         use_chinese: bool,
     ) -> Option<(String, bool)> {
@@ -939,6 +970,54 @@ impl Orchestrator {
                     arguments: serde_json::json!({ "command": command }).to_string(),
                 },
             };
+            let decision = policy::evaluate_tool(
+                &call.function.name,
+                &call.function.arguments,
+                &self.project_root,
+                &policy_config,
+            );
+            match decision.action {
+                policy::PolicyAction::Deny => {
+                    failed = true;
+                    let status_label = if use_chinese { "已阻止" } else { "blocked" };
+                    lines.push(format!(
+                        "- `{command}`: {} - {}",
+                        status_label,
+                        first_line(&decision.reason)
+                    ));
+                    continue;
+                }
+                policy::PolicyAction::AskOnce | policy::PolicyAction::AskSession
+                    if !self.yolo_mode =>
+                {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    self.emit_event(
+                        event_tx,
+                        Some(turn_id),
+                        AgentEvent::ToolApprovalNeeded {
+                            tool_name: call.function.name.clone(),
+                            display: decision.display.clone(),
+                            respond: tx,
+                        },
+                    );
+                    let approved = matches!(
+                        tokio::time::timeout(std::time::Duration::from_mins(5), rx).await,
+                        Ok(Ok(true))
+                    );
+                    if !approved {
+                        failed = true;
+                        let status_label = if use_chinese { "未运行" } else { "skipped" };
+                        let reason = if use_chinese {
+                            "用户取消或确认超时"
+                        } else {
+                            "user denied or approval timed out"
+                        };
+                        lines.push(format!("- `{command}`: {status_label} - {reason}"));
+                        continue;
+                    }
+                }
+                _ => {}
+            }
             self.record_event(
                 Some(turn_id),
                 SessionEventKind::ToolCallStarted {
@@ -1513,6 +1592,8 @@ impl Orchestrator {
                 }
 
                 let use_chinese = plan_or_input_uses_chinese(&p, user_input);
+                let original_yolo_mode = self.yolo_mode;
+                let mut scoped_plan_auto = false;
 
                 // Convert plan to concrete steps and emit to TUI tracker
                 let steps = plan::executor::plan_to_steps(&p);
@@ -1617,6 +1698,7 @@ impl Orchestrator {
                     }
                     match options[choice].mode {
                         PlanExecutionMode::Auto => {
+                            scoped_plan_auto = true;
                             self.yolo_mode = true;
                         }
                         PlanExecutionMode::Confirm => { /* normal mode */ }
@@ -1761,7 +1843,7 @@ impl Orchestrator {
                     Ok(stream_result) => {
                         if stream_result.tool_calls.is_empty() {
                             plan_execution_failed = true;
-                            let msg = ReasoningManager::new_assistant_message(
+                            let mut msg = ReasoningManager::new_assistant_message(
                                 &stream_result.content,
                                 if stream_result.reasoning_content.is_empty() {
                                     None
@@ -1773,6 +1855,7 @@ impl Orchestrator {
                                 None,
                                 false,
                             );
+                            msg.visibility = MessageVisibility::AuditOnly;
                             self.session.messages.push(msg);
                             self.emit_event(
                                 event_tx,
@@ -1839,6 +1922,9 @@ impl Orchestrator {
                             },
                         );
                     }
+                }
+                if scoped_plan_auto {
+                    self.yolo_mode = original_yolo_mode;
                 }
 
                 // Finish any steps that did not map cleanly to a tool batch before clearing UI state.
@@ -2296,12 +2382,17 @@ impl Orchestrator {
             max_tokens: Some(8192),
         };
 
+        let suppress_visible_content = self.plan_execution.is_some();
         let mut emitted = EmittedStreamDeltas::default();
         send_request_token_delta(event_tx, &followup_request);
         match self
             .client
             .chat_stream_accumulated_with_deltas(&followup_request, |chunk| {
-                emitted.merge(emit_stream_chunk_deltas(event_tx, chunk));
+                emitted.merge(emit_stream_chunk_deltas_with_options(
+                    event_tx,
+                    chunk,
+                    !suppress_visible_content,
+                ));
             })
             .await
         {
@@ -2327,7 +2418,7 @@ impl Orchestrator {
                         &mut self.session.reasoning_state,
                         &mut self.session.messages,
                     );
-                    let final_msg = ReasoningManager::new_assistant_message(
+                    let mut final_msg = ReasoningManager::new_assistant_message(
                         &followup_result.content,
                         (!followup_result.reasoning_content.is_empty())
                             .then_some(&followup_result.reasoning_content),
@@ -2336,11 +2427,14 @@ impl Orchestrator {
                         None,
                         false,
                     );
+                    if suppress_visible_content {
+                        final_msg.visibility = MessageVisibility::AuditOnly;
+                    }
                     self.session.messages.push(final_msg);
                     if !emitted.reasoning {
                         send_reasoning_delta(event_tx, &followup_result.reasoning_content);
                     }
-                    if !emitted.content {
+                    if !emitted.content && !suppress_visible_content {
                         send_event(event_tx, AgentEvent::ContentDelta(followup_result.content));
                     }
                     if let Some(ref usage) = followup_result.usage {
@@ -2438,11 +2532,19 @@ fn emit_stream_chunk_deltas(
     tx: &mpsc::UnboundedSender<AgentEvent>,
     chunk: &crate::deepseek::models::StreamChunk,
 ) -> EmittedStreamDeltas {
+    emit_stream_chunk_deltas_with_options(tx, chunk, true)
+}
+
+fn emit_stream_chunk_deltas_with_options(
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+    chunk: &crate::deepseek::models::StreamChunk,
+    emit_content: bool,
+) -> EmittedStreamDeltas {
     let mut emitted = EmittedStreamDeltas::default();
     for choice in &chunk.choices {
         let mut hidden_delta = String::new();
         if let Some(content) = &choice.delta.content {
-            if !content.is_empty() {
+            if emit_content && !content.is_empty() {
                 send_event(tx, AgentEvent::ContentDelta(content.clone()));
                 emitted.content = true;
             }
@@ -2809,10 +2911,11 @@ fn summarize_parent_context(session: &Session) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        changed_files_for_tool_call, emit_stream_chunk_deltas, generate_plan_options,
-        plan_execution_context, plan_execution_prompt, plan_or_input_uses_chinese,
-        plan_uses_chinese, swarm_patch_approval_details, validate_swarm_patch_for_auto_apply,
-        AgentEvent, PlanExecutionState, PlanStepStatus,
+        changed_files_for_tool_call, emit_stream_chunk_deltas,
+        emit_stream_chunk_deltas_with_options, generate_plan_options, plan_execution_context,
+        plan_execution_prompt, plan_or_input_uses_chinese, plan_uses_chinese,
+        swarm_patch_approval_details, validate_swarm_patch_for_auto_apply, AgentEvent,
+        PlanExecutionState, PlanStepStatus,
     };
     use crate::agent::swarm::{SwarmAgentRole, SwarmPendingPatch, SwarmResult};
     use crate::deepseek::models::{StreamChunk, ToolCall, ToolCallFunction};
@@ -3054,5 +3157,24 @@ mod tests {
             rx.try_recv().expect("hidden tool token delta"),
             AgentEvent::TokenDelta { input_tokens: 0, output_tokens } if output_tokens > 0
         ));
+    }
+
+    #[test]
+    fn stream_chunk_deltas_can_suppress_visible_content_for_plan_execution() {
+        let chunk = serde_json::from_str::<StreamChunk>(
+            r#"{"choices":[{"index":0,"delta":{"reasoning_content":"thinking","content":"internal narration"},"finish_reason":null}],"usage":null}"#,
+        )
+        .expect("valid stream chunk");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let emitted = emit_stream_chunk_deltas_with_options(&tx, &chunk, false);
+
+        assert!(!emitted.content);
+        assert!(emitted.reasoning);
+        assert!(matches!(
+            rx.try_recv().expect("reasoning delta"),
+            AgentEvent::ReasoningDelta(text) if text == "thinking"
+        ));
+        assert!(rx.try_recv().is_err());
     }
 }

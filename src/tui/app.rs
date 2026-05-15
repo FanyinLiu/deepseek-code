@@ -478,11 +478,7 @@ fn welcome_agents_md(root: &Path) -> welcome::AgentsMdInfo {
                 .find(|line| !line.trim().is_empty() && !line.starts_with('#'))
                 .map(|line| {
                     let trimmed = line.trim();
-                    if trimmed.len() > 60 {
-                        format!("{}...", &trimmed[..60])
-                    } else {
-                        trimmed.to_string()
-                    }
+                    truncate_chars(trimmed, 60)
                 })
                 .unwrap_or_else(|| "Project agent preferences loaded.".to_string());
             welcome::AgentsMdInfo {
