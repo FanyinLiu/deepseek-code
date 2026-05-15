@@ -755,7 +755,7 @@ fn render_compact_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData
     let mut lines = Vec::new();
     lines.extend([
         Line::from(vec![Span::styled(
-            format!("{}  DeepSeek Code", ascii_art::WHALE_TINY),
+            format!("{}  DS-CODE", ascii_art::DSCODE_TINY),
             welcome_badge(),
         )]),
         Line::from(vec![Span::styled(headline, welcome_muted())]),
@@ -838,7 +838,7 @@ fn render_compact_api_onboarding(f: &mut Frame, area: Rect, data: &WelcomeDashbo
     });
     let lines = vec![
         Line::from(vec![
-            Span::styled("DeepSeek Code", welcome_text().add_modifier(Modifier::BOLD)),
+            Span::styled("DS-CODE", welcome_text().add_modifier(Modifier::BOLD)),
             Span::styled("  ·  ", welcome_muted()),
             Span::styled(
                 "API setup required",
@@ -913,9 +913,9 @@ fn action_span(text: &str) -> Span<'static> {
 fn render_product_mark(f: &mut Frame, area: Rect) {
     if area.width < 48 || area.height < 6 {
         let lines = vec![
-            Line::from(vec![Span::styled(ascii_art::WHALE_TINY, welcome_badge())]),
+            Line::from(vec![Span::styled(ascii_art::DSCODE_TINY, welcome_badge())]),
             Line::from(vec![Span::styled(
-                "DeepSeek Code",
+                "DS-CODE",
                 welcome_text().add_modifier(Modifier::BOLD),
             )]),
         ];
@@ -929,46 +929,45 @@ fn render_product_mark(f: &mut Frame, area: Rect) {
         return;
     }
 
-    let whale_width = ascii_art::WELCOME_WHALE
+    let mark_width = ascii_art::WELCOME_DSCODE
         .iter()
         .map(|line| line.chars().count())
         .max()
         .unwrap_or(0);
-    let title_width = 30;
-    let lockup_width = whale_width + 4 + title_width;
+    let title_width = "Droid-style local workbench".chars().count();
+    let lockup_width = mark_width + 4 + title_width;
     let left_x = area.x + ((area.width as usize).saturating_sub(lockup_width) / 2) as u16;
-    let title_x = left_x + whale_width as u16 + 4;
-    let title_rows: [Vec<Span<'static>>; 6] = [
-        vec![],
+    let title_x = left_x + mark_width as u16 + 4;
+    let title_rows: [Vec<Span<'static>>; 5] = [
         vec![
-            Span::styled("DeepSeek ", welcome_accent().add_modifier(Modifier::BOLD)),
-            Span::styled("Code", welcome_brand_alt().add_modifier(Modifier::BOLD)),
+            Span::styled("DS-", welcome_accent().add_modifier(Modifier::BOLD)),
+            Span::styled("CODE", welcome_brand_alt().add_modifier(Modifier::BOLD)),
         ],
-        vec![Span::styled("Your AI Coding Partner", welcome_muted())],
+        vec![Span::styled("DeepSeek coding shell", welcome_muted())],
         vec![],
-        vec![Span::styled("Think Deeper. Code Smarter.", welcome_muted())],
+        vec![Span::styled("Droid-style local workbench", welcome_muted())],
         vec![],
     ];
 
-    for (idx, whale) in ascii_art::WELCOME_WHALE.iter().enumerate() {
+    for (idx, mark) in ascii_art::WELCOME_DSCODE.iter().enumerate() {
         let row_y = area.y + idx as u16;
         if row_y >= area.y + area.height {
             break;
         }
 
-        let indent = whale.chars().take_while(|ch| *ch == ' ').count() as u16;
-        let whale_body = whale.trim_start();
-        if !whale_body.is_empty() {
-            let whale_area = Rect::new(
+        let indent = mark.chars().take_while(|ch| *ch == ' ').count() as u16;
+        let mark_body = mark.trim_start();
+        if !mark_body.is_empty() {
+            let mark_area = Rect::new(
                 left_x + indent,
                 row_y,
                 area.right().saturating_sub(left_x + indent),
                 1,
             );
             f.render_widget(
-                Paragraph::new(whale_body.to_string())
+                Paragraph::new(mark_body.to_string())
                     .style(welcome_accent().add_modifier(Modifier::BOLD)),
-                whale_area,
+                mark_area,
             );
         }
 
@@ -1124,7 +1123,7 @@ mod tests {
             .draw(|f| render_welcome(f, f.area(), &data))
             .expect("draw welcome");
         let rendered = buffer_text(terminal.backend());
-        assert!(rendered.contains("DeepSeek Code"));
+        assert!(rendered.contains("DS-CODE"));
         assert!(rendered.contains("What are we changing today?"));
         assert!(rendered.contains("starters"));
         assert!(rendered.contains("workspace"));
@@ -1140,7 +1139,7 @@ mod tests {
             .draw(|f| render_welcome(f, f.area(), &data))
             .expect("draw welcome");
         let rendered = buffer_text(terminal.backend());
-        assert!(rendered.contains("DeepSeek Code"));
+        assert!(rendered.contains("DS-CODE"));
         assert!(rendered.contains("What are we changing today?"));
         assert!(rendered.contains("workspace"));
         assert!(rendered.contains("starters"));
@@ -1154,7 +1153,7 @@ mod tests {
             .draw(|f| render_welcome(f, f.area(), &data))
             .expect("draw welcome");
         let rendered = buffer_text(terminal.backend());
-        assert!(rendered.contains("DeepSeek Code"));
+        assert!(rendered.contains("DS-CODE"));
         assert!(rendered.contains("Connect DeepSeek first"));
         assert!(rendered.contains("Paste your API key"));
         assert!(rendered.contains("enter"));
@@ -1169,7 +1168,7 @@ mod tests {
             .draw(|f| render_welcome(f, f.area(), &data))
             .expect("draw compact welcome");
         let rendered = buffer_text(terminal.backend());
-        assert!(rendered.contains("DeepSeek Code"));
+        assert!(rendered.contains("DS-CODE"));
         assert!(rendered.contains("1-3"));
         assert!(rendered.contains("enter"));
     }

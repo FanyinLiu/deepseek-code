@@ -96,8 +96,8 @@ fn print_welcome(
     // Title line
     println!(
         "  {}   {}",
-        cyan("◆"),
-        bold(&format!("DeepSeek Code  v{version}"))
+        cyan("DS"),
+        bold(&format!("DS-CODE  v{version}"))
     );
     println!();
 

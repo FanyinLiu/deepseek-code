@@ -2701,7 +2701,9 @@ impl TuiApp {
             .constraints([
                 Constraint::Min(1),
                 Constraint::Length(options_h),
+                Constraint::Length(1),
                 Constraint::Length(prompt_h),
+                Constraint::Length(1),
             ])
             .split(root);
 
@@ -2712,9 +2714,11 @@ impl TuiApp {
         if options_h > 0 {
             self.render_command_options(f, rows[1], &slash_suggestions);
         }
+        render_classic_divider(f, rows[2]);
         if prompt_h > 0 {
-            self.render_minimal_runtime_prompt(f, rows[2]);
+            self.render_minimal_runtime_prompt(f, rows[3]);
         }
+        render_classic_divider(f, rows[4]);
     }
 
     fn minimal_runtime_prompt_height(&self) -> u16 {
@@ -3015,9 +3019,7 @@ impl TuiApp {
                 self.motion_frame(),
             );
         }
-        if !showing_welcome {
-            render_classic_divider(f, bottom_divider_area);
-        }
+        render_classic_divider(f, bottom_divider_area);
 
         let (cursor_x, cursor_y) = input::terminal_cursor_position(
             input_area,

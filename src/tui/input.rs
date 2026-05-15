@@ -1,6 +1,6 @@
 use ratatui::{
     layout::Rect,
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
     Frame,
@@ -35,7 +35,11 @@ pub fn render_input_with_motion(
     motion: MotionFrame,
 ) {
     let lines: Vec<Line> = if input_text.is_empty() {
-        vec![Line::from(vec![prompt_span(), cursor_span(motion)])]
+        vec![Line::from(vec![
+            prompt_span(),
+            cursor_span(motion),
+            Span::styled("  type message...", muted_style()),
+        ])]
     } else {
         let mut line_start = 0usize;
         input_text
@@ -152,7 +156,13 @@ fn mask_secret(input_text: &str) -> String {
 
 fn prompt_span() -> Span<'static> {
     let p = theme::palette();
-    Span::styled("> ", Style::default().fg(p.accent).bg(p.canvas))
+    Span::styled(
+        "> ",
+        Style::default()
+            .fg(p.accent)
+            .bg(p.canvas)
+            .add_modifier(Modifier::BOLD),
+    )
 }
 
 fn input_style() -> Style {
@@ -237,6 +247,7 @@ mod tests {
 
         let rendered = buffer_text(terminal.backend());
         assert!(rendered.contains("> ▌"));
+        assert!(rendered.contains("type message..."));
     }
 
     #[test]
