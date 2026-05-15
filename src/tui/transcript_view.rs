@@ -27,6 +27,7 @@ pub struct TranscriptProps<'a> {
     pub diffs: &'a [diff_viewer::FileDiffItem],
     pub selected_diff: Option<usize>,
     pub is_streaming: bool,
+    pub show_streaming_placeholder: bool,
     pub stream_buffer: &'a str,
     pub reasoning_buffer: &'a str,
     pub show_reasoning: bool,
@@ -60,7 +61,7 @@ pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) 
     }
 
     // ── Streaming response ──
-    if props.is_streaming || !props.stream_buffer.is_empty() {
+    if !props.stream_buffer.is_empty() || (props.is_streaming && props.show_streaming_placeholder) {
         if !lines.is_empty() && !props.stream_buffer.starts_with('\n') {
             lines.push(Line::from(""));
         }
@@ -74,7 +75,7 @@ pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) 
                 "",
                 palette.text,
             );
-            if props.is_streaming {
+            if props.is_streaming && props.show_streaming_placeholder {
                 lines.push(streaming_status_line(frame));
             }
         }
@@ -1600,6 +1601,7 @@ mod tests {
                         diffs: &[],
                         selected_diff: None,
                         is_streaming: false,
+                        show_streaming_placeholder: true,
                         stream_buffer: "",
                         reasoning_buffer: "",
                         show_reasoning: false,
@@ -1666,6 +1668,7 @@ mod tests {
                         diffs: &[],
                         selected_diff: None,
                         is_streaming: false,
+                        show_streaming_placeholder: true,
                         stream_buffer: "",
                         reasoning_buffer: "",
                         show_reasoning: false,
@@ -1817,6 +1820,7 @@ mod tests {
                         diffs: &[],
                         selected_diff: None,
                         is_streaming: false,
+                        show_streaming_placeholder: true,
                         stream_buffer: "",
                         reasoning_buffer: "",
                         show_reasoning: false,
@@ -1874,6 +1878,7 @@ mod tests {
                         diffs: &[],
                         selected_diff: None,
                         is_streaming: false,
+                        show_streaming_placeholder: true,
                         stream_buffer: "",
                         reasoning_buffer: "",
                         show_reasoning: false,
@@ -1953,6 +1958,7 @@ mod tests {
                         diffs: &[],
                         selected_diff: None,
                         is_streaming: true,
+                        show_streaming_placeholder: true,
                         stream_buffer: "answering now",
                         reasoning_buffer: "",
                         show_reasoning: false,
@@ -1970,6 +1976,51 @@ mod tests {
             .collect();
         assert!(rendered.contains("user question should stay visible"));
         assert!(rendered.contains("answering now"));
+        theme::set_active_theme(theme::ThemeMode::Light);
+    }
+
+    #[test]
+    fn streaming_placeholder_can_be_suppressed_by_app_layout() {
+        theme::set_active_theme(theme::ThemeMode::Light);
+        let mut terminal = Terminal::new(TestBackend::new(80, 4)).expect("terminal");
+
+        terminal
+            .draw(|f| {
+                render_transcript(
+                    f,
+                    f.area(),
+                    TranscriptProps {
+                        messages: &[],
+                        pending_user_message: Some("测试 CLI"),
+                        scroll_offset: 0,
+                        plan_summary: None,
+                        plan_steps: &[],
+                        plan_current_step: 0,
+                        plan_total_steps: 0,
+                        plan_warnings: &[],
+                        subagents: &[],
+                        global_elapsed_ms: 0,
+                        diffs: &[],
+                        selected_diff: None,
+                        is_streaming: true,
+                        show_streaming_placeholder: false,
+                        stream_buffer: "",
+                        reasoning_buffer: "",
+                        show_reasoning: false,
+                    },
+                );
+            })
+            .expect("draw");
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(rendered.replace(' ', "").contains("测试CLI"));
+        assert!(!rendered.contains("Thinking"));
         theme::set_active_theme(theme::ThemeMode::Light);
     }
 
@@ -1998,6 +2049,7 @@ mod tests {
                         diffs: &[],
                         selected_diff: None,
                         is_streaming: true,
+                        show_streaming_placeholder: true,
                         stream_buffer: "AI 正在回答",
                         reasoning_buffer: "",
                         show_reasoning: false,
@@ -2047,6 +2099,7 @@ mod tests {
                         diffs: &[],
                         selected_diff: None,
                         is_streaming: true,
+                        show_streaming_placeholder: true,
                         stream_buffer: long_stream,
                         reasoning_buffer: "",
                         show_reasoning: false,
@@ -2091,6 +2144,7 @@ mod tests {
                         diffs: &[],
                         selected_diff: None,
                         is_streaming: true,
+                        show_streaming_placeholder: true,
                         stream_buffer: "## Heading\nThis is **important**.\n---",
                         reasoning_buffer: "",
                         show_reasoning: false,
@@ -2149,6 +2203,7 @@ mod tests {
                         diffs: &[],
                         selected_diff: None,
                         is_streaming: true,
+                        show_streaming_placeholder: true,
                         stream_buffer: "Done.\n\n* Brewed for 1m 2s",
                         reasoning_buffer: "",
                         show_reasoning: false,
@@ -2201,6 +2256,7 @@ mod tests {
                         diffs: &[],
                         selected_diff: None,
                         is_streaming: false,
+                        show_streaming_placeholder: true,
                         stream_buffer: "",
                         reasoning_buffer: "",
                         show_reasoning: false,
@@ -2283,6 +2339,7 @@ mod tests {
                         diffs: &[],
                         selected_diff: None,
                         is_streaming: false,
+                        show_streaming_placeholder: true,
                         stream_buffer: "",
                         reasoning_buffer: "",
                         show_reasoning: false,

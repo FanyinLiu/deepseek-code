@@ -2546,6 +2546,7 @@ impl TuiApp {
                     diffs: &self.file_diffs,
                     selected_diff: self.selected_diff,
                     is_streaming: self.is_streaming,
+                    show_streaming_placeholder: false,
                     stream_buffer: &self.stream_buffer,
                     reasoning_buffer: &self.reasoning_buffer,
                     show_reasoning: self.show_reasoning,
@@ -2696,11 +2697,13 @@ impl TuiApp {
             0
         };
         let prompt_h = self.minimal_runtime_prompt_height();
+        let activity_h = u16::from(self.should_show_minimal_runtime_activity());
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(1),
                 Constraint::Length(options_h),
+                Constraint::Length(activity_h),
                 Constraint::Length(1),
                 Constraint::Length(prompt_h),
                 Constraint::Length(1),
@@ -2714,11 +2717,12 @@ impl TuiApp {
         if options_h > 0 {
             self.render_command_options(f, rows[1], &slash_suggestions);
         }
-        render_classic_divider(f, rows[2]);
+        self.render_minimal_runtime_activity(f, rows[2]);
+        render_classic_divider(f, rows[3]);
         if prompt_h > 0 {
-            self.render_minimal_runtime_prompt(f, rows[3]);
+            self.render_minimal_runtime_prompt(f, rows[4]);
         }
-        render_classic_divider(f, rows[4]);
+        render_classic_divider(f, rows[5]);
     }
 
     fn minimal_runtime_prompt_height(&self) -> u16 {
@@ -2727,6 +2731,22 @@ impl TuiApp {
         }
         let line_count = self.input_text.lines().count().max(1) as u16;
         line_count.clamp(1, 3)
+    }
+
+    fn should_show_minimal_runtime_activity(&self) -> bool {
+        self.is_streaming
+    }
+
+    fn render_minimal_runtime_activity(&self, f: &mut Frame, area: Rect) {
+        if area.height == 0 || !self.should_show_minimal_runtime_activity() {
+            return;
+        }
+
+        render_classic_status_text(
+            f,
+            area,
+            &format!("Thinking{}", self.stream_motion_frame().dots()),
+        );
     }
 
     fn render_minimal_runtime_content(&self, f: &mut Frame, area: Rect) {
@@ -2766,6 +2786,7 @@ impl TuiApp {
                 diffs: &self.file_diffs,
                 selected_diff: self.selected_diff,
                 is_streaming: self.is_streaming,
+                show_streaming_placeholder: false,
                 stream_buffer: &self.stream_buffer,
                 reasoning_buffer: &self.reasoning_buffer,
                 show_reasoning: self.show_reasoning,
@@ -2931,6 +2952,7 @@ impl TuiApp {
                     diffs: &self.file_diffs,
                     selected_diff: self.selected_diff,
                     is_streaming: self.is_streaming,
+                    show_streaming_placeholder: false,
                     stream_buffer: &self.stream_buffer,
                     reasoning_buffer: &self.reasoning_buffer,
                     show_reasoning: self.show_reasoning,
@@ -6494,6 +6516,35 @@ mod tests {
         assert!(snapshot.contains("Trace TUI input loop"));
         assert!(!snapshot.contains("ds-code"));
         assert!(!snapshot.contains("Model:"));
+    }
+
+    #[test]
+    fn preview_snapshot_workbench_places_thinking_above_input() {
+        let snapshot = render_preview_snapshot(
+            PathBuf::from("D:/deepseek-code"),
+            false,
+            120,
+            30,
+            PreviewSnapshotScenario::Workbench,
+            theme::ThemeMode::Light,
+            0,
+        )
+        .expect("render snapshot");
+        let lines: Vec<&str> = snapshot.lines().collect();
+        let thinking_lines: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, line)| line.contains("* Thinking").then_some(idx))
+            .collect();
+        let input_idx = lines
+            .iter()
+            .position(|line| line.contains("type message..."))
+            .expect("input line");
+
+        assert_eq!(thinking_lines.len(), 1);
+        let thinking_idx = thinking_lines[0];
+        assert!(thinking_idx < input_idx);
+        assert!(input_idx.saturating_sub(thinking_idx) <= 2);
     }
 
     #[test]
