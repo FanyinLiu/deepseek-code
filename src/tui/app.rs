@@ -170,7 +170,19 @@ pub enum RendererMode {
 impl RendererMode {
     #[must_use]
     pub fn from_config(value: &str) -> Self {
+        Self::from_config_for_environment(value, &TerminalEnvironment::current())
+    }
+
+    #[must_use]
+    fn from_config_for_environment(value: &str, env: &TerminalEnvironment) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" | "default" => {
+                if env.prefers_classic_renderer() {
+                    Self::Classic
+                } else {
+                    Self::Fullscreen
+                }
+            }
             "fullscreen" | "full-screen" | "alternate" | "alt" => Self::Fullscreen,
             _ => Self::Classic,
         }
@@ -701,6 +713,27 @@ impl TuiApp {
             mode.label()
         );
         self.push_activity(format!("renderer: {}", mode.label()));
+    }
+
+    pub fn set_renderer_config(&mut self, value: &str) {
+        let normalized = value.trim().to_ascii_lowercase();
+        let stored = if normalized.is_empty() {
+            "auto"
+        } else {
+            normalized.as_str()
+        };
+        self.renderer_mode = RendererMode::from_config(stored);
+        self.config.ui.renderer = stored.to_string();
+        self.status_message = format!(
+            "TUI renderer set to {} (resolved to {}); restart ds to apply terminal mode",
+            stored,
+            self.renderer_mode.label()
+        );
+        self.push_activity(format!(
+            "renderer: {} ({})",
+            stored,
+            self.renderer_mode.label()
+        ));
     }
 
     pub fn open_settings_panel(&mut self) {
@@ -3409,6 +3442,10 @@ Run `ds` from a real terminal/PTY, or use `ds preview-tui` for a non-interactive
                 None => true,
             }
     }
+
+    fn prefers_classic_renderer(&self) -> bool {
+        self.codex_shell || self.skips_cursor_position_probe()
+    }
 }
 
 impl TerminalSession {
@@ -4734,14 +4771,44 @@ mod tests {
     }
 
     #[test]
-    fn renderer_mode_defaults_to_classic_and_parses_fullscreen() {
-        assert_eq!(RendererMode::from_config(""), RendererMode::Classic);
-        assert_eq!(RendererMode::from_config("classic"), RendererMode::Classic);
+    fn renderer_mode_auto_uses_fullscreen_in_normal_terminals_and_classic_in_codex() {
+        let normal = TerminalEnvironment {
+            stdin_is_terminal: true,
+            stdout_is_terminal: true,
+            term: Some("xterm-256color".to_string()),
+            codex_shell: false,
+        };
+        let codex = TerminalEnvironment {
+            stdin_is_terminal: true,
+            stdout_is_terminal: true,
+            term: Some("xterm-256color".to_string()),
+            codex_shell: true,
+        };
+
         assert_eq!(
-            RendererMode::from_config("fullscreen"),
+            RendererMode::from_config_for_environment("auto", &normal),
             RendererMode::Fullscreen
         );
-        assert_eq!(RendererMode::from_config("alt"), RendererMode::Fullscreen);
+        assert_eq!(
+            RendererMode::from_config_for_environment("", &normal),
+            RendererMode::Fullscreen
+        );
+        assert_eq!(
+            RendererMode::from_config_for_environment("auto", &codex),
+            RendererMode::Classic
+        );
+        assert_eq!(
+            RendererMode::from_config_for_environment("classic", &normal),
+            RendererMode::Classic
+        );
+        assert_eq!(
+            RendererMode::from_config_for_environment("fullscreen", &codex),
+            RendererMode::Fullscreen
+        );
+        assert_eq!(
+            RendererMode::from_config_for_environment("alt", &normal),
+            RendererMode::Fullscreen
+        );
     }
 
     #[test]

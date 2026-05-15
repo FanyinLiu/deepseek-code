@@ -144,11 +144,10 @@ deepseek-code [-C PATH]
 
 ### 2.3 欢迎页 `src/tui/welcome.rs`（349 行 + 测试）
 
-**响应式 4 个布局**：
+**响应式布局**：
 - `< 54×14` → `render_compact_welcome`（标题 + 数据简略行 + 1-3/enter 提示）
-- `< 96×22` → `render_stacked_welcome`（wordmark 横铺 + actions 区竖排）
+- `< 96×22` → `render_compact_welcome`（鲸鱼品牌块 + compact 操作提示）
 - `≥ 96×22` → `render_split_welcome`（左 54% identity / 中 1 列分隔条 / 右 46% actions）
-- 另有 `render_classic_welcome`（替代版，简化纯文本，用于命令行 `welcome` 子命令）
 
 **WelcomeDashboardData**：
 - `workspace_name / workspace_path / model / thinking / api_key_status / config_status / cache_status`
@@ -159,7 +158,7 @@ deepseek-code [-C PATH]
 - `detected_language`：扫项目根的特征文件（Cargo.toml → Rust，package.json → JS/Node，...）
 
 **视觉元素**：
-- 中心 `ascii_art::WELCOME_WORDMARK`（5 行 × 45 列的块字符 wordmark）
+- 中心 `ascii_art::WELCOME_WHALE` / `WELCOME_WHALE_COMPACT`（DeepSeek Code 鲸鱼品牌块）
 - 提示行 `Tip: Use /init to teach DeepSeek Code this workspace`
 - 快捷键行：`shift+tab 切 mode · ctrl+n 切 model / ctrl+l autonomy · tab thinking`
 - Capability 行：`skills (N) + · MCP (N) ? · AGENTS.md +/x`
@@ -174,20 +173,13 @@ deepseek-code [-C PATH]
 
 ### 2.4 ASCII 艺术 `src/tui/ascii_art.rs`
 
-只有 1 个常量：`WELCOME_WORDMARK`，5 行 × 45 字符（全 `█` 和空格）：
-```
-█████   █████   █████   █████   █████   █████
-██  ██  ██      ██      ██  ██  ██  ██  ██
-██  ██  █████   █████   █████   ██  ██  █████
-██  ██     ██   ██      ██      ██  ██  ██
-█████   █████   ██      ██      █████   █████
-```
-
-测试断言宽度恰好 45，且只允许空格和 █。
+当前保留 DeepSeek 鲸鱼品牌块：
+- `WELCOME_WHALE`：常规欢迎页使用
+- `WELCOME_WHALE_COMPACT`：窄屏欢迎页使用
+- `LOGO_TINY` / `WHALE_TINY`：状态行和极窄界面使用
 
 **问题**：
-- **不像 "DeepSeek"** —— 看字形可能是 "DSCODE" 或其他缩写。需要确认设计意图。
-- 只有一个尺寸；没有 narrow/wide 自适应；没有 light/dark 不同笔画粗细备选。
+- 只有 ASCII 单色版本；没有 light/dark 不同笔画粗细备选。
 
 ### 2.5 输入框 `src/tui/input.rs`
 

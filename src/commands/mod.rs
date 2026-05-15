@@ -687,25 +687,25 @@ fn cmd_tui(args: &str, ctx: &mut CommandContext) -> CommandResult {
     let mode = match requested.as_str() {
         "" => {
             return Ok(Some(format!(
-                "TUI renderer: {}\n\nUsage: /tui classic | fullscreen",
+                "TUI renderer: {}\n\nUsage: /tui auto | classic | fullscreen",
                 ctx.app.renderer_mode.label()
             )));
         }
-        "classic" | "terminal" | "scrollback" => crate::tui::app::RendererMode::Classic,
-        "fullscreen" | "full-screen" | "alternate" | "alt" => {
-            crate::tui::app::RendererMode::Fullscreen
-        }
+        "auto" | "default" => "auto",
+        "classic" | "terminal" | "scrollback" => "classic",
+        "fullscreen" | "full-screen" | "alternate" | "alt" => "fullscreen",
         other => {
             return Err(format!(
-                "Unknown TUI renderer: {other}. Use /tui classic or /tui fullscreen."
+                "Unknown TUI renderer: {other}. Use /tui auto, /tui classic, or /tui fullscreen."
             ));
         }
     };
-    write_project_ui_string_override(ctx.project_root, "renderer", mode.label())?;
-    ctx.app.set_renderer_mode(mode);
+    write_project_ui_string_override(ctx.project_root, "renderer", mode)?;
+    ctx.app.set_renderer_config(mode);
     Ok(Some(format!(
-        "TUI renderer set to {}. Restart ds to apply terminal mode.",
-        mode.label()
+        "TUI renderer set to {} (resolved to {}). Restart ds to apply terminal mode.",
+        mode,
+        ctx.app.renderer_mode.label()
     )))
 }
 
@@ -2161,6 +2161,17 @@ mod tests {
         let local = std::fs::read_to_string(temp.path().join(".deepseek-code/local.toml"))
             .expect("local config");
         assert!(local.contains("renderer = \"fullscreen\""));
+
+        let output = reg
+            .execute("/tui auto", &mut ctx)
+            .expect("command should be handled")
+            .expect("tui should run")
+            .expect("tui should show output");
+
+        assert!(output.contains("auto"));
+        let local = std::fs::read_to_string(temp.path().join(".deepseek-code/local.toml"))
+            .expect("local config");
+        assert!(local.contains("renderer = \"auto\""));
     }
 
     #[test]

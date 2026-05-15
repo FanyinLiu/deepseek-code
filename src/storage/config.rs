@@ -415,7 +415,7 @@ fn default_motion() -> String {
     "subtle".into()
 }
 fn default_renderer() -> String {
-    "classic".into()
+    "auto".into()
 }
 
 fn default_router_enabled() -> bool {

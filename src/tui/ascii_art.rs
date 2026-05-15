@@ -6,15 +6,6 @@ pub const LOGO_TINY: &str = "◆";
 /// Tiny product mark for compact brand lockups.
 pub const WHALE_TINY: &str = LOGO_TINY;
 
-/// Droid-style welcome wordmark for normal terminal widths.
-pub const WELCOME_WORDMARK: &[&str] = &[
-    "█████   █████   █████   █████   █████   █████",
-    "██  ██  ██      ██      ██  ██  ██  ██  ██   ",
-    "██  ██  █████   █████   █████   ██  ██  █████",
-    "██  ██     ██   ██      ██      ██  ██  ██   ",
-    "█████   █████   ██      ██      █████   █████",
-];
-
 /// DeepSeek whale mark used in compact welcome lockups.
 pub const WELCOME_WHALE: &[&str] = &[
     "              __",
@@ -37,17 +28,6 @@ pub const WELCOME_MASCOT_COMPACT: &[&str] = WELCOME_WHALE_COMPACT;
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn welcome_wordmark_stays_terminal_safe() {
-        assert_eq!(WELCOME_WORDMARK.len(), 5);
-        let wordmark_width = WELCOME_WORDMARK[0].chars().count();
-        assert_eq!(wordmark_width, 45);
-        for line in WELCOME_WORDMARK {
-            assert_eq!(line.chars().count(), wordmark_width);
-            assert!(line.chars().all(|ch| matches!(ch, ' ' | '█')));
-        }
-    }
 
     #[test]
     fn welcome_whale_stays_terminal_safe() {
