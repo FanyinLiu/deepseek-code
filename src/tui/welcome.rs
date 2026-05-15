@@ -398,7 +398,7 @@ pub fn render_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
     });
 
     if inner.width < 96 || inner.height < 22 {
-        render_stacked_welcome(f, inner, data);
+        render_compact_welcome(f, inner, data);
         return;
     }
 
@@ -457,94 +457,6 @@ fn render_focused_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData
     render_invitation_and_footer(f, chunks[3], data);
 }
 
-pub fn render_classic_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-
-    f.render_widget(Paragraph::new("").style(welcome_bg()), area);
-
-    let mut lines = vec![Line::from(vec![
-        Span::styled("DS-CODE", welcome_text().add_modifier(Modifier::BOLD)),
-        Span::styled(" · ", welcome_muted()),
-        Span::styled(
-            format!("{} ({})", model_label(&data.model), data.thinking),
-            welcome_muted(),
-        ),
-    ])];
-
-    if data.api_key_status != "ready" {
-        lines.push(Line::from(vec![Span::styled(
-            truncate_chars(
-                &data.workspace_path.display().to_string(),
-                area.width as usize,
-            ),
-            welcome_muted(),
-        )]));
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![Span::styled(
-            "API setup required",
-            welcome_accent().add_modifier(Modifier::BOLD),
-        )]));
-        lines.push(Line::from(vec![Span::styled(
-            "Paste your API key in the input line below, then press Enter.",
-            welcome_muted(),
-        )]));
-        if area.height >= 9 {
-            lines.push(Line::from(""));
-            lines.push(Line::from(vec![Span::styled(
-                "1 paste API key · 2 enter to save · 3 start coding",
-                welcome_text(),
-            )]));
-        }
-        f.render_widget(
-            Paragraph::new(Text::from(lines))
-                .style(welcome_bg())
-                .wrap(Wrap { trim: true }),
-            area,
-        );
-        return;
-    }
-
-    lines.push(Line::from(vec![Span::styled(
-        truncate_chars(
-            &data.workspace_path.display().to_string(),
-            area.width as usize,
-        ),
-        welcome_muted(),
-    )]));
-    lines.push(Line::from(vec![
-        Span::styled("api:ready", welcome_ok()),
-        Span::styled(" · ", welcome_muted()),
-        Span::styled(format!("config:{}", data.config_status), welcome_muted()),
-    ]));
-
-    if area.height >= 8 {
-        lines.push(Line::from(""));
-    }
-    lines.push(Line::from(vec![Span::styled(
-        "What are we changing today?",
-        welcome_text().add_modifier(Modifier::BOLD),
-    )]));
-    lines.push(Line::from(vec![Span::styled(
-        "Type below, or press 1-3 to load a starter.",
-        welcome_muted(),
-    )]));
-    if area.height >= 10 {
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![Span::styled(
-            "1-3 starters · / commands · @ files · ! shell",
-            welcome_accent(),
-        )]));
-    }
-    f.render_widget(
-        Paragraph::new(Text::from(lines))
-            .style(welcome_bg())
-            .wrap(Wrap { trim: true }),
-        area,
-    );
-}
-
 fn welcome_horizontal_margin(width: u16) -> u16 {
     match width {
         0..=72 => 1,
@@ -566,48 +478,6 @@ fn render_split_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) 
     render_identity(f, columns[0], data);
     render_divider(f, columns[1]);
     render_actions(f, columns[2], data);
-}
-
-fn render_stacked_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
-    let identity_height = if area.height >= 20 { 8 } else { 7 }.min(area.height);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(identity_height),
-            Constraint::Length(u16::from(area.height >= 22)),
-            Constraint::Min(1),
-        ])
-        .split(area);
-
-    render_stacked_identity(f, chunks[0], data);
-    if chunks[1].height > 0 {
-        render_horizontal_divider(f, chunks[1]);
-    }
-    render_actions(f, chunks[2], data);
-}
-
-// ── Left: Identity ──
-fn render_stacked_identity(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
-    let mut lines = ascii_art::WELCOME_WORDMARK
-        .iter()
-        .map(|line| Line::from(Span::styled(*line, welcome_logo())))
-        .collect::<Vec<_>>();
-    lines.push(Line::from(vec![
-        Span::styled("Tip: ", welcome_label().add_modifier(Modifier::BOLD)),
-        Span::styled(
-            "Use /init to teach DeepSeek Code this workspace",
-            welcome_text().add_modifier(Modifier::BOLD),
-        ),
-    ]));
-    lines.push(capability_line(data));
-
-    f.render_widget(
-        Paragraph::new(Text::from(lines))
-            .style(welcome_bg())
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: true }),
-        area,
-    );
 }
 
 fn render_identity(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
@@ -692,21 +562,6 @@ fn render_divider(f: &mut Frame, area: Rect) {
         .map(|_| Line::from(Span::styled("|", welcome_accent())))
         .collect::<Vec<_>>();
     f.render_widget(Paragraph::new(Text::from(lines)).style(welcome_bg()), area);
-}
-
-fn render_horizontal_divider(f: &mut Frame, area: Rect) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let line = "─".repeat(area.width as usize);
-    f.render_widget(
-        Paragraph::new(Text::from(vec![Line::from(Span::styled(
-            line,
-            welcome_accent(),
-        ))]))
-        .style(welcome_bg()),
-        area,
-    );
 }
 
 fn render_release_header(f: &mut Frame, area: Rect) {
@@ -1001,6 +856,10 @@ fn render_compact_api_onboarding(f: &mut Frame, area: Rect, data: &WelcomeDashbo
             Span::styled("  ·  model ", welcome_muted()),
             Span::styled(data.model.to_string(), welcome_text()),
         ]),
+        Line::from(vec![Span::styled(
+            format!("{} ({})", model_label(&data.model), data.thinking),
+            welcome_muted(),
+        )]),
     ];
 
     f.render_widget(
@@ -1023,18 +882,6 @@ fn model_label(model: &DeepSeekModel) -> &'static str {
         DeepSeekModel::LegacyChat => "DeepSeek Chat",
         DeepSeekModel::LegacyReasoner => "DeepSeek Reasoner",
     }
-}
-
-fn truncate_chars(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
-        return value.to_string();
-    }
-    let mut out = value
-        .chars()
-        .take(max_chars.saturating_sub(1))
-        .collect::<String>();
-    out.push('…');
-    out
 }
 
 fn context_line(label: &str, value: impl Into<String>) -> Line<'static> {
@@ -1171,20 +1018,12 @@ fn welcome_bg() -> Style {
     Style::default().fg(p.text).bg(p.canvas)
 }
 
-fn welcome_logo() -> Style {
-    welcome_bg().fg(theme::palette().text)
-}
-
 fn welcome_text() -> Style {
     welcome_bg().fg(welcome_fg())
 }
 
 fn welcome_muted() -> Style {
     welcome_bg().fg(theme::palette().dim)
-}
-
-fn welcome_label() -> Style {
-    welcome_bg().fg(theme::palette().text)
 }
 
 fn welcome_accent() -> Style {

@@ -4331,9 +4331,7 @@ pub async fn run_tui(
     // Set up terminal
     let _terminal_session = TerminalSession::enter(renderer_mode)?;
     let mut terminal = tui_terminal(renderer_mode)?;
-    if renderer_mode.uses_alternate_screen() {
-        terminal.clear()?;
-    }
+    terminal.clear()?;
 
     let (action_tx, mut action_rx) = mpsc::unbounded_channel::<TuiAction>();
     let mut app = TuiApp::new_with_startup(model, thinking_mode, session_id, root.clone(), startup);
