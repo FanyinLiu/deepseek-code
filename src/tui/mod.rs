@@ -6,6 +6,7 @@ pub mod file_tree;
 pub mod input;
 pub mod layout;
 pub mod model_hint;
+pub mod motion;
 pub mod plan_tracker;
 pub mod settings_panel;
 pub mod status_bar;

@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::agent::orchestrator::DecisionKind;
 
-use super::theme;
+use super::{motion, theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanStepStatus {
@@ -115,9 +115,10 @@ fn duration_label(step: &PlanStepItem) -> String {
         .unwrap_or_default()
 }
 
-fn status_icon(status: PlanStepStatus) -> &'static str {
+fn status_icon_with_motion(status: PlanStepStatus, frame: motion::MotionFrame) -> &'static str {
     match status {
         PlanStepStatus::Pending => "○",
+        PlanStepStatus::Running if frame.level.is_enabled() => frame.running_icon(),
         PlanStepStatus::Running => "●",
         PlanStepStatus::Done => "●",
         PlanStepStatus::Failed => "●",
@@ -152,6 +153,29 @@ pub fn render_plan_tracker_with_warnings(
     current_step: usize,
     total_steps: usize,
     warnings: &[String],
+) {
+    render_plan_tracker_with_warnings_and_motion(
+        f,
+        area,
+        summary,
+        steps,
+        current_step,
+        total_steps,
+        warnings,
+        motion::MotionFrame::disabled(),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_plan_tracker_with_warnings_and_motion(
+    f: &mut Frame,
+    area: Rect,
+    summary: &str,
+    steps: &[PlanStepItem],
+    current_step: usize,
+    total_steps: usize,
+    warnings: &[String],
+    frame: motion::MotionFrame,
 ) {
     let display_step = if total_steps == 0 {
         0
@@ -218,7 +242,7 @@ pub fn render_plan_tracker_with_warnings(
     let end = (start + visible).min(steps.len());
 
     for step in steps.iter().skip(start).take(end - start) {
-        let icon = status_icon(step.status);
+        let icon = status_icon_with_motion(step.status, frame);
         let color = status_color(step.status);
         let kind = step_kind(&step.description);
         let label = status_label(step.status);
@@ -274,8 +298,9 @@ pub fn render_options_panel(
     let p = theme::palette();
     let selected_bg = match theme::active_theme() {
         theme::ThemeMode::Light => Color::Rgb(58, 56, 48),
-        theme::ThemeMode::Dark => p.surface_alt,
-        theme::ThemeMode::HighContrast => p.surface_alt,
+        theme::ThemeMode::Auto | theme::ThemeMode::Dark | theme::ThemeMode::HighContrast => {
+            p.surface_alt
+        }
     };
     let mut lines = Vec::new();
     let use_chinese = option_panel_uses_chinese(title, options);
@@ -532,8 +557,9 @@ pub fn render_slash_command_panel(
     let p = theme::palette();
     let selected_bg = match theme::active_theme() {
         theme::ThemeMode::Light => Color::Rgb(58, 56, 48),
-        theme::ThemeMode::Dark => p.surface_alt,
-        theme::ThemeMode::HighContrast => p.surface_alt,
+        theme::ThemeMode::Auto | theme::ThemeMode::Dark | theme::ThemeMode::HighContrast => {
+            p.surface_alt
+        }
     };
     let mut lines = vec![Line::from(vec![
         Span::styled(

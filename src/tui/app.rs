@@ -57,7 +57,7 @@ use crate::policy::ApprovalDisplay;
 use crate::storage;
 
 use super::{
-    approval_popup, diff_viewer, file_tree, input, layout, model_hint, plan_tracker,
+    approval_popup, diff_viewer, file_tree, input, layout, model_hint, motion, plan_tracker,
     settings_panel, status_bar, statusline, subagent_cards, theme, transcript_view, welcome,
 };
 
@@ -121,6 +121,8 @@ pub struct TuiApp {
     pub file_tree_focused: bool,
     pub mcp_status: String,
     pub theme_mode: theme::ThemeMode,
+    pub motion_level: motion::MotionLevel,
+    ui_started_at: std::time::Instant,
     pub renderer_mode: RendererMode,
     pub settings_open: bool,
     pub settings_tab: settings_panel::SettingsTab,
@@ -250,6 +252,265 @@ impl ApiKeyState {
     }
 }
 
+struct TuiStartupData {
+    config: storage::Config,
+    config_loaded: bool,
+    api_key_available: bool,
+    probe_keyring: bool,
+}
+
+impl TuiStartupData {
+    fn load(root: &Path) -> (Self, Option<String>) {
+        let config_result = storage::Config::load(Some(root));
+        let config_loaded = config_result.is_ok();
+        let config = config_result.unwrap_or_default();
+        let api_key = storage::get_api_key_without_keyring(storage::config_api_key(&config));
+        let api_key_available = api_key.is_some();
+        let probe_keyring = !api_key_available && storage::get_env_api_key().is_none();
+
+        (
+            Self {
+                config,
+                config_loaded,
+                api_key_available,
+                probe_keyring,
+            },
+            api_key,
+        )
+    }
+
+    fn preview(api_key_available: bool) -> Self {
+        Self {
+            config: storage::Config::default(),
+            config_loaded: false,
+            api_key_available,
+            probe_keyring: false,
+        }
+    }
+}
+
+fn load_welcome_with_startup(
+    root: &Path,
+    model: DeepSeekModel,
+    thinking: ThinkingMode,
+    config: &storage::Config,
+    config_loaded: bool,
+    api_key_available: bool,
+) -> welcome::WelcomeDashboardData {
+    let cache_status = if config_loaded {
+        if config.ui.show_cache_hud {
+            "no turn yet"
+        } else {
+            "disabled"
+        }
+    } else {
+        "unknown"
+    };
+    let recent_sessions = dirs::home_dir()
+        .map(|home| storage::SessionStore::new(home.join(".deepseek-code")).list(root))
+        .and_then(Result::ok)
+        .unwrap_or_default()
+        .into_iter()
+        .take(3)
+        .map(|session| {
+            let id = session.id.to_string();
+            welcome::RecentSessionItem {
+                label: session.name.unwrap_or_else(|| id.chars().take(8).collect()),
+                updated_at: session.updated_at.format("%m-%d %H:%M").to_string(),
+                message_count: session.message_count,
+                tool_call_count: session.tool_call_count,
+            }
+        })
+        .collect();
+
+    welcome::WelcomeDashboardData {
+        workspace_name: root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("workspace")
+            .to_string(),
+        workspace_path: root.to_path_buf(),
+        model,
+        thinking,
+        api_key_status: if api_key_available {
+            "ready"
+        } else {
+            "missing"
+        },
+        config_status: if config_loaded { "loaded" } else { "fallback" },
+        cache_status,
+        recent_sessions,
+        skills: welcome_skill_items(),
+        mcp_servers: welcome_mcp_servers(config),
+        agents_md: welcome_agents_md(root),
+        detected_language: detect_project_language(root),
+    }
+}
+
+fn welcome_skill_items() -> Vec<welcome::SkillItem> {
+    vec![
+        welcome::SkillItem {
+            name: "read_file",
+            description: "Read & explore files",
+            available: true,
+        },
+        welcome::SkillItem {
+            name: "edit_file",
+            description: "Edit & patch code",
+            available: true,
+        },
+        welcome::SkillItem {
+            name: "write_file",
+            description: "Create new files",
+            available: true,
+        },
+        welcome::SkillItem {
+            name: "search_code",
+            description: "Search codebase",
+            available: true,
+        },
+        welcome::SkillItem {
+            name: "run_command",
+            description: "Execute shell commands",
+            available: true,
+        },
+        welcome::SkillItem {
+            name: "git_workflow",
+            description: "Git add, commit, diff",
+            available: true,
+        },
+        welcome::SkillItem {
+            name: "web_search",
+            description: "DuckDuckGo search",
+            available: true,
+        },
+        welcome::SkillItem {
+            name: "github_pr",
+            description: "GitHub PR ops",
+            available: std::env::var("GITHUB_TOKEN").is_ok(),
+        },
+        welcome::SkillItem {
+            name: "semantic_search",
+            description: "TF-IDF code search",
+            available: true,
+        },
+        welcome::SkillItem {
+            name: "fetch_url",
+            description: "Fetch web content",
+            available: true,
+        },
+        welcome::SkillItem {
+            name: "image_input",
+            description: "Multimodal images",
+            available: true,
+        },
+        welcome::SkillItem {
+            name: "lsp",
+            description: "LSP hover/definition",
+            available: true,
+        },
+        welcome::SkillItem {
+            name: "subagent",
+            description: "Parallel subagents",
+            available: true,
+        },
+        welcome::SkillItem {
+            name: "mcp",
+            description: "MCP external tools",
+            available: false,
+        },
+    ]
+}
+
+fn welcome_mcp_servers(config: &storage::Config) -> Vec<welcome::McpServerItem> {
+    if !config.mcp.enabled {
+        return Vec::new();
+    }
+    config
+        .mcp
+        .servers
+        .keys()
+        .map(|name| welcome::McpServerItem {
+            name: name.clone(),
+            status: welcome::McpServerStatus::NotConfigured,
+            tool_count: 0,
+            error: None,
+        })
+        .collect()
+}
+
+fn welcome_agents_md(root: &Path) -> welcome::AgentsMdInfo {
+    let path = root.join("AGENTS.md");
+    if !path.exists() {
+        return welcome::AgentsMdInfo {
+            loaded: false,
+            rule_count: 0,
+            summary: "No AGENTS.md found in project root.".to_string(),
+        };
+    }
+
+    match std::fs::read_to_string(&path) {
+        Ok(content) => {
+            let rule_count = content
+                .lines()
+                .filter(|line| {
+                    line.starts_with("## ") || line.starts_with("- ") || line.starts_with("* ")
+                })
+                .count();
+            let summary = content
+                .lines()
+                .find(|line| !line.trim().is_empty() && !line.starts_with('#'))
+                .map(|line| {
+                    let trimmed = line.trim();
+                    if trimmed.len() > 60 {
+                        format!("{}...", &trimmed[..60])
+                    } else {
+                        trimmed.to_string()
+                    }
+                })
+                .unwrap_or_else(|| "Project agent preferences loaded.".to_string());
+            welcome::AgentsMdInfo {
+                loaded: true,
+                rule_count,
+                summary,
+            }
+        }
+        Err(_) => welcome::AgentsMdInfo {
+            loaded: false,
+            rule_count: 0,
+            summary: "Failed to read AGENTS.md.".to_string(),
+        },
+    }
+}
+
+fn detect_project_language(root: &Path) -> String {
+    const MARKERS: &[(&str, &str)] = &[
+        ("Cargo.toml", "Rust"),
+        ("package.json", "Node/TypeScript"),
+        ("pyproject.toml", "Python"),
+        ("go.mod", "Go"),
+        ("pom.xml", "Java"),
+    ];
+    for (marker, language) in MARKERS {
+        if root.join(marker).exists() {
+            return (*language).to_string();
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            if let Some(ext) = entry.path().extension() {
+                if matches!(
+                    ext.to_string_lossy().as_ref(),
+                    "rs" | "py" | "js" | "go" | "ts" | "java" | "cpp" | "c"
+                ) {
+                    return "Mixed".to_string();
+                }
+            }
+        }
+    }
+    "Unknown".to_string()
+}
+
 impl TuiApp {
     #[must_use]
     pub fn new(
@@ -258,14 +519,28 @@ impl TuiApp {
         session_name: Option<String>,
         project_root: PathBuf,
     ) -> Self {
-        let config = storage::Config::load(Some(&project_root)).unwrap_or_default();
-        let theme_mode = theme::ThemeMode::from_config(&config.ui.theme);
-        let renderer_mode = RendererMode::from_config(&config.ui.renderer);
+        let (startup, _) = TuiStartupData::load(&project_root);
+        Self::new_with_startup(model, thinking_mode, session_name, project_root, startup)
+    }
+
+    fn new_with_startup(
+        model: DeepSeekModel,
+        thinking_mode: ThinkingMode,
+        session_name: Option<String>,
+        project_root: PathBuf,
+        startup: TuiStartupData,
+    ) -> Self {
+        let theme_mode = theme::ThemeMode::from_config(&startup.config.ui.theme);
+        let motion_level = motion::MotionLevel::from_config(&startup.config.ui.motion);
+        let renderer_mode = RendererMode::from_config(&startup.config.ui.renderer);
         theme::set_active_theme(theme_mode);
-        let welcome = welcome::WelcomeDashboardData::load(
+        let welcome = load_welcome_with_startup(
             &project_root,
             model.clone(),
             thinking_mode.clone(),
+            &startup.config,
+            startup.config_loaded,
+            startup.api_key_available,
         );
 
         let api_key_state = ApiKeyState::from_welcome(welcome.api_key_status);
@@ -336,6 +611,8 @@ impl TuiApp {
             file_tree_focused: false,
             mcp_status: String::new(),
             theme_mode,
+            motion_level,
+            ui_started_at: std::time::Instant::now(),
             renderer_mode,
             settings_open: false,
             settings_tab: settings_panel::SettingsTab::SessionDefaults,
@@ -394,6 +671,23 @@ impl TuiApp {
         theme::set_active_theme(mode);
         self.status_message = format!("Theme set to {}", mode.label());
         self.push_activity(format!("theme: {}", mode.label()));
+    }
+
+    fn motion_frame(&self) -> motion::MotionFrame {
+        motion::MotionFrame::new(
+            self.motion_level,
+            self.ui_started_at.elapsed().as_millis() as u64,
+        )
+    }
+
+    fn stream_motion_frame(&self) -> motion::MotionFrame {
+        motion::MotionFrame::new(
+            self.motion_level,
+            self.stream_start.map_or_else(
+                || self.ui_started_at.elapsed().as_millis() as u64,
+                |started| started.elapsed().as_millis() as u64,
+            ),
+        )
     }
 
     pub fn set_renderer_mode(&mut self, mode: RendererMode) {
@@ -1442,10 +1736,14 @@ impl TuiApp {
     }
 
     fn refresh_welcome(&mut self, root: &Path) {
-        self.welcome = welcome::WelcomeDashboardData::load(
+        let (startup, _) = TuiStartupData::load(root);
+        self.welcome = load_welcome_with_startup(
             root,
             self.model.clone(),
             self.thinking_mode.clone(),
+            &startup.config,
+            startup.config_loaded,
+            startup.api_key_available || self.api_key_state.is_ready(),
         );
         self.welcome.api_key_status = self.api_key_state.welcome_status();
     }
@@ -2130,9 +2428,7 @@ impl TuiApp {
             welcome::render_welcome(f, full_body_area, &self.welcome);
         } else {
             // Quiet terminal style: everything scrolls together in one stream.
-            let elapsed = self
-                .stream_start
-                .map_or(0, |s| s.elapsed().as_millis() as u64);
+            let elapsed = self.stream_motion_frame().elapsed_ms;
             let empty_subagents: &[subagent_cards::SubagentCard] = &[];
             let visible_subagents = if self.active_swarm.is_some() {
                 if self
@@ -2207,16 +2503,14 @@ impl TuiApp {
             }
         }
 
-        model_hint::render_composer_hint(
+        model_hint::render_composer_hint_with_motion(
             f,
             model_hint_area,
             &self.model,
             &self.thinking_mode,
             self.is_streaming.then(|| status_bar::StatusActivity {
                 title: &self.current_task_title,
-                elapsed_ms: self
-                    .stream_start
-                    .map_or(0, |started| started.elapsed().as_millis() as u64),
+                elapsed_ms: self.stream_motion_frame().elapsed_ms,
                 input_tokens: self.activity_input_tokens(),
                 tokens: self.current_turn_output_tokens,
                 agent_tokens: self.live_agent_tokens(),
@@ -2228,6 +2522,7 @@ impl TuiApp {
                 }),
             }),
             self.current_mode(),
+            self.stream_motion_frame(),
         );
 
         // Divider line above the input.
@@ -2246,14 +2541,21 @@ impl TuiApp {
         // Input
         let opts_for_input = self.pending_options.as_ref().map(|(_, o)| o.as_slice());
         if self.api_key_entry.is_some() {
-            input::render_api_key_input(f, input_area, &self.input_text, self.cursor_pos);
+            input::render_api_key_input_with_motion(
+                f,
+                input_area,
+                &self.input_text,
+                self.cursor_pos,
+                self.motion_frame(),
+            );
         } else {
-            input::render_input(
+            input::render_input_with_motion(
                 f,
                 input_area,
                 &self.input_text,
                 self.cursor_pos,
                 opts_for_input,
+                self.motion_frame(),
             );
         }
         let (cursor_x, cursor_y) = input::terminal_cursor_position(
@@ -2333,9 +2635,7 @@ impl TuiApp {
         } else if showing_welcome {
             welcome::render_classic_welcome(f, content_area, &self.welcome);
         } else {
-            let elapsed = self
-                .stream_start
-                .map_or(0, |s| s.elapsed().as_millis() as u64);
+            let elapsed = self.stream_motion_frame().elapsed_ms;
             let empty_subagents: &[subagent_cards::SubagentCard] = &[];
             let visible_subagents = if self.active_swarm.is_some() {
                 if self
@@ -2420,9 +2720,7 @@ impl TuiApp {
                     thinking: &self.thinking_mode,
                     activity: Some(status_bar::StatusActivity {
                         title: &self.current_task_title,
-                        elapsed_ms: self
-                            .stream_start
-                            .map_or(0, |started| started.elapsed().as_millis() as u64),
+                        elapsed_ms: self.stream_motion_frame().elapsed_ms,
                         input_tokens: self.activity_input_tokens(),
                         tokens: self.current_turn_output_tokens,
                         agent_tokens: self.live_agent_tokens(),
@@ -2440,14 +2738,21 @@ impl TuiApp {
         render_classic_divider(f, top_divider_area);
         let opts_for_input = self.pending_options.as_ref().map(|(_, o)| o.as_slice());
         if self.api_key_entry.is_some() {
-            input::render_api_key_input(f, input_area, &self.input_text, self.cursor_pos);
+            input::render_api_key_input_with_motion(
+                f,
+                input_area,
+                &self.input_text,
+                self.cursor_pos,
+                self.motion_frame(),
+            );
         } else {
-            input::render_input(
+            input::render_input_with_motion(
                 f,
                 input_area,
                 &self.input_text,
                 self.cursor_pos,
                 opts_for_input,
+                self.motion_frame(),
             );
         }
         render_classic_divider(f, bottom_divider_area);
@@ -2727,9 +3032,20 @@ pub fn render_preview_snapshot(
     height: u16,
     scenario: PreviewSnapshotScenario,
     theme_mode: theme::ThemeMode,
+    elapsed_ms: u64,
 ) -> Result<String, anyhow::Error> {
-    let mut app = TuiApp::new(DeepSeekModel::Flash, ThinkingMode::Auto, None, project_root);
+    let startup = TuiStartupData::preview(!api_key_missing);
+    let mut app = TuiApp::new_with_startup(
+        DeepSeekModel::Flash,
+        ThinkingMode::Auto,
+        None,
+        project_root,
+        startup,
+    );
     app.set_theme_mode(theme_mode);
+    app.ui_started_at = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_millis(elapsed_ms))
+        .unwrap_or_else(std::time::Instant::now);
     if api_key_missing {
         app.set_api_key_state(ApiKeyState::Missing);
         app.api_key_entry = Some(ApiKeyEntry::default());
@@ -2745,7 +3061,11 @@ pub fn render_preview_snapshot(
         app.set_api_key_state(ApiKeyState::Ready);
         app.is_streaming = true;
         app.show_reasoning = true;
-        app.stream_start = Some(std::time::Instant::now());
+        app.stream_start = Some(
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_millis(elapsed_ms))
+                .unwrap_or_else(std::time::Instant::now),
+        );
         let turn_id = uuid::Uuid::new_v4();
         app.messages = vec![
             ProtocolMessage {
@@ -3692,9 +4012,9 @@ pub async fn run_tui(
 ) -> Result<(), anyhow::Error> {
     let root = project_root
         .unwrap_or_else(|| storage::find_project_root().unwrap_or_else(|| PathBuf::from(".")));
-    let api_key = storage::get_effective_api_key(Some(&root));
-    let config = storage::Config::load(Some(&root)).unwrap_or_default();
-    let renderer_mode = RendererMode::from_config(&config.ui.renderer);
+    let (startup, api_key) = TuiStartupData::load(&root);
+    let renderer_mode = RendererMode::from_config(&startup.config.ui.renderer);
+    let probe_keyring = startup.probe_keyring;
     let mut active_client =
         crate::deepseek::client::DeepSeekClient::new(api_key.unwrap_or_default());
 
@@ -3759,12 +4079,14 @@ pub async fn run_tui(
     }
 
     let (action_tx, mut action_rx) = mpsc::unbounded_channel::<TuiAction>();
-    let mut app = TuiApp::new(model, thinking_mode, session_id, root.clone());
+    let mut app = TuiApp::new_with_startup(model, thinking_mode, session_id, root.clone(), startup);
     if let Some(ref orch) = orchestrator {
         app.mcp_status = orch.mcp_status();
     }
     let mut running_turn: Option<RunningTurn> = None;
     let mut local_task: Option<JoinHandle<()>> = None;
+    let mut keyring_task =
+        probe_keyring.then(|| tokio::task::spawn_blocking(storage::get_keyring_api_key));
     let mut yolo_mode = false;
 
     // Main event loop
@@ -3838,6 +4160,22 @@ pub async fn run_tui(
         {
             if let Some(handle) = local_task.take() {
                 let _ = handle.await;
+            }
+        }
+
+        if keyring_task
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+        {
+            if let Some(handle) = keyring_task.take() {
+                if let Ok(Some(api_key)) = handle.await {
+                    active_client = crate::deepseek::client::DeepSeekClient::new(api_key);
+                    app.mark_api_key_ready_from_storage(&root);
+                    app.status_message = "API key loaded from system keyring".into();
+                    if let Some(orchestrator) = orchestrator.as_mut() {
+                        orchestrator.client = active_client.clone();
+                    }
+                }
             }
         }
 
@@ -5599,6 +5937,7 @@ mod tests {
             28,
             PreviewSnapshotScenario::Welcome,
             theme::ThemeMode::Light,
+            0,
         )
         .expect("render snapshot");
 
@@ -5618,6 +5957,7 @@ mod tests {
             28,
             PreviewSnapshotScenario::Welcome,
             theme::ThemeMode::Light,
+            0,
         )
         .expect("render snapshot");
 
@@ -5636,6 +5976,7 @@ mod tests {
             28,
             PreviewSnapshotScenario::Welcome,
             theme::ThemeMode::Dark,
+            0,
         )
         .expect("render snapshot");
 
@@ -5652,6 +5993,7 @@ mod tests {
             30,
             PreviewSnapshotScenario::Workbench,
             theme::ThemeMode::Light,
+            0,
         )
         .expect("render snapshot");
 
@@ -5686,6 +6028,7 @@ mod tests {
             28,
             PreviewSnapshotScenario::Workbench,
             theme::ThemeMode::Light,
+            0,
         )
         .expect("render snapshot");
         println!("\n=== NO BG ===\n{snapshot}\n=============\n");

@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::tui::theme;
+use crate::tui::{motion::MotionFrame, theme};
 
 /// Quiet terminal input: no border, just a clean prompt.
 pub fn render_input(
@@ -14,10 +14,28 @@ pub fn render_input(
     area: Rect,
     input_text: &str,
     cursor_position: usize,
+    pending_options: Option<&[String]>,
+) {
+    render_input_with_motion(
+        f,
+        area,
+        input_text,
+        cursor_position,
+        pending_options,
+        MotionFrame::disabled(),
+    );
+}
+
+pub fn render_input_with_motion(
+    f: &mut Frame,
+    area: Rect,
+    input_text: &str,
+    cursor_position: usize,
     _pending_options: Option<&[String]>,
+    motion: MotionFrame,
 ) {
     let lines: Vec<Line> = if input_text.is_empty() {
-        vec![Line::from(vec![prompt_span(), cursor_span()])]
+        vec![Line::from(vec![prompt_span(), cursor_span(motion)])]
     } else {
         let mut line_start = 0usize;
         input_text
@@ -35,7 +53,7 @@ pub fn render_input(
                 } else {
                     spans.push(Span::styled("  ", input_style()));
                 }
-                spans.extend(edit_spans(line, local_cursor));
+                spans.extend(edit_spans(line, local_cursor, motion));
                 line_start += line_len + 1;
                 Line::from(spans)
             })
@@ -48,19 +66,35 @@ pub fn render_input(
 }
 
 pub fn render_api_key_input(f: &mut Frame, area: Rect, input_text: &str, cursor_position: usize) {
+    render_api_key_input_with_motion(
+        f,
+        area,
+        input_text,
+        cursor_position,
+        MotionFrame::disabled(),
+    );
+}
+
+pub fn render_api_key_input_with_motion(
+    f: &mut Frame,
+    area: Rect,
+    input_text: &str,
+    cursor_position: usize,
+    motion: MotionFrame,
+) {
     let display = mask_secret(input_text);
     let cursor = cursor_position.min(display.chars().count());
     let lines = if display.is_empty() {
         vec![Line::from(vec![
             prompt_span(),
-            cursor_span(),
+            cursor_span(motion),
             Span::styled(" ", input_style()),
             Span::styled("paste API key...", muted_style()),
         ])]
     } else {
         vec![Line::from({
             let mut spans = vec![prompt_span()];
-            spans.extend(edit_spans(&display, Some(cursor)));
+            spans.extend(edit_spans(&display, Some(cursor), motion));
             spans
         })]
     };
@@ -131,7 +165,7 @@ fn muted_style() -> Style {
     Style::default().fg(p.muted).bg(p.canvas)
 }
 
-fn edit_spans(line: &str, cursor: Option<usize>) -> Vec<Span<'static>> {
+fn edit_spans(line: &str, cursor: Option<usize>, motion: MotionFrame) -> Vec<Span<'static>> {
     let Some(cursor) = cursor else {
         return vec![Span::styled(line.to_string(), input_style())];
     };
@@ -148,7 +182,7 @@ fn edit_spans(line: &str, cursor: Option<usize>) -> Vec<Span<'static>> {
         spans.push(Span::styled(before, input_style()));
     }
 
-    spans.push(cursor_span());
+    spans.push(cursor_span(motion));
 
     if let Some(ch) = at {
         spans.push(Span::styled(ch.to_string(), input_style()));
@@ -161,9 +195,9 @@ fn edit_spans(line: &str, cursor: Option<usize>) -> Vec<Span<'static>> {
     spans
 }
 
-fn cursor_span() -> Span<'static> {
+fn cursor_span(motion: MotionFrame) -> Span<'static> {
     Span::styled(
-        "▌",
+        motion.cursor(),
         Style::default()
             .fg(theme::palette().accent)
             .bg(theme::palette().canvas),

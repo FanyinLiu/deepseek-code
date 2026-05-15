@@ -67,6 +67,13 @@ pub struct RecentSessionItem {
     pub tool_call_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WelcomeLoadStatus {
+    has_api_key: bool,
+    config_loaded: bool,
+    cache_status: &'static str,
+}
+
 fn detect_project_language(root: &Path) -> String {
     let indicators: &[(&str, &str)] = &[
         ("Cargo.toml", "Rust"),
@@ -107,11 +114,11 @@ fn detect_project_language(root: &Path) -> String {
     "Unknown".to_string()
 }
 
-fn load_mcp_status(root: &Path) -> (Vec<McpServerItem>, bool) {
+fn load_mcp_status(config: Option<&storage::Config>) -> (Vec<McpServerItem>, bool) {
     let mut servers = Vec::new();
     let mut any_available = false;
 
-    if let Ok(config) = crate::storage::Config::load(Some(root)) {
+    if let Some(config) = config {
         if config.mcp.enabled {
             for name in config.mcp.servers.keys() {
                 servers.push(McpServerItem {
@@ -172,12 +179,20 @@ fn load_agents_md(root: &Path) -> AgentsMdInfo {
 
 impl WelcomeDashboardData {
     pub fn load(root: &Path, model: DeepSeekModel, thinking: ThinkingMode) -> Self {
-        let api_key = storage::get_effective_api_key(Some(root));
-        let config = storage::Config::load(Some(root));
+        let config_result = storage::Config::load(Some(root));
+        let has_api_key = storage::get_api_key(
+            config_result
+                .as_ref()
+                .ok()
+                .and_then(storage::config_api_key),
+        )
+        .is_some();
+        let config_loaded = config_result.is_ok();
+        let config = config_result.ok();
         let cache_status = match config.as_ref() {
-            Ok(config) if config.ui.show_cache_hud => "no turn yet",
-            Ok(_) => "disabled",
-            Err(_) => "unknown",
+            Some(config) if config.ui.show_cache_hud => "no turn yet",
+            Some(_) => "disabled",
+            None => "unknown",
         };
 
         let recent_sessions = dirs::home_dir()
@@ -197,17 +212,21 @@ impl WelcomeDashboardData {
             })
             .collect();
 
-        Self::from_parts(
+        Self::from_parts_with_config(
             root,
             model,
             thinking,
-            api_key.is_some(),
-            config.is_ok(),
-            cache_status,
+            WelcomeLoadStatus {
+                has_api_key,
+                config_loaded,
+                cache_status,
+            },
             recent_sessions,
+            config.as_ref(),
         )
     }
 
+    #[cfg(test)]
     fn from_parts(
         root: &Path,
         model: DeepSeekModel,
@@ -216,6 +235,28 @@ impl WelcomeDashboardData {
         config_loaded: bool,
         cache_status: &'static str,
         recent_sessions: Vec<RecentSessionItem>,
+    ) -> Self {
+        Self::from_parts_with_config(
+            root,
+            model,
+            thinking,
+            WelcomeLoadStatus {
+                has_api_key,
+                config_loaded,
+                cache_status,
+            },
+            recent_sessions,
+            None,
+        )
+    }
+
+    fn from_parts_with_config(
+        root: &Path,
+        model: DeepSeekModel,
+        thinking: ThinkingMode,
+        status: WelcomeLoadStatus,
+        recent_sessions: Vec<RecentSessionItem>,
+        config: Option<&storage::Config>,
     ) -> Self {
         let recent_sessions = recent_sessions.into_iter().take(3).collect();
         let detected_language = detect_project_language(root);
@@ -293,7 +334,7 @@ impl WelcomeDashboardData {
             },
         ];
 
-        let (mcp_servers, _mcp_available) = load_mcp_status(root);
+        let (mcp_servers, _mcp_available) = load_mcp_status(config);
         let agents_md = load_agents_md(root);
 
         Self {
@@ -305,9 +346,17 @@ impl WelcomeDashboardData {
             workspace_path: root.to_path_buf(),
             model,
             thinking,
-            api_key_status: if has_api_key { "ready" } else { "missing" },
-            config_status: if config_loaded { "loaded" } else { "fallback" },
-            cache_status,
+            api_key_status: if status.has_api_key {
+                "ready"
+            } else {
+                "missing"
+            },
+            config_status: if status.config_loaded {
+                "loaded"
+            } else {
+                "fallback"
+            },
+            cache_status: status.cache_status,
             recent_sessions,
             skills,
             mcp_servers,
@@ -738,8 +787,8 @@ fn render_compact_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData
     let mut lines = Vec::new();
     lines.extend([
         Line::from(vec![Span::styled(
-            "DeepSeek Code",
-            welcome_text().add_modifier(Modifier::BOLD),
+            format!("{}  DeepSeek Code", ascii_art::WHALE_TINY),
+            welcome_badge(),
         )]),
         Line::from(vec![Span::styled(headline, welcome_muted())]),
         Line::from(""),
@@ -908,6 +957,12 @@ fn welcome_label() -> Style {
 
 fn welcome_accent() -> Style {
     welcome_bg().fg(theme::palette().accent)
+}
+
+fn welcome_badge() -> Style {
+    welcome_bg()
+        .fg(theme::palette().info)
+        .add_modifier(Modifier::BOLD)
 }
 
 fn welcome_ok() -> Style {

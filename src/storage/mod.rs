@@ -11,7 +11,8 @@ pub mod transcripts;
 pub use config::{find_project_root, Config};
 pub use events::{EventLogStore, SessionEvent, SessionEventKind};
 pub use keyring::{
-    get_api_key, get_effective_api_key, store_api_key, store_api_key_with_project_fallback,
+    config_api_key, get_api_key, get_api_key_without_keyring, get_effective_api_key,
+    get_env_api_key, get_keyring_api_key, store_api_key, store_api_key_with_project_fallback,
     ApiKeyStoreLocation,
 };
 pub use missions::{MissionEventsLoad, MissionStore};

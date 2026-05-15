@@ -177,8 +177,12 @@ enum Commands {
         scenario: PreviewScenario,
 
         /// Simulated UI theme
-        #[arg(long, value_enum, default_value_t = PreviewTheme::Light)]
+        #[arg(long, value_enum, default_value_t = PreviewTheme::Auto)]
         theme: PreviewTheme,
+
+        /// Fixed animation elapsed time in milliseconds
+        #[arg(long, default_value_t = 0)]
+        elapsed_ms: u64,
     },
 }
 
@@ -196,6 +200,7 @@ enum PreviewScenario {
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum PreviewTheme {
+    Auto,
     Light,
     Dark,
     HighContrast,
@@ -405,6 +410,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
             api,
             scenario,
             theme,
+            elapsed_ms,
         }) => {
             let root = cli.project_root.unwrap_or_else(|| {
                 crate::storage::find_project_root().unwrap_or_else(|| ".".into())
@@ -414,6 +420,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
                 PreviewScenario::Workbench => tui::app::PreviewSnapshotScenario::Workbench,
             };
             let theme = match theme {
+                PreviewTheme::Auto => tui::theme::ThemeMode::Auto,
                 PreviewTheme::Light => tui::theme::ThemeMode::Light,
                 PreviewTheme::Dark => tui::theme::ThemeMode::Dark,
                 PreviewTheme::HighContrast => tui::theme::ThemeMode::HighContrast,
@@ -425,6 +432,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
                 height,
                 scenario,
                 theme,
+                elapsed_ms,
             )?;
             println!("{snapshot}");
             Ok(())

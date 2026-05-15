@@ -168,7 +168,7 @@ fn settings_rows(props: &SettingsPanelProps<'_>) -> Vec<Line<'static>> {
                 ("Statusline shape", "Capsule".to_string()),
                 ("Cursor style", "Inline block".to_string()),
                 ("Prompt precache", "on".to_string()),
-                ("Startup logo animation", "off".to_string()),
+                ("Motion", "subtle".to_string()),
                 ("Hooks", "enabled".to_string()),
             ],
             props.selected_row,

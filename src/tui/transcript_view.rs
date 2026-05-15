@@ -433,7 +433,9 @@ fn render_markdown_table(lines: &mut Vec<Line>, table_lines: &[&str], width: u16
     let p = theme::palette();
     let border_style = transcript_style(match theme::active_theme() {
         theme::ThemeMode::Light => Color::Rgb(42, 42, 36),
-        theme::ThemeMode::Dark | theme::ThemeMode::HighContrast => p.divider,
+        theme::ThemeMode::Auto | theme::ThemeMode::Dark | theme::ThemeMode::HighContrast => {
+            p.divider
+        }
     });
 
     lines.push(table_border_line(
@@ -583,7 +585,9 @@ fn table_row_line(row: &[String], widths: &[usize], is_header: bool) -> Line<'st
     let p = theme::palette();
     let border_style = transcript_style(match theme::active_theme() {
         theme::ThemeMode::Light => Color::Rgb(42, 42, 36),
-        theme::ThemeMode::Dark | theme::ThemeMode::HighContrast => p.divider,
+        theme::ThemeMode::Auto | theme::ThemeMode::Dark | theme::ThemeMode::HighContrast => {
+            p.divider
+        }
     });
     let mut spans = vec![Span::styled("│", border_style)];
     for (cell, width) in row.iter().zip(widths.iter().copied()) {
@@ -730,14 +734,18 @@ fn should_hide_transcript_line(line: &str) -> bool {
 fn user_bar_bg() -> Color {
     match theme::active_theme() {
         theme::ThemeMode::Light => Color::Rgb(42, 42, 42),
-        theme::ThemeMode::Dark | theme::ThemeMode::HighContrast => theme::palette().surface_alt,
+        theme::ThemeMode::Auto | theme::ThemeMode::Dark | theme::ThemeMode::HighContrast => {
+            theme::palette().surface_alt
+        }
     }
 }
 
 fn user_bar_fg() -> Color {
     match theme::active_theme() {
         theme::ThemeMode::Light => Color::Rgb(250, 246, 232),
-        theme::ThemeMode::Dark | theme::ThemeMode::HighContrast => theme::palette().text,
+        theme::ThemeMode::Auto | theme::ThemeMode::Dark | theme::ThemeMode::HighContrast => {
+            theme::palette().text
+        }
     }
 }
 

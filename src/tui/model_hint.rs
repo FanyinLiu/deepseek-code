@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::deepseek::{DeepSeekModel, ThinkingMode};
-use crate::tui::{status_bar, theme};
+use crate::tui::{motion, status_bar, theme};
 
 #[must_use]
 pub fn model_hint_text(model: &DeepSeekModel, thinking: &ThinkingMode) -> String {
@@ -48,6 +48,26 @@ pub fn render_composer_hint(
     activity: Option<status_bar::StatusActivity<'_>>,
     mode: status_bar::AppMode,
 ) {
+    render_composer_hint_with_motion(
+        f,
+        area,
+        model,
+        thinking,
+        activity,
+        mode,
+        motion::MotionFrame::disabled(),
+    );
+}
+
+pub fn render_composer_hint_with_motion(
+    f: &mut Frame,
+    area: Rect,
+    model: &DeepSeekModel,
+    thinking: &ThinkingMode,
+    activity: Option<status_bar::StatusActivity<'_>>,
+    mode: status_bar::AppMode,
+    frame: motion::MotionFrame,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -56,7 +76,7 @@ pub fn render_composer_hint(
     let model_text = model_hint_text(model, thinking);
     let mut activity_text = activity
         .as_ref()
-        .map(|activity| status_bar::activity_hint_text(activity, thinking))
+        .map(|activity| status_bar::activity_hint_text_with_motion(activity, thinking, frame))
         .unwrap_or_default();
     let width = area.width as usize;
     let right_len = display_width(&model_text);

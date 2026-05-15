@@ -199,6 +199,8 @@ pub struct UiConfig {
     pub language: String,
     #[serde(default = "default_theme")]
     pub theme: String,
+    #[serde(default = "default_motion")]
+    pub motion: String,
     #[serde(default = "default_renderer")]
     pub renderer: String,
     #[serde(default)]
@@ -352,6 +354,7 @@ impl Default for UiConfig {
         Self {
             language: default_language(),
             theme: default_theme(),
+            motion: default_motion(),
             renderer: default_renderer(),
             show_reasoning_summary: true,
             show_raw_reasoning: false,
@@ -399,6 +402,9 @@ fn default_language() -> String {
 }
 fn default_theme() -> String {
     "auto".into()
+}
+fn default_motion() -> String {
+    "subtle".into()
 }
 fn default_renderer() -> String {
     "classic".into()
@@ -769,6 +775,11 @@ default = "deepseek"
             loaded.provider.default,
             crate::provider::ProviderKind::DeepSeek
         );
+    }
+
+    #[test]
+    fn ui_config_defaults_to_subtle_motion() {
+        assert_eq!(Config::default().ui.motion, "subtle");
     }
 
     #[test]

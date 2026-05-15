@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::deepseek::ThinkingMode;
-use crate::tui::theme;
+use crate::tui::{motion, theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
@@ -55,10 +55,28 @@ pub struct StatusActivity<'a> {
 }
 
 pub(crate) fn activity_hint_text(activity: &StatusActivity<'_>, thinking: &ThinkingMode) -> String {
+    activity_hint_text_with_motion(activity, thinking, motion::MotionFrame::disabled())
+}
+
+pub(crate) fn activity_hint_text_with_motion(
+    activity: &StatusActivity<'_>,
+    thinking: &ThinkingMode,
+    frame: motion::MotionFrame,
+) -> String {
     let spinner = activity_spinner(activity.elapsed_ms);
+    let spinner = if frame.level.is_enabled() {
+        frame.running_icon()
+    } else {
+        spinner
+    };
     let title = stable_activity_title(activity.title);
     let elapsed = format_elapsed(activity.elapsed_ms / 1_000);
     let state = activity_state_label(activity, thinking);
+    let dots = if frame.level.is_enabled() {
+        frame.dots()
+    } else {
+        "..."
+    };
 
     if activity.input_tokens > 0 || activity.tokens > 0 || activity.agent_tokens > 0 {
         let token_label = activity_token_label(
@@ -66,9 +84,9 @@ pub(crate) fn activity_hint_text(activity: &StatusActivity<'_>, thinking: &Think
             activity.tokens,
             activity.agent_tokens,
         );
-        format!("{spinner} {title}... ({elapsed} · {token_label} · {state})")
+        format!("{spinner} {title}{dots} ({elapsed} · {token_label} · {state})")
     } else {
-        format!("{spinner} {title}... ({elapsed} · {state})")
+        format!("{spinner} {title}{dots} ({elapsed} · {state})")
     }
 }
 
