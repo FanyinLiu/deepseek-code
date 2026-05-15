@@ -7,7 +7,9 @@ use crate::deepseek::client::DeepSeekClient;
 
 use super::background::BackgroundQueue;
 use super::orchestrator::AgentEvent;
-use super::subagent::{MergeStrategy, SubagentTask, SubagentToolArgs};
+use super::subagent::{
+    MergeStrategy, PermissionMode, SubagentConfig, SubagentTask, SubagentToolArgs, SubagentType,
+};
 use super::supervisor::Supervisor;
 use super::swarm::SwarmCoordinator;
 
@@ -103,7 +105,8 @@ impl TaskToolHandler {
         // Synchronous execution: route through the local swarm coordinator when enabled.
         let runtime_config =
             crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
-        if runtime_config.subagent.swarm_enabled {
+        if should_route_subagent_through_swarm(args, &config, runtime_config.subagent.swarm_enabled)
+        {
             let coordinator = SwarmCoordinator::new(
                 self.client.clone(),
                 self.project_root.clone(),
@@ -122,10 +125,11 @@ impl TaskToolHandler {
         {
             if batch.tasks.len() > 1 && batch.independent {
                 let results = self.supervisor.run_parallel(batch, event_tx).await;
+                let has_failed_subagent = results.iter().any(|result| !result.success);
                 let merged = self
                     .supervisor
                     .synthesize_results(&results, &MergeStrategy::Synthesize);
-                return (merged, false);
+                return (merged, has_failed_subagent);
             }
         }
 
@@ -151,5 +155,68 @@ impl TaskToolHandler {
     #[must_use]
     pub fn background_queue(&self) -> &BackgroundQueue {
         &self.background_queue
+    }
+}
+
+fn should_route_subagent_through_swarm(
+    args: &SubagentToolArgs,
+    config: &SubagentConfig,
+    swarm_enabled: bool,
+) -> bool {
+    swarm_enabled
+        && matches!(args.subagent_type, SubagentType::GeneralPurpose)
+        && matches!(config.subagent_type, SubagentType::GeneralPurpose)
+        && matches!(config.permission_mode, PermissionMode::Default)
+        && config.allowed_tools.is_empty()
+        && args.model.is_none()
+        && args.max_turns.is_none()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn subagent_args(subagent_type: SubagentType) -> SubagentToolArgs {
+        SubagentToolArgs {
+            description: "review project".to_string(),
+            prompt: "review project".to_string(),
+            subagent_type,
+            context: None,
+            focus_files: Vec::new(),
+            model: None,
+            max_turns: None,
+            background: false,
+        }
+    }
+
+    #[test]
+    fn swarm_route_keeps_explicit_agent_boundaries() {
+        let auditor_args = subagent_args(SubagentType::SecurityAuditor);
+        let auditor_config = SubagentConfig::for_type(SubagentType::SecurityAuditor);
+
+        assert!(!should_route_subagent_through_swarm(
+            &auditor_args,
+            &auditor_config,
+            true
+        ));
+
+        let general_args = subagent_args(SubagentType::GeneralPurpose);
+        let general_config = SubagentConfig::for_type(SubagentType::GeneralPurpose);
+
+        assert!(should_route_subagent_through_swarm(
+            &general_args,
+            &general_config,
+            true
+        ));
+    }
+
+    #[test]
+    fn swarm_route_preserves_explicit_overrides() {
+        let mut args = subagent_args(SubagentType::GeneralPurpose);
+        let config = SubagentConfig::for_type(SubagentType::GeneralPurpose);
+
+        args.max_turns = Some(1);
+
+        assert!(!should_route_subagent_through_swarm(&args, &config, true));
     }
 }

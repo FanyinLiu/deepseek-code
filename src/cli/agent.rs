@@ -96,10 +96,14 @@ pub async fn agent(
             json,
         } => {
             let result = run_agent(&root, &name, &task, focus, max_turns, model, !json).await?;
+            let failed = !result.success;
             if json {
                 print_json(&result)?;
             } else {
                 print_run_result(&result);
+            }
+            if failed {
+                bail!("agent run failed");
             }
         }
         AgentCommand::Create { name, template } => {

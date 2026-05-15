@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     sync::{
@@ -61,6 +61,8 @@ use super::{
     settings_panel, status_bar, statusline, subagent_cards, theme, transcript_view, welcome,
 };
 
+type ApprovalRequest = (ApprovalDisplay, tokio::sync::oneshot::Sender<bool>);
+
 /// TUI application state.
 pub struct TuiApp {
     pub input_text: String,
@@ -89,7 +91,8 @@ pub struct TuiApp {
     pub stream_buffer: String,
     pub is_streaming: bool,
     pub stream_start: Option<std::time::Instant>,
-    pub approval: Option<(ApprovalDisplay, tokio::sync::oneshot::Sender<bool>)>,
+    pub approval: Option<ApprovalRequest>,
+    approval_queue: VecDeque<ApprovalRequest>,
     pub session_auto_approve: bool,
     pub interaction_mode: InteractionMode,
     pub running: bool,
@@ -595,6 +598,7 @@ impl TuiApp {
             is_streaming: false,
             stream_start: None,
             approval: None,
+            approval_queue: VecDeque::new(),
             session_auto_approve: false,
             interaction_mode: InteractionMode::Ask,
             running: true,
@@ -842,13 +846,19 @@ impl TuiApp {
             match key.code {
                 KeyCode::Char('a') => {
                     let _ = respond.send(true);
+                    self.activate_next_approval();
                 }
                 KeyCode::Char('s') => {
                     self.session_auto_approve = true;
                     let _ = respond.send(true);
+                    while let Some((_, queued_respond)) = self.approval_queue.pop_front() {
+                        let _ = queued_respond.send(true);
+                    }
+                    self.status_message = "Session approvals enabled".into();
                 }
                 KeyCode::Char('d') | KeyCode::Esc => {
                     let _ = respond.send(false);
+                    self.activate_next_approval();
                 }
                 _ => {
                     self.approval = Some((approval, respond));
@@ -1874,9 +1884,7 @@ impl TuiApp {
         let elapsed_ms = self
             .stream_start
             .map(|started| started.elapsed().as_millis() as u64);
-        if let Some((_, respond)) = self.approval.take() {
-            let _ = respond.send(false);
-        }
+        self.deny_pending_approvals();
         if let Some(decision) = self.options_needed.take() {
             let _ = decision.respond.send(usize::MAX);
         }
@@ -1913,6 +1921,48 @@ impl TuiApp {
             self.push_activity(format!("swarm {run_id} cancel requested"));
         } else {
             self.status_message = "No active swarm to cancel".into();
+        }
+    }
+
+    fn enqueue_approval(
+        &mut self,
+        display: ApprovalDisplay,
+        respond: tokio::sync::oneshot::Sender<bool>,
+    ) {
+        if self.approval.is_none() {
+            self.approval = Some((display, respond));
+            return;
+        }
+
+        self.approval_queue.push_back((display, respond));
+        let pending = self.approval_queue.len();
+        self.push_activity(format!("approval queued: {pending} pending"));
+        self.status_message = format!("Approval queued - {pending} pending");
+    }
+
+    fn activate_next_approval(&mut self) {
+        if self.approval.is_some() {
+            return;
+        }
+
+        if let Some(next) = self.approval_queue.pop_front() {
+            self.approval = Some(next);
+            let pending = self.approval_queue.len();
+            self.push_activity(format!("next approval ready: {pending} pending"));
+            self.status_message = if pending == 0 {
+                "Next approval ready".into()
+            } else {
+                format!("Next approval ready - {pending} pending")
+            };
+        }
+    }
+
+    fn deny_pending_approvals(&mut self) {
+        if let Some((_, respond)) = self.approval.take() {
+            let _ = respond.send(false);
+        }
+        while let Some((_, respond)) = self.approval_queue.pop_front() {
+            let _ = respond.send(false);
         }
     }
 
@@ -1965,7 +2015,7 @@ impl TuiApp {
                     self.push_activity(format!("auto-approved: {tool_name}"));
                 } else {
                     self.push_activity(format!("approval requested: {tool_name}"));
-                    self.approval = Some((display, respond));
+                    self.enqueue_approval(display, respond);
                 }
             }
             AgentEvent::ToolExecuted {
@@ -2296,21 +2346,15 @@ impl TuiApp {
                     );
                     return;
                 }
-                // If another approval is already pending, auto-deny the new one to avoid
-                // deadlock (parallel subagents compete for the single approval slot).
-                if self.approval.is_some() {
-                    let _ = respond.send(false);
-                } else {
-                    self.approval = Some((
-                        subagent_tool_approval_display(
-                            &agent_id,
-                            &tool_name,
-                            &arguments,
-                            &decision.display,
-                        ),
-                        respond,
-                    ));
-                }
+                self.enqueue_approval(
+                    subagent_tool_approval_display(
+                        &agent_id,
+                        &tool_name,
+                        &arguments,
+                        &decision.display,
+                    ),
+                    respond,
+                );
             }
         }
     }
@@ -3370,14 +3414,52 @@ fn buffer_to_text(backend: &ratatui::backend::TestBackend) -> String {
         .content()
         .chunks(width)
         .map(|line| {
-            line.iter()
-                .map(ratatui::buffer::Cell::symbol)
-                .collect::<String>()
+            line_symbols_to_text(line.iter().map(ratatui::buffer::Cell::symbol))
                 .trim_end()
                 .to_string()
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn line_symbols_to_text<'a>(symbols: impl IntoIterator<Item = &'a str>) -> String {
+    let mut text = String::new();
+    let mut skip_cells = 0usize;
+    for symbol in symbols {
+        if skip_cells > 0 {
+            skip_cells -= 1;
+            continue;
+        }
+        text.push_str(symbol);
+        let width = snapshot_symbol_width(symbol);
+        skip_cells = width.saturating_sub(1);
+    }
+    text
+}
+
+fn snapshot_symbol_width(symbol: &str) -> usize {
+    symbol
+        .chars()
+        .map(|ch| if is_wide_snapshot_char(ch) { 2 } else { 1 })
+        .sum::<usize>()
+        .max(1)
+}
+
+fn is_wide_snapshot_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x1100..=0x115F
+            | 0x2329..=0x232A
+            | 0x2E80..=0xA4CF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE10..=0xFE19
+            | 0xFE30..=0xFE6F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x1F300..=0x1FAFF
+            | 0x20000..=0x3FFFD
+    )
 }
 
 struct RunningTurn {
@@ -5400,6 +5482,57 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_subagent_approvals_are_queued() {
+        let root = tempfile::tempdir().expect("workspace");
+        let outside_one = tempfile::NamedTempFile::new().expect("outside file one");
+        let outside_two = tempfile::NamedTempFile::new().expect("outside file two");
+        let mut app = test_app_with_root(root.path().to_path_buf());
+        let (tx_one, mut rx_one) = tokio::sync::oneshot::channel();
+        let (tx_two, mut rx_two) = tokio::sync::oneshot::channel();
+
+        app.apply_agent_event(AgentEvent::SubagentToolApprovalNeeded {
+            agent_id: "subagent-one".to_string(),
+            tool_name: "read_file".to_string(),
+            arguments: serde_json::json!({ "path": outside_one.path().to_string_lossy() })
+                .to_string(),
+            respond: tx_one,
+        });
+        app.apply_agent_event(AgentEvent::SubagentToolApprovalNeeded {
+            agent_id: "subagent-two".to_string(),
+            tool_name: "read_file".to_string(),
+            arguments: serde_json::json!({ "path": outside_two.path().to_string_lossy() })
+                .to_string(),
+            respond: tx_two,
+        });
+
+        assert!(app.approval.is_some());
+        assert_eq!(app.approval_queue.len(), 1);
+        assert!(matches!(
+            rx_one.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            rx_two.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        let (action_tx, _action_rx) = mpsc::unbounded_channel();
+        app.handle_key(key(KeyCode::Char('a'), KeyEventKind::Press), &action_tx);
+
+        assert!(matches!(rx_one.try_recv(), Ok(true)));
+        assert!(app.approval.is_some());
+        assert_eq!(app.approval_queue.len(), 0);
+        assert!(matches!(
+            rx_two.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        app.handle_key(key(KeyCode::Char('d'), KeyEventKind::Press), &action_tx);
+        assert!(matches!(rx_two.try_recv(), Ok(false)));
+        assert!(app.approval.is_none());
+    }
+
+    #[test]
     fn visible_context_tokens_include_live_turn_estimate_until_usage_arrives() {
         let mut app = test_app();
         app.total_tokens = 5_000;
@@ -6363,6 +6496,13 @@ mod tests {
         assert!(snapshot.contains("Trace TUI input loop"));
         assert!(!snapshot.contains("ds-code"));
         assert!(!snapshot.contains("Model:"));
+    }
+
+    #[test]
+    fn preview_snapshot_text_skips_wide_char_continuation_cells() {
+        let symbols = ["4", " ", "项", " ", "任", " ", "务", " "];
+
+        assert_eq!(line_symbols_to_text(symbols), "4 项任务");
     }
 
     #[test]

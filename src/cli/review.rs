@@ -113,6 +113,10 @@ pub async fn review(
         println!("\n{report}");
     }
 
+    if has_failed_reviewers(&all_results) {
+        anyhow::bail!("one or more review agents failed");
+    }
+
     Ok(())
 }
 
@@ -238,4 +242,39 @@ fn synthesize_report(results: &[crate::agent::subagent::SubagentResult], root: &
     }
 
     report
+}
+
+fn has_failed_reviewers(results: &[crate::agent::subagent::SubagentResult]) -> bool {
+    results.iter().any(|result| !result.success)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::subagent::SubagentResult;
+
+    fn review_result(success: bool) -> SubagentResult {
+        SubagentResult {
+            success,
+            summary: "summary".to_string(),
+            output: "output".to_string(),
+            tool_calls_used: Vec::new(),
+            files_read: Vec::new(),
+            files_written: Vec::new(),
+            duration_ms: 1,
+            token_usage: 0,
+            error: (!success).then(|| "failed".to_string()),
+            started_at: chrono::Utc::now(),
+            completed_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn failed_reviewers_are_exit_failures() {
+        assert!(!has_failed_reviewers(&[review_result(true)]));
+        assert!(has_failed_reviewers(&[
+            review_result(true),
+            review_result(false)
+        ]));
+    }
 }

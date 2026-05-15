@@ -202,24 +202,6 @@ impl SubagentExecutor {
                         // Collect tool call info
                         for tc in &stream_result.tool_calls {
                             tool_calls_used.push(tc.function.name.clone());
-                            if tc.function.name == "read_file" {
-                                if let Ok(args) = serde_json::from_str::<serde_json::Value>(
-                                    &tc.function.arguments,
-                                ) {
-                                    if let Some(path) = args["path"].as_str() {
-                                        files_read.push(path.to_string());
-                                    }
-                                }
-                            }
-                            if tc.function.name == "write_file" || tc.function.name == "edit_file" {
-                                if let Ok(args) = serde_json::from_str::<serde_json::Value>(
-                                    &tc.function.arguments,
-                                ) {
-                                    if let Some(path) = args["path"].as_str() {
-                                        files_written.push(path.to_string());
-                                    }
-                                }
-                            }
                         }
 
                         // Execute tools
@@ -235,6 +217,15 @@ impl SubagentExecutor {
                         // Check for errors
                         if results.iter().any(|(_, r)| r.is_error) {
                             success = false;
+                        }
+                        for (tc, record) in &results {
+                            if !record.is_error {
+                                collect_successful_file_access(
+                                    tc,
+                                    &mut files_read,
+                                    &mut files_written,
+                                );
+                            }
                         }
 
                         // Add assistant message
@@ -590,7 +581,7 @@ impl SubagentExecutor {
                 exit_code: if record.is_error { Some(1) } else { Some(0) },
                 duration_ms: 0,
                 risk_level: crate::agent::utils::risk_level_for_tool(&tc.function.name).to_string(),
-                approved: true,
+                approved: subagent_tool_record_was_approved(record),
                 at: Utc::now(),
             };
             session.tool_call_history.push(tool_record);
@@ -612,6 +603,37 @@ fn sanitize_subagent_task(task: &SubagentTask) -> SubagentTask {
         .as_ref()
         .map(|context| defense.sanitize_input(context).safe);
     sanitized
+}
+
+fn collect_successful_file_access(
+    tool_call: &ToolCall,
+    files_read: &mut Vec<String>,
+    files_written: &mut Vec<String>,
+) {
+    let Ok(args) = serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments) else {
+        return;
+    };
+    let Some(path) = args["path"].as_str() else {
+        return;
+    };
+
+    match tool_call.function.name.as_str() {
+        "read_file" => files_read.push(path.to_string()),
+        "write_file" | "edit_file" => files_written.push(path.to_string()),
+        _ => {}
+    }
+}
+
+fn subagent_tool_record_was_approved(record: &ToolResultRecord) -> bool {
+    if !record.is_error {
+        return true;
+    }
+
+    let lower = record.result.to_ascii_lowercase();
+    !(lower.contains("not allowed")
+        || lower.contains("blocked")
+        || lower.contains("denied")
+        || lower.contains("policy"))
 }
 
 fn structured_subagent_limit_message(task: &SubagentTask, _max_turns: u32) -> String {
@@ -793,8 +815,9 @@ fn dedupe_preserving_order(values: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        dedupe_preserving_order, emit_subagent_chunk_delta, structured_subagent_error_message,
-        structured_subagent_limit_message,
+        collect_successful_file_access, dedupe_preserving_order, emit_subagent_chunk_delta,
+        structured_subagent_error_message, structured_subagent_limit_message,
+        subagent_tool_record_was_approved,
     };
     use crate::agent::orchestrator::AgentEvent;
     use crate::agent::subagent::types::SubagentTask;
@@ -868,5 +891,43 @@ mod tests {
 
         assert!(message.contains("工具调用参数解析失败"));
         assert!(!message.contains("EOF while parsing"));
+    }
+
+    #[test]
+    fn file_access_stats_are_collected_from_successful_tool_records_only() {
+        let call = crate::deepseek::ToolCall {
+            id: "call-1".to_string(),
+            call_type: "function".to_string(),
+            function: crate::deepseek::ToolCallFunction {
+                name: "write_file".to_string(),
+                arguments: serde_json::json!({ "path": "src/lib.rs" }).to_string(),
+            },
+        };
+        let mut files_read = Vec::new();
+        let mut files_written = Vec::new();
+
+        collect_successful_file_access(&call, &mut files_read, &mut files_written);
+
+        assert!(files_read.is_empty());
+        assert_eq!(files_written, vec!["src/lib.rs"]);
+    }
+
+    #[test]
+    fn denied_subagent_tool_records_are_not_marked_approved() {
+        let blocked = crate::deepseek::ToolResultRecord {
+            tool_call_id: "call-1".to_string(),
+            name: "write_file".to_string(),
+            result: "Tool 'write_file' is blocked: subagent is in read-only mode.".to_string(),
+            is_error: true,
+        };
+        let runtime_error = crate::deepseek::ToolResultRecord {
+            tool_call_id: "call-2".to_string(),
+            name: "run_command".to_string(),
+            result: "Command exited with status 1".to_string(),
+            is_error: true,
+        };
+
+        assert!(!subagent_tool_record_was_approved(&blocked));
+        assert!(subagent_tool_record_was_approved(&runtime_error));
     }
 }

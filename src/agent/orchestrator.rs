@@ -1760,6 +1760,7 @@ impl Orchestrator {
                 {
                     Ok(stream_result) => {
                         if stream_result.tool_calls.is_empty() {
+                            plan_execution_failed = true;
                             let msg = ReasoningManager::new_assistant_message(
                                 &stream_result.content,
                                 if stream_result.reasoning_content.is_empty() {
@@ -1773,6 +1774,14 @@ impl Orchestrator {
                                 false,
                             );
                             self.session.messages.push(msg);
+                            self.emit_event(
+                                event_tx,
+                                Some(turn_id),
+                                AgentEvent::Error(
+                                    "Plan execution produced no tool calls; no steps were executed"
+                                        .into(),
+                                ),
+                            );
                             if let Some(ref usage) = stream_result.usage {
                                 self.session.metadata.total_tokens += u64::from(usage.total_tokens);
                                 self.session.metadata.total_cost_estimate += usage
@@ -2350,10 +2359,9 @@ impl Orchestrator {
                 }
             }
             Err(e) => {
-                send_event(
-                    event_tx,
-                    AgentEvent::Error(format!("Tool loop failed: {e}")),
-                );
+                let error = format!("Tool loop failed: {e}");
+                send_event(event_tx, AgentEvent::Error(error.clone()));
+                return Err(anyhow::anyhow!(error));
             }
         }
         Ok(())
@@ -2992,6 +3000,18 @@ mod tests {
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].index, 1);
         assert_eq!(updates[0].status, PlanStepStatus::Failed);
+    }
+
+    #[test]
+    fn plan_state_finishes_remaining_steps_as_failed_when_execution_did_not_run() {
+        let mut state = sample_plan_state();
+
+        let updates = state.finish_remaining(false);
+
+        assert_eq!(updates.len(), 2);
+        assert!(updates
+            .iter()
+            .all(|update| update.status == PlanStepStatus::Failed));
     }
 
     #[test]
