@@ -86,8 +86,6 @@ pub struct CacheConfig {
     #[serde(default)]
     pub stable_prefix_enabled: bool,
     #[serde(default)]
-    pub show_cache_hud: bool,
-    #[serde(default)]
     pub warn_on_low_cache_hit: bool,
 }
 
@@ -122,7 +120,7 @@ struct PartialConfig {
     cache: Option<CacheConfig>,
     policy: Option<PartialPolicyConfig>,
     paths: Option<PathsConfig>,
-    ui: Option<UiConfig>,
+    ui: Option<PartialUiConfig>,
     telemetry: Option<TelemetryConfig>,
     provider: Option<ProviderConfig>,
     router: Option<RouterConfig>,
@@ -143,6 +141,17 @@ struct PartialPolicyConfig {
     normalize_unicode_commands: Option<bool>,
     auto_mode: Option<bool>,
     autonomy_level: Option<AutonomyLevel>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialUiConfig {
+    language: Option<String>,
+    theme: Option<String>,
+    motion: Option<String>,
+    renderer: Option<String>,
+    show_reasoning_summary: Option<bool>,
+    show_raw_reasoning: Option<bool>,
+    show_cache_hud: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -319,7 +328,6 @@ impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             stable_prefix_enabled: true,
-            show_cache_hud: true,
             warn_on_low_cache_hit: true,
         }
     }
@@ -513,10 +521,7 @@ impl Config {
             Some(next) => paths.merge_paths(next),
             None => paths,
         };
-        let ui = match patch.ui {
-            Some(next) => ui.merge_ui(next),
-            None => ui,
-        };
+        let ui = ui.merge_ui(patch.ui);
         let telemetry = match patch.telemetry {
             Some(next) => telemetry.merge_telemetry(next),
             None => telemetry,
@@ -611,8 +616,21 @@ impl PathsConfig {
     }
 }
 impl UiConfig {
-    fn merge_ui(self, other: Self) -> Self {
-        other
+    fn merge_ui(self, patch: Option<PartialUiConfig>) -> Self {
+        let Some(patch) = patch else {
+            return self;
+        };
+        Self {
+            language: patch.language.unwrap_or(self.language),
+            theme: patch.theme.unwrap_or(self.theme),
+            motion: patch.motion.unwrap_or(self.motion),
+            renderer: patch.renderer.unwrap_or(self.renderer),
+            show_reasoning_summary: patch
+                .show_reasoning_summary
+                .unwrap_or(self.show_reasoning_summary),
+            show_raw_reasoning: patch.show_raw_reasoning.unwrap_or(self.show_raw_reasoning),
+            show_cache_hud: patch.show_cache_hud.unwrap_or(self.show_cache_hud),
+        }
     }
 }
 impl TelemetryConfig {
@@ -780,6 +798,46 @@ default = "deepseek"
     #[test]
     fn ui_config_defaults_to_subtle_motion() {
         assert_eq!(Config::default().ui.motion, "subtle");
+    }
+
+    #[test]
+    fn example_config_parses_and_covers_settings_surface() {
+        let config: Config =
+            toml::from_str(include_str!("../../.deepseek-code/config.toml.example"))
+                .expect("example config parses");
+
+        assert_eq!(config.provider.default.as_str(), "deepseek");
+        assert_eq!(config.ui.theme, Config::default().ui.theme);
+        assert_eq!(config.ui.motion, Config::default().ui.motion);
+        assert_eq!(config.ui.renderer, Config::default().ui.renderer);
+        assert_eq!(config.policy.autonomy_level, AutonomyLevel::Off);
+        assert_eq!(
+            config.subagent.max_parallel,
+            Config::default().subagent.max_parallel
+        );
+    }
+
+    #[test]
+    fn ui_layer_only_overrides_declared_fields() {
+        let base = UiConfig {
+            theme: "dark".to_string(),
+            motion: "off".to_string(),
+            ..UiConfig::default()
+        };
+        let patch = parse_config_patch(
+            r#"
+[ui]
+renderer = "fullscreen"
+"#,
+        )
+        .expect("parse patch")
+        .ui;
+
+        let merged = base.merge_ui(patch);
+
+        assert_eq!(merged.theme, "dark");
+        assert_eq!(merged.motion, "off");
+        assert_eq!(merged.renderer, "fullscreen");
     }
 
     #[test]

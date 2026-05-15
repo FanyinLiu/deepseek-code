@@ -120,6 +120,7 @@ pub struct TuiApp {
     pub show_file_tree: bool,
     pub file_tree_focused: bool,
     pub mcp_status: String,
+    pub config: storage::Config,
     pub theme_mode: theme::ThemeMode,
     pub motion_level: motion::MotionLevel,
     ui_started_at: std::time::Instant,
@@ -610,12 +611,13 @@ impl TuiApp {
             show_file_tree: false,
             file_tree_focused: false,
             mcp_status: String::new(),
+            config: startup.config.clone(),
             theme_mode,
             motion_level,
             ui_started_at: std::time::Instant::now(),
             renderer_mode,
             settings_open: false,
-            settings_tab: settings_panel::SettingsTab::SessionDefaults,
+            settings_tab: settings_panel::SettingsTab::Model,
             settings_selected: 0,
             ctrl_c_exit_deadline: None,
         }
@@ -668,6 +670,7 @@ impl TuiApp {
 
     pub fn set_theme_mode(&mut self, mode: theme::ThemeMode) {
         self.theme_mode = mode;
+        self.config.ui.theme = mode.label().to_string();
         theme::set_active_theme(mode);
         self.status_message = format!("Theme set to {}", mode.label());
         self.push_activity(format!("theme: {}", mode.label()));
@@ -692,6 +695,7 @@ impl TuiApp {
 
     pub fn set_renderer_mode(&mut self, mode: RendererMode) {
         self.renderer_mode = mode;
+        self.config.ui.renderer = mode.label().to_string();
         self.status_message = format!(
             "TUI renderer set to {}; restart ds to apply terminal mode",
             mode.label()
@@ -2419,8 +2423,10 @@ impl TuiApp {
                 settings_panel::SettingsPanelProps {
                     selected_tab: self.settings_tab,
                     selected_row: self.settings_selected,
-                    model: &self.model,
-                    thinking: &self.thinking_mode,
+                    active_model: &self.model,
+                    active_thinking: &self.thinking_mode,
+                    renderer: self.renderer_mode,
+                    config: &self.config,
                     theme_label: self.theme_mode.label(),
                 },
             );
@@ -2627,8 +2633,10 @@ impl TuiApp {
                 settings_panel::SettingsPanelProps {
                     selected_tab: self.settings_tab,
                     selected_row: self.settings_selected,
-                    model: &self.model,
-                    thinking: &self.thinking_mode,
+                    active_model: &self.model,
+                    active_thinking: &self.thinking_mode,
+                    renderer: self.renderer_mode,
+                    config: &self.config,
                     theme_label: self.theme_mode.label(),
                 },
             );

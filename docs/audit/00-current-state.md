@@ -522,46 +522,39 @@ Agent icon 表：`code-explorer ◈`、`code-reviewer ◇`、`planner ▷`、`te
 - 没有 git status 染色（M/A/D 标记）
 - 当前在 layout 里**没有实际启用**——`sidebar_layout()` 标记 dead_code，文件树渲染函数存在但主 app.rs 是否调用待确认
 
-### 2.17 设置面板 `src/tui/settings_panel.rs`（84 行）
-
-**纯占位**：`format_inline(SettingsSnapshot)` 返回**全部硬编码值**的纯文本块：
+### 2.17 设置面板 `src/tui/settings_panel.rs`
 
 ```
 Settings (read-only)
 
-Session defaults
-  Default model         <model>
-  Thinking mode         <thinking>
-  Interaction mode      auto
-  Autonomy level        high
-  Compaction limit      1M
+Model
+  Provider              deepseek
+  Active model          <session model>
+  Default model         <config model.default>
+  Heavy model           <config model.heavy>
 
-Task defaults
-  Orchestrator model    <model> / auto
-  Worker model          <model> / auto
-  ...
+Safety
+  Autonomy level        <config policy.autonomy_level>
+  Safe reads            <config policy.auto_approve_safe_read>
+  Auto mode             <config policy.auto_mode>
+  Write approval        <config policy.require_approval_for_write>
+  Command approval      <config policy.require_approval_for_command>
 
-Preferences
-  Diff display mode     GitHub
-  Theme                 <theme>
-  Tool result display   Compact
-  Statusline mode       Powerline
-  Statusline icon mode  Text
-  Statusline shape      Capsule
-  Cursor style          Inline block
-  Prompt precache       on
-  Startup logo animation  off
-  Hooks                 enabled
+Interface
+  Language              <config ui.language>
+  Theme                 <current theme>
+  Motion                <config ui.motion>
+  Renderer              <current renderer>
 
-Sound
-  Completion sound      FX-OK01
-  Waiting input sound   FX-ACK01
-  Play sound            always
-
-Editing settings is not yet supported.
+Agents
+  Router                <config router.enabled>
+  Subagents             <config subagent.enabled>
+  Swarm                 <config subagent.swarm_enabled>
+  MCP                   <config mcp.enabled>
+  Hooks                 <hook count>
 ```
 
-**这是一个"未完成"的设计意图证据**——里面提到 Powerline / Capsule statusline / 启动 logo 动画 / 音效都是已规划但未实现的功能。**Settings UI 实际还不存在**。
+设置面板仍是只读快照，但现在只展示真实配置或当前会话状态；未实现的音效、statusline 形状、prompt precache 等占位项不再进入 UI。
 
 ### 2.18 主事件循环 `src/tui/app.rs`（76013 tokens / 估计 2500+ 行，未分块读完）
 

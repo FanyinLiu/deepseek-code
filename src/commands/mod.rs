@@ -674,8 +674,12 @@ fn cmd_theme(args: &str, ctx: &mut CommandContext) -> CommandResult {
             ));
         }
     };
+    write_project_ui_string_override(ctx.project_root, "theme", mode.label())?;
     ctx.app.set_theme_mode(mode);
-    Ok(Some(format!("Theme set to {}", mode.label())))
+    Ok(Some(format!(
+        "Theme set to {}. Saved to local config.",
+        mode.label()
+    )))
 }
 
 fn cmd_tui(args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -799,7 +803,7 @@ fn cmd_model(args: &str, ctx: &mut CommandContext) -> CommandResult {
         ctx.app.model.clone(),
         ctx.app.thinking_mode.clone(),
     );
-    Ok(Some(format!("Model set to {:?}", model)))
+    Ok(Some(format!("Session model set to {:?}", model)))
 }
 
 fn cmd_config(_args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -813,8 +817,13 @@ fn cmd_config(_args: &str, ctx: &mut CommandContext) -> CommandResult {
         "".to_string(),
         format!("project: {}", project_config.display()),
         format!("user: {}", user_config.display()),
+        format!("provider: {}", config.provider.default.as_str()),
         format!("default model: {:?}", config.model.default),
         format!("heavy model: {:?}", config.model.heavy),
+        format!("theme: {}", config.ui.theme),
+        format!("motion: {}", config.ui.motion),
+        format!("renderer: {}", config.ui.renderer),
+        format!("autonomy: {}", config.policy.autonomy_level.as_str()),
         format!("MCP enabled: {}", on_off(config.mcp.enabled)),
         format!("subagents enabled: {}", on_off(config.subagent.enabled)),
     ];
@@ -1825,6 +1834,34 @@ mod tests {
     }
 
     #[test]
+    fn model_command_switches_session_model() {
+        let reg = CommandRegistry::new();
+        let mut app = crate::tui::app::TuiApp::new(
+            crate::deepseek::DeepSeekModel::Flash,
+            crate::deepseek::ThinkingMode::Auto,
+            None,
+            std::path::PathBuf::from("."),
+        );
+        let mut yolo = false;
+        let mut ctx = CommandContext {
+            app: &mut app,
+            project_root: std::path::Path::new("."),
+            yolo_mode: &mut yolo,
+            mcp_status: "MCP: not initialized",
+            background_tasks: &[],
+        };
+
+        let output = reg
+            .execute("/model pro", &mut ctx)
+            .expect("command should be handled")
+            .expect("model should run")
+            .expect("model should show output");
+
+        assert!(output.contains("Session model set"));
+        assert_eq!(ctx.app.model, crate::deepseek::DeepSeekModel::Pro);
+    }
+
+    #[test]
     fn mode_command_switches_interaction_mode() {
         let reg = CommandRegistry::new();
         let mut app = crate::tui::app::TuiApp::new(
@@ -2001,17 +2038,18 @@ mod tests {
 
     #[test]
     fn theme_command_switches_current_app_theme() {
+        let temp = tempfile::tempdir().expect("tempdir");
         let reg = CommandRegistry::new();
         let mut app = crate::tui::app::TuiApp::new(
             crate::deepseek::DeepSeekModel::Flash,
             crate::deepseek::ThinkingMode::Auto,
             None,
-            std::path::PathBuf::from("."),
+            temp.path().to_path_buf(),
         );
         let mut yolo = false;
         let mut ctx = CommandContext {
             app: &mut app,
-            project_root: std::path::Path::new("."),
+            project_root: temp.path(),
             yolo_mode: &mut yolo,
             mcp_status: "MCP: not initialized",
             background_tasks: &[],
@@ -2025,21 +2063,25 @@ mod tests {
 
         assert!(output.contains("dark"));
         assert_eq!(ctx.app.theme_mode, crate::tui::theme::ThemeMode::Dark);
+        let local = std::fs::read_to_string(temp.path().join(".deepseek-code/local.toml"))
+            .expect("local config");
+        assert!(local.contains("theme = \"dark\""));
     }
 
     #[test]
     fn theme_command_accepts_auto() {
+        let temp = tempfile::tempdir().expect("tempdir");
         let reg = CommandRegistry::new();
         let mut app = crate::tui::app::TuiApp::new(
             crate::deepseek::DeepSeekModel::Flash,
             crate::deepseek::ThinkingMode::Auto,
             None,
-            std::path::PathBuf::from("."),
+            temp.path().to_path_buf(),
         );
         let mut yolo = false;
         let mut ctx = CommandContext {
             app: &mut app,
-            project_root: std::path::Path::new("."),
+            project_root: temp.path(),
             yolo_mode: &mut yolo,
             mcp_status: "MCP: not initialized",
             background_tasks: &[],
@@ -2053,6 +2095,9 @@ mod tests {
 
         assert!(output.contains("auto"));
         assert_eq!(ctx.app.theme_mode, crate::tui::theme::ThemeMode::Auto);
+        let local = std::fs::read_to_string(temp.path().join(".deepseek-code/local.toml"))
+            .expect("local config");
+        assert!(local.contains("theme = \"auto\""));
     }
 
     #[test]

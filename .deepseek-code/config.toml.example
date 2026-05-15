@@ -24,11 +24,11 @@ include_sessions = true
 
 [cache]
 stable_prefix_enabled = true
-show_cache_hud = true
 warn_on_low_cache_hit = true
 
 [policy]
 auto_approve_safe_read = true
+auto_mode = false
 network_access = false
 command_timeout_seconds = 120
 require_approval_for_write = true
@@ -50,11 +50,41 @@ protected = [
 
 [ui]
 language = "zh-CN"
-theme = "dark"
+theme = "auto"                  # auto | light | dark | high-contrast
+motion = "subtle"               # subtle | off
 renderer = "classic"            # classic | fullscreen
 show_reasoning_summary = true
 show_raw_reasoning = false
 show_cache_hud = true
+
+[provider]
+default = "deepseek"
+
+[router]
+enabled = true
+conservative = true
+use_model_classifier = true
+simple_threshold = 40
+confidence_threshold = 0.75
+shadow_mode = false
+
+[subagent]
+enabled = true
+swarm_enabled = true
+max_parallel = 4
+auto_decompose = true
+write_requires_approval = false
+command_requires_approval = true
+default_model = "deepseek-v4-flash"
+allow_custom_agents = false
+
+[mcp]
+enabled = false
+
+[hooks]
+pre_tool = []
+post_tool = []
+stop = []
 
 [telemetry]
 enabled = false
