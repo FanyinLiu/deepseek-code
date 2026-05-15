@@ -136,8 +136,10 @@ mod tests {
     #[test]
     fn model_selection_uses_config_default_without_override() {
         let provider = ProviderConfig::default();
-        let mut model_config = ModelConfig::default();
-        model_config.default = DeepSeekModel::Pro;
+        let model_config = ModelConfig {
+            default: DeepSeekModel::Pro,
+            ..ModelConfig::default()
+        };
 
         let selection =
             ModelSelection::resolve(&provider, &model_config, None).expect("selection resolves");
@@ -148,8 +150,10 @@ mod tests {
     #[test]
     fn model_selection_override_wins_over_config() {
         let provider = ProviderConfig::default();
-        let mut model_config = ModelConfig::default();
-        model_config.default = DeepSeekModel::Pro;
+        let model_config = ModelConfig {
+            default: DeepSeekModel::Pro,
+            ..ModelConfig::default()
+        };
 
         let selection =
             ModelSelection::resolve(&provider, &model_config, Some("flash")).expect("override");
