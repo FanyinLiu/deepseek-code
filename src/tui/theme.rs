@@ -9,15 +9,15 @@ use std::sync::atomic::{AtomicU8, Ordering};
 // ═══════════════════════════════════════════════════════════
 //  Base Layer (Backgrounds)
 // ═══════════════════════════════════════════════════════════
-pub const BG_DEEP: Color = Color::Rgb(14, 14, 18); //  deepest background
-pub const BG_BASE: Color = Color::Rgb(20, 20, 26); //  base canvas
-pub const BG_CARD: Color = Color::Rgb(28, 28, 36); //  card background
-pub const BG_CARD_HOVER: Color = Color::Rgb(34, 34, 44);
+pub const BG_DEEP: Color = Color::Reset; // terminal-native background
+pub const BG_BASE: Color = Color::Reset; // terminal-native canvas
+pub const BG_CARD: Color = Color::Reset; // terminal-native panel surface
+pub const BG_CARD_HOVER: Color = Color::Reset;
 pub const BG_CARD_ALT: Color = BG_CARD_HOVER; // deprecated alias //  card hover/selected
-pub const BG_INPUT: Color = Color::Rgb(24, 24, 32); //  input area
+pub const BG_INPUT: Color = Color::Reset; // terminal-native input area
 
 // Droid-like light canvas used by the welcome surface and composer.
-pub const DROID_CANVAS_BG: Color = Color::Rgb(235, 226, 196);
+pub const DROID_CANVAS_BG: Color = Color::Reset;
 pub const DROID_INK: Color = Color::Rgb(17, 17, 14);
 pub const DROID_MUTED: Color = Color::Rgb(78, 78, 72);
 pub const DROID_ACCENT: Color = Color::Rgb(224, 82, 0);
@@ -91,39 +91,39 @@ pub struct ThemePalette {
 }
 
 pub const LIGHT_PALETTE: ThemePalette = ThemePalette {
-    canvas: DROID_CANVAS_BG,
-    surface: DROID_CANVAS_BG,
-    surface_alt: Color::Rgb(228, 219, 190),
-    input: DROID_CANVAS_BG,
-    text: DROID_INK,
-    secondary: Color::Rgb(54, 54, 48),
-    dim: DROID_MUTED,
-    muted: Color::Rgb(116, 104, 84),
-    divider: DROID_ACCENT,
-    accent: DROID_ACCENT,
-    success: Color::Rgb(18, 140, 52),
-    warning: Color::Rgb(190, 120, 0),
-    danger: Color::Rgb(210, 55, 35),
-    info: Color::Rgb(42, 102, 160),
-    inverse_text: Color::Rgb(250, 246, 232),
+    canvas: Color::Reset,
+    surface: Color::Reset,
+    surface_alt: Color::Reset,
+    input: Color::Reset,
+    text: Color::Reset,
+    secondary: Color::Rgb(22, 50, 82),
+    dim: Color::Rgb(54, 71, 96),
+    muted: Color::Rgb(88, 92, 98),
+    divider: Color::Rgb(0, 44, 88),
+    accent: Color::Rgb(0, 82, 182),
+    success: Color::Rgb(0, 110, 42),
+    warning: Color::Rgb(148, 88, 0),
+    danger: Color::Rgb(188, 36, 44),
+    info: Color::Rgb(0, 82, 182),
+    inverse_text: Color::Reset,
 };
 
 pub const DARK_PALETTE: ThemePalette = ThemePalette {
-    canvas: BG_DEEP,
-    surface: BG_CARD,
-    surface_alt: BG_CARD_HOVER,
-    input: BG_INPUT,
-    text: FG_PRIMARY,
-    secondary: FG_SECONDARY,
-    dim: FG_DIM,
-    muted: FG_MUTED,
-    divider: DIVIDER,
-    accent: ACCENT_AMBER,
-    success: ACCENT_GREEN,
-    warning: ACCENT_YELLOW,
-    danger: ACCENT_RED,
-    info: ACCENT_BLUE,
-    inverse_text: BG_DEEP,
+    canvas: Color::Reset,
+    surface: Color::Reset,
+    surface_alt: Color::Reset,
+    input: Color::Reset,
+    text: Color::Reset,
+    secondary: Color::Reset,
+    dim: Color::Rgb(64, 94, 132),
+    muted: Color::Rgb(80, 86, 96),
+    divider: Color::Blue,
+    accent: Color::Blue,
+    success: Color::Green,
+    warning: Color::Magenta,
+    danger: Color::Red,
+    info: Color::Blue,
+    inverse_text: Color::Reset,
 };
 
 pub const HIGH_CONTRAST_PALETTE: ThemePalette = ThemePalette {
@@ -442,9 +442,8 @@ mod tests {
 
     #[test]
     fn palettes_have_distinct_readable_surfaces() {
-        assert_ne!(LIGHT_PALETTE.canvas, DARK_PALETTE.canvas);
-        assert_ne!(LIGHT_PALETTE.text, LIGHT_PALETTE.canvas);
-        assert_ne!(DARK_PALETTE.text, DARK_PALETTE.canvas);
+        assert_eq!(LIGHT_PALETTE.canvas, Color::Reset);
+        assert_eq!(DARK_PALETTE.canvas, Color::Reset);
         assert_ne!(HIGH_CONTRAST_PALETTE.text, HIGH_CONTRAST_PALETTE.canvas);
         assert_ne!(LIGHT_PALETTE.accent, LIGHT_PALETTE.canvas);
         assert_ne!(DARK_PALETTE.accent, DARK_PALETTE.canvas);

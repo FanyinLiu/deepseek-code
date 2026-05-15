@@ -7,7 +7,9 @@ use ratatui::{
 };
 
 use crate::deepseek::{MessageVisibility, ProtocolMessage, Role};
-use crate::tui::{diff_viewer, plan_tracker, subagent_cards, syntax_highlight, theme, view_blocks};
+use crate::tui::{
+    diff_viewer, motion, plan_tracker, subagent_cards, syntax_highlight, theme, view_blocks,
+};
 
 /// Single continuous terminal transcript.
 /// No role headers, no extra blank lines, content speaks for itself.
@@ -33,6 +35,7 @@ pub struct TranscriptProps<'a> {
 pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let palette = theme::palette();
+    let frame = motion::MotionFrame::new(motion::MotionLevel::Subtle, props.global_elapsed_ms);
 
     // ── Messages ──
     for msg in props.messages {
@@ -61,13 +64,20 @@ pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) 
         if !lines.is_empty() && !props.stream_buffer.starts_with('\n') {
             lines.push(Line::from(""));
         }
-        render_assistant_content(
-            &mut lines,
-            props.stream_buffer,
-            area.width,
-            "",
-            palette.text,
-        );
+        if props.stream_buffer.trim().is_empty() && props.is_streaming {
+            lines.push(streaming_status_line(frame));
+        } else {
+            render_assistant_content(
+                &mut lines,
+                props.stream_buffer,
+                area.width,
+                "",
+                palette.text,
+            );
+            if props.is_streaming {
+                lines.push(streaming_status_line(frame));
+            }
+        }
     }
 
     // ── Reasoning (hidden by default, shown if toggled) ──
@@ -648,45 +658,52 @@ fn render_user_text(lines: &mut Vec<Line>, content: &str, width: u16) {
 }
 
 fn user_text_lines(content: &str, width: u16) -> Vec<Line<'static>> {
+    let p = theme::palette();
     let mut lines = Vec::new();
     for line in content.lines() {
-        let mut text = format!("▸ {}", line.trim_end());
-        let max_width = width.saturating_sub(1) as usize;
-        text = truncate_display_width(&text, max_width);
-        let fill = max_width.saturating_sub(display_width(&text));
-        if fill > 0 {
-            text.push_str(&" ".repeat(fill));
-        }
-        lines.push(Line::from(vec![Span::styled(
-            text,
-            Style::default()
-                .fg(user_bar_fg())
-                .bg(user_bar_bg())
-                .add_modifier(Modifier::BOLD),
-        )]));
+        let max_width = width.saturating_sub(3) as usize;
+        let text = truncate_display_width(line.trim_end(), max_width);
+        lines.push(Line::from(vec![
+            Span::styled("> ", Style::default().fg(p.accent).bg(p.canvas)),
+            Span::styled(text, Style::default().fg(p.text).bg(p.canvas)),
+        ]));
     }
     lines
+}
+
+fn streaming_status_line(frame: motion::MotionFrame) -> Line<'static> {
+    let p = theme::palette();
+    Line::from(vec![
+        Span::styled(
+            format!("{} ", frame.running_icon()),
+            Style::default().fg(p.accent).bg(p.canvas),
+        ),
+        Span::styled(
+            format!("Thinking{}", frame.dots()),
+            Style::default().fg(p.dim).bg(p.canvas),
+        ),
+    ])
 }
 
 fn render_connected_tool_lines(view: &view_blocks::ToolCallView, width: u16) -> Vec<Line<'static>> {
     if view.status == view_blocks::ViewStatus::Running {
         if view.name == "run_command" {
-            return connected_tool_lines("Running 1 shell command...", &view.detail, width);
+            return connected_tool_lines("Running 1 shell command.", &view.detail, width);
         }
         if view.name == "read_file" {
-            return connected_tool_lines("Reading 1 file...", &view.detail, width);
+            return connected_tool_lines("Reading 1 file.", &view.detail, width);
         }
         if view.name == "list_dir" {
-            return connected_tool_lines("Listing 1 directory...", &view.detail, width);
+            return connected_tool_lines("Listing 1 directory.", &view.detail, width);
         }
         if matches!(
             view.name.as_str(),
             "search_files" | "search_code" | "semantic_search"
         ) {
-            return connected_tool_lines("Searching workspace...", &view.detail, width);
+            return connected_tool_lines("Searching workspace.", &view.detail, width);
         }
         if matches!(view.name.as_str(), "fetch_url" | "web_search") {
-            return connected_tool_lines("Fetching...", &view.detail, width);
+            return connected_tool_lines("Fetching.", &view.detail, width);
         }
     }
 
@@ -698,7 +715,7 @@ fn connected_tool_lines(title: &str, detail: &str, width: u16) -> Vec<Line<'stat
     let detail = truncate(detail, width.saturating_sub(8) as usize);
     vec![
         Line::from(vec![
-            Span::styled("● ", Style::default().fg(p.muted).bg(p.canvas)),
+            Span::styled("* ", Style::default().fg(p.muted).bg(p.canvas)),
             Span::styled(
                 title.to_string(),
                 Style::default()
@@ -729,24 +746,6 @@ fn should_hide_transcript_line(line: &str) -> bool {
         || lower.starts_with("intent ")
         || lower.starts_with("detail --- ")
         || lower.starts_with("detail todo.md")
-}
-
-fn user_bar_bg() -> Color {
-    match theme::active_theme() {
-        theme::ThemeMode::Light => Color::Rgb(42, 42, 42),
-        theme::ThemeMode::Auto | theme::ThemeMode::Dark | theme::ThemeMode::HighContrast => {
-            theme::palette().surface_alt
-        }
-    }
-}
-
-fn user_bar_fg() -> Color {
-    match theme::active_theme() {
-        theme::ThemeMode::Light => Color::Rgb(250, 246, 232),
-        theme::ThemeMode::Auto | theme::ThemeMode::Dark | theme::ThemeMode::HighContrast => {
-            theme::palette().text
-        }
-    }
 }
 
 fn transcript_style(fg: ratatui::style::Color) -> Style {
@@ -1394,8 +1393,10 @@ fn aggregate_diff_items(diffs: &[diff_viewer::FileDiffItem]) -> Vec<diff_viewer:
 
 fn plan_marker(status: plan_tracker::PlanStepStatus) -> &'static str {
     match status {
-        plan_tracker::PlanStepStatus::Pending | plan_tracker::PlanStepStatus::Running => "○",
-        plan_tracker::PlanStepStatus::Done | plan_tracker::PlanStepStatus::Failed => "●",
+        plan_tracker::PlanStepStatus::Pending => "□",
+        plan_tracker::PlanStepStatus::Running => "○",
+        plan_tracker::PlanStepStatus::Done => "✓",
+        plan_tracker::PlanStepStatus::Failed => "✗",
     }
 }
 
@@ -1786,7 +1787,7 @@ mod tests {
 
         let rendered = render_text(&[msg], 0, 4);
 
-        assert!(rendered.contains("Reading 1 file..."));
+        assert!(rendered.contains("Reading 1 file."));
         assert!(rendered.contains("└ src/tui/status_bar.rs"));
         theme::set_active_theme(theme::ThemeMode::Light);
     }
@@ -2216,7 +2217,7 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(rendered.contains("2 tasks (2 done, 0 open)"));
-        assert!(rendered.contains("└ ● Build project"));
+        assert!(rendered.contains("└ ✓ Build project"));
         theme::set_active_theme(theme::ThemeMode::Light);
     }
 

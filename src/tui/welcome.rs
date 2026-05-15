@@ -381,7 +381,7 @@ pub fn suggested_prompt(index: usize) -> Option<&'static str> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub fn render_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
-    if area.width < 70 || area.height < 18 {
+    if area.width < 90 || area.height < 18 {
         render_compact_welcome(f, area, data);
         return;
     }
@@ -557,9 +557,9 @@ fn render_split_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) 
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(54),
+            Constraint::Percentage(55),
             Constraint::Length(1),
-            Constraint::Percentage(46),
+            Constraint::Percentage(45),
         ])
         .split(area);
 
@@ -611,66 +611,49 @@ fn render_stacked_identity(f: &mut Frame, area: Rect, data: &WelcomeDashboardDat
 }
 
 fn render_identity(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
-    let logo_height = ascii_art::WELCOME_WORDMARK.len() as u16;
-    let top_pad = if area.height >= 24 { 2 } else { 0 };
-    let shortcut_height = if area.height >= 14 { 3 } else { 2 };
-    let capability_height = if area.height >= 11 { 2 } else { 1 };
-
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(top_pad),
-            Constraint::Length(logo_height.saturating_add(1)),
-            Constraint::Length(2),
-            Constraint::Length(shortcut_height),
-            Constraint::Length(capability_height),
-            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(7),
+            Constraint::Length(4),
+            Constraint::Min(1),
         ])
         .split(area);
 
-    let lines = ascii_art::WELCOME_WORDMARK
-        .iter()
-        .map(|line| Line::from(Span::styled(*line, welcome_logo())))
-        .collect::<Vec<_>>();
-
-    let paragraph = Paragraph::new(Text::from(lines))
-        .alignment(Alignment::Center)
-        .wrap(Wrap { trim: false });
-    f.render_widget(paragraph, chunks[1]);
-
-    let prompt = Paragraph::new(Text::from(vec![Line::from(vec![
-        Span::styled("Tip: ", welcome_label().add_modifier(Modifier::BOLD)),
-        Span::styled(
-            "Use /init to teach DeepSeek Code this workspace",
-            welcome_text().add_modifier(Modifier::BOLD),
-        ),
-    ])]))
-    .alignment(Alignment::Center)
-    .wrap(Wrap { trim: true });
-    f.render_widget(prompt, chunks[2]);
+    render_product_mark(f, chunks[1]);
 
     let shortcuts = vec![
         Line::from(vec![
-            Span::styled("shift+tab", welcome_text().add_modifier(Modifier::BOLD)),
-            Span::styled(" switch mode  ·  ", welcome_muted()),
-            Span::styled("ctrl+n", welcome_text().add_modifier(Modifier::BOLD)),
-            Span::styled(" switch model", welcome_muted()),
+            Span::styled("◇ ", welcome_accent()),
+            Span::styled(
+                "Ask questions, edit files, or run commands.",
+                welcome_muted(),
+            ),
         ]),
         Line::from(vec![
-            Span::styled("ctrl+l", welcome_text().add_modifier(Modifier::BOLD)),
-            Span::styled(" autonomy  ·  ", welcome_muted()),
-            Span::styled("tab", welcome_text().add_modifier(Modifier::BOLD)),
-            Span::styled(" thinking", welcome_muted()),
+            Span::styled("◇ ", welcome_accent()),
+            Span::styled(
+                "Plan, approvals, and agents appear only when needed.",
+                welcome_muted(),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("◇ ", welcome_accent()),
+            Span::styled(
+                "/help for commands, @path for files, ! for shell.",
+                welcome_muted(),
+            ),
         ]),
     ];
     f.render_widget(
         Paragraph::new(Text::from(shortcuts))
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: true }),
-        chunks[3],
+        chunks[2],
     );
 
-    render_capability_line(f, chunks[4], data);
+    render_capability_line(f, chunks[3], data);
 }
 
 // ── Right: Actions ──
@@ -690,10 +673,17 @@ fn render_actions(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
     } else {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(5), Constraint::Min(1)])
+            .constraints([
+                Constraint::Length(2),
+                Constraint::Length(7),
+                Constraint::Length(5),
+                Constraint::Min(1),
+            ])
             .split(area);
-        render_context(f, chunks[0], data);
-        render_invitation_and_footer(f, chunks[1], data);
+        render_release_header(f, chunks[0]);
+        render_changelog(f, chunks[1]);
+        render_context(f, chunks[2], data);
+        render_invitation_and_footer(f, chunks[3], data);
     }
 }
 
@@ -715,6 +705,54 @@ fn render_horizontal_divider(f: &mut Frame, area: Rect) {
             welcome_accent(),
         ))]))
         .style(welcome_bg()),
+        area,
+    );
+}
+
+fn render_release_header(f: &mut Frame, area: Rect) {
+    let lines = vec![Line::from(vec![
+        Span::styled(
+            "Ready surface ",
+            welcome_accent().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("v0.1.0", welcome_text().add_modifier(Modifier::BOLD)),
+        Span::styled("        quiet until work starts", welcome_muted()),
+    ])];
+    f.render_widget(Paragraph::new(Text::from(lines)).style(welcome_bg()), area);
+}
+
+fn render_changelog(f: &mut Frame, area: Rect) {
+    let lines = vec![
+        Line::from(Span::styled(
+            "Start",
+            welcome_accent().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled("1 ", welcome_accent().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "New conversation",
+                welcome_text().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" - describe the change", welcome_muted()),
+        ]),
+        Line::from(vec![
+            Span::styled("2 ", welcome_accent().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Inspect workspace",
+                welcome_text().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" - read files before editing", welcome_muted()),
+        ]),
+        Line::from(vec![
+            Span::styled("3 ", welcome_accent().add_modifier(Modifier::BOLD)),
+            Span::styled("Run checks", welcome_text().add_modifier(Modifier::BOLD)),
+            Span::styled(" - verify before summary", welcome_muted()),
+        ]),
+    ];
+    f.render_widget(
+        Paragraph::new(Text::from(lines))
+            .style(welcome_bg())
+            .wrap(Wrap { trim: false }),
         area,
     );
 }
@@ -839,6 +877,11 @@ fn render_compact_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData
         return;
     }
 
+    if area.width >= 70 && area.height >= 12 {
+        render_compact_brand_welcome(f, area, data);
+        return;
+    }
+
     let headline = "What are we changing today?";
     let footer = vec![
         key_span("1-3"),
@@ -868,6 +911,61 @@ fn render_compact_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData
         .wrap(Wrap { trim: true });
 
     f.render_widget(paragraph, area);
+}
+
+fn render_compact_brand_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
+    let inner = area.inner(Margin {
+        horizontal: 2,
+        vertical: 1,
+    });
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(7),
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+
+    render_product_mark(f, chunks[0]);
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            "What are we changing today?",
+            welcome_muted(),
+        )]))
+        .style(welcome_bg())
+        .alignment(Alignment::Center),
+        chunks[1],
+    );
+
+    let workspace = Line::from(vec![
+        Span::styled(&data.workspace_name, welcome_text()),
+        Span::styled(" · ", welcome_muted()),
+        Span::styled(data.model.to_string(), welcome_muted()),
+    ]);
+    f.render_widget(
+        Paragraph::new(workspace)
+            .style(welcome_bg())
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        chunks[2],
+    );
+
+    let footer = Line::from(vec![
+        key_span("1-3"),
+        action_span(" starters   "),
+        key_span("enter"),
+        action_span(" send"),
+    ]);
+    f.render_widget(
+        Paragraph::new(footer)
+            .style(welcome_bg())
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        chunks[3],
+    );
 }
 
 fn render_compact_api_onboarding(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {

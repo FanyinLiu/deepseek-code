@@ -2337,6 +2337,13 @@ impl TuiApp {
         }
 
         render_canvas(f, area);
+        if self.should_render_minimal_runtime_surface() {
+            self.render_minimal_runtime_surface(f, area);
+            if let Some((ref approval, _)) = self.approval {
+                approval_popup::render_approval_popup(f, area, approval);
+            }
+            return;
+        }
         let input_h = self.input_height();
 
         // If file tree is shown, split horizontally
@@ -2584,8 +2591,180 @@ impl TuiApp {
         }
     }
 
+    fn should_render_minimal_runtime_surface(&self) -> bool {
+        !self.is_showing_welcome()
+            && !self.settings_open
+            && self.api_key_entry.is_none()
+            && !self.show_file_tree
+    }
+
+    fn render_minimal_runtime_surface(&self, f: &mut Frame, area: Rect) {
+        let p = theme::palette();
+        f.render_widget(
+            Paragraph::new("").style(Style::default().bg(p.canvas)),
+            area,
+        );
+
+        let root = area.inner(Margin {
+            horizontal: u16::from(area.width >= 70) * 3,
+            vertical: u16::from(area.height >= 10),
+        });
+        let slash_suggestions = self.slash_command_suggestions();
+        let options_count = self
+            .options_needed
+            .as_ref()
+            .map(|decision| decision.options.len())
+            .or_else(|| self.pending_options.as_ref().map(|(_, opts)| opts.len()))
+            .or_else(|| (!slash_suggestions.is_empty()).then_some(slash_suggestions.len()))
+            .unwrap_or(0);
+        let options_h: u16 = if options_count > 0 {
+            (options_count + 5).min(12) as u16
+        } else {
+            0
+        };
+        let prompt_h = self.minimal_runtime_prompt_height();
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(1),
+                Constraint::Length(options_h),
+                Constraint::Length(prompt_h),
+            ])
+            .split(root);
+
+        self.render_minimal_runtime_content(f, rows[0]);
+        if self.scroll_offset > 0 {
+            render_jump_to_bottom_hint(f, rows[0]);
+        }
+        if options_h > 0 {
+            self.render_command_options(f, rows[1], &slash_suggestions);
+        }
+        if prompt_h > 0 {
+            self.render_minimal_runtime_prompt(f, rows[2]);
+        }
+    }
+
+    fn minimal_runtime_prompt_height(&self) -> u16 {
+        if self.ctrl_c_exit_prompt_active_at(std::time::Instant::now()) {
+            return 1;
+        }
+        let line_count = self.input_text.lines().count().max(1) as u16;
+        line_count.clamp(1, 3)
+    }
+
+    fn render_minimal_runtime_content(&self, f: &mut Frame, area: Rect) {
+        if area.height == 0 {
+            return;
+        }
+        render_canvas(f, area);
+        let elapsed = self.stream_motion_frame().elapsed_ms;
+        let empty_subagents: &[subagent_cards::SubagentCard] = &[];
+        let visible_subagents = if self.active_swarm.is_some() {
+            if self
+                .active_swarm
+                .as_ref()
+                .is_some_and(|swarm| swarm.detail_expanded)
+            {
+                &self.subagents
+            } else {
+                empty_subagents
+            }
+        } else {
+            &self.subagents
+        };
+        transcript_view::render_transcript(
+            f,
+            area,
+            transcript_view::TranscriptProps {
+                messages: &self.messages,
+                pending_user_message: self.pending_user_message.as_deref(),
+                scroll_offset: self.scroll_offset,
+                plan_summary: self.plan_summary.as_deref(),
+                plan_steps: &self.plan_steps,
+                plan_current_step: self.plan_current_step,
+                plan_total_steps: self.plan_total_steps,
+                plan_warnings: &self.plan_warnings,
+                subagents: visible_subagents,
+                global_elapsed_ms: elapsed,
+                diffs: &self.file_diffs,
+                selected_diff: self.selected_diff,
+                is_streaming: self.is_streaming,
+                stream_buffer: &self.stream_buffer,
+                reasoning_buffer: &self.reasoning_buffer,
+                show_reasoning: self.show_reasoning,
+            },
+        );
+    }
+
+    fn render_minimal_runtime_prompt(&self, f: &mut Frame, area: Rect) {
+        if area.height == 0 {
+            return;
+        }
+
+        if self.ctrl_c_exit_prompt_active_at(std::time::Instant::now()) {
+            render_classic_status_text(f, area, "Press Ctrl-C again to exit");
+            return;
+        }
+
+        let opts_for_input = self.pending_options.as_ref().map(|(_, o)| o.as_slice());
+        input::render_input_with_motion(
+            f,
+            area,
+            &self.input_text,
+            self.cursor_pos,
+            opts_for_input,
+            self.motion_frame(),
+        );
+        let (cursor_x, cursor_y) =
+            input::terminal_cursor_position(area, &self.input_text, self.cursor_pos, false);
+        f.set_cursor_position((cursor_x, cursor_y));
+    }
+
+    fn render_command_options(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        slash_suggestions: &[(String, String)],
+    ) {
+        let (kind, title, options) = if let Some(decision) = &self.options_needed {
+            (
+                decision.kind,
+                decision.title.as_str(),
+                decision.options.as_slice(),
+            )
+        } else if let Some((t, opts)) = &self.pending_options {
+            (DecisionKind::Clarification, t.as_str(), opts.as_slice())
+        } else {
+            (DecisionKind::Clarification, "", &[][..])
+        };
+        if !options.is_empty() {
+            plan_tracker::render_options_panel(
+                f,
+                area,
+                kind,
+                title,
+                options,
+                self.selected_option_index,
+            );
+        } else if !slash_suggestions.is_empty() {
+            plan_tracker::render_slash_command_panel(
+                f,
+                area,
+                slash_suggestions,
+                self.selected_slash_index,
+            );
+        }
+    }
+
     fn render_classic(&self, f: &mut Frame, area: Rect) {
         render_canvas(f, area);
+        if self.should_render_minimal_runtime_surface() {
+            self.render_minimal_runtime_surface(f, area);
+            if let Some((ref approval, _)) = self.approval {
+                approval_popup::render_approval_popup(f, area, approval);
+            }
+            return;
+        }
 
         let input_h = self.input_height();
         let slash_suggestions = self.slash_command_suggestions();

@@ -120,8 +120,8 @@ fn status_icon_with_motion(status: PlanStepStatus, frame: motion::MotionFrame) -
         PlanStepStatus::Pending => "○",
         PlanStepStatus::Running if frame.level.is_enabled() => frame.running_icon(),
         PlanStepStatus::Running => "●",
-        PlanStepStatus::Done => "●",
-        PlanStepStatus::Failed => "●",
+        PlanStepStatus::Done => "✓",
+        PlanStepStatus::Failed => "✗",
     }
 }
 
@@ -129,7 +129,7 @@ fn status_color(status: PlanStepStatus) -> Color {
     let p = theme::palette();
     match status {
         PlanStepStatus::Pending => p.muted,
-        PlanStepStatus::Running => p.success,
+        PlanStepStatus::Running => p.accent,
         PlanStepStatus::Done => p.success,
         PlanStepStatus::Failed => p.danger,
     }
