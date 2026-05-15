@@ -6,6 +6,10 @@ pub fn search_files(
     query: &str,
     limit: usize,
 ) -> Result<Vec<SearchMatch>, anyhow::Error> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
     let mut results = Vec::new();
     let query_lower = query.to_lowercase();
     let glob_pattern = glob::Pattern::new(query).ok();
@@ -109,5 +113,14 @@ mod tests {
         let pattern = glob::Pattern::new("src/*.rs").ok();
         assert!(name_matches("src/main.rs", "src/*.rs", pattern.as_ref()));
         assert!(!name_matches("tests/main.rs", "src/*.rs", pattern.as_ref()));
+    }
+
+    #[test]
+    fn search_files_respects_zero_limit() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("needle.rs"), "fn main() {}\n").expect("write file");
+
+        let results = search_files(root.path(), "needle", 0).expect("search files");
+        assert!(results.is_empty());
     }
 }

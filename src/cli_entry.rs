@@ -106,7 +106,7 @@ enum Commands {
     /// Run a multi-agent code review over the entire project
     Review {
         /// Maximum parallel reviewers (default: 4)
-        #[arg(short, long, default_value = "4")]
+        #[arg(short, long, default_value = "4", value_parser = parse_positive_usize)]
         parallel: usize,
 
         /// Max tool-call turns per reviewer (default: 15)
@@ -566,4 +566,14 @@ fn init_tracing(quiet_terminal: bool) {
         )
         .with_target(false)
         .try_init();
+}
+
+fn parse_positive_usize(value: &str) -> Result<usize, String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|error| format!("invalid positive integer: {error}"))?;
+    if parsed == 0 {
+        return Err("must be at least 1".to_string());
+    }
+    Ok(parsed)
 }

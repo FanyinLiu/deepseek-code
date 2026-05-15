@@ -22,6 +22,10 @@ pub async fn review(
     max_turns: u32,
     output: Option<PathBuf>,
 ) -> Result<(), anyhow::Error> {
+    if max_parallel == 0 {
+        anyhow::bail!("--parallel must be at least 1");
+    }
+
     let root = project_root
         .unwrap_or_else(|| storage::find_project_root().unwrap_or_else(|| PathBuf::from(".")));
     let config = storage::Config::load(Some(&root))?;

@@ -33,7 +33,7 @@ pub async fn doctor(project_root: Option<PathBuf>) -> Result<(), anyhow::Error> 
                     .filter_map(|m| m["id"].as_str())
                     .filter(|id| id.starts_with("deepseek"))
                     .collect();
-                if model_ids.is_empty() {
+                if !model_ids.is_empty() {
                     println!("   Available models:");
                     for m in model_ids {
                         println!("     - {m}");

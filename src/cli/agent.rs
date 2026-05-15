@@ -108,10 +108,14 @@ pub async fn agent(
         }
         AgentCommand::Validate { target, json } => {
             let payload = validate_payload(&root, target)?;
+            let has_invalid_reports = payload.reports.iter().any(|report| !report.valid);
             if json {
                 print_json(&payload)?;
             } else {
                 print_validation_reports(&payload);
+            }
+            if has_invalid_reports {
+                bail!("agent validation failed");
             }
         }
     }

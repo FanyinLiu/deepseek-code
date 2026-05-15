@@ -105,7 +105,11 @@ fn agent_validate_catches_malformed_agent() {
         .output()
         .expect("run ds agent validate");
 
-    assert!(output.status.success(), "stderr={}", stderr(&output));
+    assert!(
+        !output.status.success(),
+        "malformed agents should fail validation"
+    );
+    assert!(stderr(&output).contains("agent validation failed"));
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("validate json parses");
     let report = json["reports"]

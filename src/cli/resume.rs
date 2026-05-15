@@ -112,21 +112,9 @@ pub async fn export(
         let sid = uuid::Uuid::parse_str(&id)?;
         let session = store.load(&root, &sid)?;
 
-        let fmt = match format.as_deref() {
-            Some("json") => TranscriptFormat::Json,
-            Some("text" | "txt") => TranscriptFormat::PlainText,
-            _ => TranscriptFormat::Markdown,
-        };
-
+        let fmt = transcript_format(format.as_deref());
         let output = storage::export_transcript(&session, fmt);
-
-        let ext = match fmt {
-            TranscriptFormat::Json => "json",
-            TranscriptFormat::Markdown => "md",
-            TranscriptFormat::PlainText => "txt",
-        };
-
-        let filename = format!("session-{sid}.{ext}");
+        let filename = format!("session-{sid}.{}", transcript_extension(fmt));
         std::fs::write(&filename, output)?;
         println!("Session exported to: {filename}");
     } else {
@@ -134,8 +122,9 @@ pub async fn export(
         let summaries = store.list(&root)?;
         if let Some(latest) = summaries.first() {
             let session = store.load(&root, &latest.id)?;
-            let output = storage::export_transcript(&session, TranscriptFormat::Markdown);
-            let filename = format!("session-{}.md", latest.id);
+            let fmt = transcript_format(format.as_deref());
+            let output = storage::export_transcript(&session, fmt);
+            let filename = format!("session-{}.{}", latest.id, transcript_extension(fmt));
             std::fs::write(&filename, output)?;
             println!("Latest session exported to: {filename}");
         } else {
@@ -144,6 +133,22 @@ pub async fn export(
     }
 
     Ok(())
+}
+
+fn transcript_format(value: Option<&str>) -> TranscriptFormat {
+    match value {
+        Some("json") => TranscriptFormat::Json,
+        Some("text" | "txt") => TranscriptFormat::PlainText,
+        _ => TranscriptFormat::Markdown,
+    }
+}
+
+fn transcript_extension(format: TranscriptFormat) -> &'static str {
+    match format {
+        TranscriptFormat::Json => "json",
+        TranscriptFormat::Markdown => "md",
+        TranscriptFormat::PlainText => "txt",
+    }
 }
 
 fn list_and_print(
@@ -173,4 +178,33 @@ fn list_and_print(
     println!("Export: deepseek-code export <id>");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transcript_format_and_extension_follow_requested_output() {
+        assert!(matches!(
+            transcript_format(Some("json")),
+            TranscriptFormat::Json
+        ));
+        assert!(matches!(
+            transcript_format(Some("txt")),
+            TranscriptFormat::PlainText
+        ));
+        assert!(matches!(
+            transcript_format(Some("text")),
+            TranscriptFormat::PlainText
+        ));
+        assert!(matches!(
+            transcript_format(None),
+            TranscriptFormat::Markdown
+        ));
+
+        assert_eq!(transcript_extension(TranscriptFormat::Json), "json");
+        assert_eq!(transcript_extension(TranscriptFormat::PlainText), "txt");
+        assert_eq!(transcript_extension(TranscriptFormat::Markdown), "md");
+    }
 }

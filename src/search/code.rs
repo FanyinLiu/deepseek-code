@@ -12,6 +12,10 @@ pub fn search_code(
     case_sensitive: bool,
     limit: usize,
 ) -> Result<Vec<SearchMatch>, anyhow::Error> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
     // Try ripgrep first — trust its results even when empty
     if let Ok(results) = try_ripgrep(project_root, pattern, glob, case_sensitive, limit) {
         return Ok(results);

@@ -19,10 +19,12 @@ pub async fn search(
         let results = search::search_code(&root, &query, None, false, limit)?;
         all_results.extend(results);
     } else {
-        let files = search::search_files(&root, &query, limit / 2)?;
-        let code = search::search_code(&root, &query, None, false, limit / 2)?;
+        let files = search::search_files(&root, &query, limit)?;
+        let remaining = limit.saturating_sub(files.len());
+        let code = search::search_code(&root, &query, None, false, remaining)?;
         all_results.extend(files);
         all_results.extend(code);
+        all_results.truncate(limit);
     }
 
     if all_results.is_empty() {

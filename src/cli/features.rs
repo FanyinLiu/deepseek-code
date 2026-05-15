@@ -8,6 +8,7 @@ use crate::agent::subagent::SubagentRegistry;
 use crate::storage;
 
 const MATRIX_RELATIVE_PATH: &str = "docs/cli_parity_matrix.md";
+const EMBEDDED_MATRIX: &str = include_str!("../../docs/cli_parity_matrix.md");
 const BUILT_IN_AGENTS: &[&str] = &[
     "general-purpose",
     "code-explorer",
@@ -140,8 +141,16 @@ impl std::fmt::Display for RecommendedMode {
 
 pub fn matrix_payload(project_root: &Path) -> Result<FeatureMatrix, anyhow::Error> {
     let source_path = project_root.join(MATRIX_RELATIVE_PATH);
-    let content = std::fs::read_to_string(&source_path)
-        .with_context(|| format!("read {}", source_path.display()))?;
+    let (source_path, content) = match std::fs::read_to_string(&source_path) {
+        Ok(content) => (source_path.display().to_string(), content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
+            format!("embedded:{MATRIX_RELATIVE_PATH}"),
+            EMBEDDED_MATRIX.to_string(),
+        ),
+        Err(error) => {
+            return Err(error).with_context(|| format!("read {}", source_path.display()));
+        }
+    };
     let rows = parse_matrix_rows(&content);
     let mut action_counts = BTreeMap::new();
     for row in &rows {
@@ -149,7 +158,7 @@ pub fn matrix_payload(project_root: &Path) -> Result<FeatureMatrix, anyhow::Erro
     }
 
     Ok(FeatureMatrix {
-        source_path: source_path.display().to_string(),
+        source_path,
         total_capabilities: rows.len(),
         action_counts,
         rows,
@@ -459,6 +468,19 @@ mod tests {
             .iter()
             .any(|row| row.capability == "custom agents"));
         serde_json::to_string(&matrix).expect("serialize matrix");
+    }
+
+    #[test]
+    fn matrix_payload_falls_back_to_embedded_document_outside_source_tree() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let matrix = matrix_payload(root.path()).expect("parse embedded feature matrix");
+
+        assert_eq!(matrix.source_path, "embedded:docs/cli_parity_matrix.md");
+        assert!(matrix.total_capabilities >= 30);
+        assert!(matrix
+            .rows
+            .iter()
+            .any(|row| row.capability == "custom agents"));
     }
 
     #[test]
