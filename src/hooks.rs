@@ -257,21 +257,19 @@ mod tests {
     async fn hook_receives_payload_on_stdin() {
         let temp = tempfile::tempdir().expect("tempdir");
         let payload = HookPayload::new(HookEvent::PreToolUse, "session-1", temp.path());
-        #[cfg(windows)]
-        let command =
-            "python -c \"import sys,json; data=json.load(sys.stdin); print(data['event'])\"";
-        #[cfg(not(windows))]
-        let command =
-            "python3 -c \"import sys,json; data=json.load(sys.stdin); print(data['event'])\"";
-
-        let summary = run_hook_commands(
-            HookEvent::PreToolUse,
-            &[command.to_string()],
-            &payload,
-            temp.path(),
-            5,
+        let script = temp.path().join("hook_payload.py");
+        std::fs::write(
+            &script,
+            "import json, sys\nprint(json.load(sys.stdin)['event'])\n",
         )
-        .await;
+        .expect("write hook script");
+        #[cfg(windows)]
+        let command = format!("python \"{}\"", script.display());
+        #[cfg(not(windows))]
+        let command = format!("python3 \"{}\"", script.display());
+
+        let summary =
+            run_hook_commands(HookEvent::PreToolUse, &[command], &payload, temp.path(), 5).await;
 
         assert!(summary.success(), "{summary:?}");
         assert_eq!(summary.outcomes[0].stdout, "pre_tool_use");
