@@ -24,7 +24,7 @@ pub enum McpTransport {
 
 /// An active MCP connection.
 pub enum McpClient {
-    Stdio(StdioMcpClient),
+    Stdio(Box<StdioMcpClient>),
     Http(RemoteMcpClient),
     Sse(RemoteMcpClient),
 }
@@ -64,9 +64,9 @@ impl McpClient {
         timeout_ms: u64,
     ) -> Result<Self, anyhow::Error> {
         match config.transport {
-            McpTransport::Stdio => Ok(Self::Stdio(
+            McpTransport::Stdio => Ok(Self::Stdio(Box::new(
                 StdioMcpClient::connect_with_timeout(config, timeout_ms).await?,
-            )),
+            ))),
             McpTransport::Http => Ok(Self::Http(
                 RemoteMcpClient::connect(config, timeout_ms, McpTransport::Http).await?,
             )),
