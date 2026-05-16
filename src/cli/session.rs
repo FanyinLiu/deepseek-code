@@ -23,7 +23,7 @@ pub async fn session(
     project_root: Option<PathBuf>,
 ) -> Result<(), anyhow::Error> {
     let root = resolve_project_root(project_root, "session")?;
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?;
+    let home = user_home_dir().ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?;
     let store = SessionStore::new(home.join(".deepseek-code"));
     let events = EventLogStore::new(home.join(".deepseek-code"));
 
@@ -32,6 +32,13 @@ pub async fn session(
         SessionCommand::Replay { session, json } => replay(&store, &events, &root, session, json),
         SessionCommand::Export { session, format } => export(&store, &root, session, &format),
     }
+}
+
+fn user_home_dir() -> Option<PathBuf> {
+    std::env::var_os("DEEPSEEK_CODE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
 }
 
 fn list(store: &SessionStore, root: &Path, json: bool) -> Result<(), anyhow::Error> {

@@ -7,6 +7,7 @@ fn ds_command(project_root: &std::path::Path, home: &std::path::Path) -> Command
     let mut command = Command::new(env!("CARGO_BIN_EXE_ds"));
     command.arg("-C").arg(project_root);
     command.env("HOME", home);
+    command.env("DEEPSEEK_CODE_HOME", home);
     command.current_dir(project_root);
     command
 }
