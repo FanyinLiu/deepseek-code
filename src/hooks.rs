@@ -257,8 +257,12 @@ mod tests {
     async fn hook_receives_payload_on_stdin() {
         let temp = tempfile::tempdir().expect("tempdir");
         let payload = HookPayload::new(HookEvent::PreToolUse, "session-1", temp.path());
+        #[cfg(windows)]
         let command =
-            "python3 -c 'import sys,json; data=json.load(sys.stdin); print(data[\"event\"])'";
+            "python -c \"import sys,json; data=json.load(sys.stdin); print(data['event'])\"";
+        #[cfg(not(windows))]
+        let command =
+            "python3 -c \"import sys,json; data=json.load(sys.stdin); print(data['event'])\"";
 
         let summary = run_hook_commands(
             HookEvent::PreToolUse,
