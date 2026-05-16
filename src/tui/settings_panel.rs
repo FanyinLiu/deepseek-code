@@ -90,6 +90,8 @@ pub fn render_settings_panel(f: &mut Frame, area: Rect, props: SettingsPanelProp
         Span::styled(" navigate   ", Style::default().fg(p.muted).bg(p.canvas)),
         Span::styled("Tab", Style::default().fg(p.text).bg(p.canvas)),
         Span::styled(" switch tab   ", Style::default().fg(p.muted).bg(p.canvas)),
+        Span::styled("Enter/Space", Style::default().fg(p.text).bg(p.canvas)),
+        Span::styled(" edit   ", Style::default().fg(p.muted).bg(p.canvas)),
         Span::styled("Esc", Style::default().fg(p.text).bg(p.canvas)),
         Span::styled(" close", Style::default().fg(p.muted).bg(p.canvas)),
     ]));
@@ -252,7 +254,12 @@ fn required(value: bool) -> String {
 }
 
 fn hook_count(hooks: &storage::config::HooksConfig) -> usize {
-    hooks.pre_tool.len() + hooks.post_tool.len() + hooks.stop.len()
+    hooks.user_prompt_submit.len()
+        + hooks.pre_tool.len()
+        + hooks.post_tool.len()
+        + hooks.session_start.len()
+        + hooks.session_end.len()
+        + hooks.stop.len()
 }
 
 fn rows(values: &[(&str, String)], selected_row: usize) -> Vec<Line<'static>> {

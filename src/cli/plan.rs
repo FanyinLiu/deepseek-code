@@ -2,16 +2,15 @@ use std::path::PathBuf;
 
 use crate::agent::orchestrator::{AgentEvent, Orchestrator};
 use crate::cli::output_blocks;
+use crate::cli::resolve_project_root;
 use crate::deepseek::{
     ReasoningEffort, ReasoningState, Session, SessionId, SessionMetadata, ThinkingMode,
 };
 use crate::provider::{build_provider, Provider};
-use crate::storage;
 
 /// Run the plan command: read-only analysis, no file modifications.
 pub async fn plan(task: String, project_root: Option<PathBuf>) -> Result<(), anyhow::Error> {
-    let root = project_root
-        .unwrap_or_else(|| storage::find_project_root().unwrap_or_else(|| PathBuf::from(".")));
+    let root = resolve_project_root(project_root, "plan")?;
     let api_key = super::login::resolve_or_prompt_api_key(Some(&root))?;
     let config = crate::storage::Config::load(Some(&root))?;
     let provider = build_provider(&config.provider, api_key);

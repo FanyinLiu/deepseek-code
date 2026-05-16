@@ -30,8 +30,12 @@ pub fn pack_search_results(results: &[SearchMatch], max_tokens: usize) -> Search
             break;
         }
 
-        let mut file_text = String::new();
-        file_text.push_str(&format!("## {file}\n"));
+        let mut file_text = format!("## {file}\n");
+        let mut file_chars = file_text.chars().count();
+        if char_used + file_chars > char_budget {
+            ctx.is_truncated = true;
+            break;
+        }
 
         for m in matches.iter().take(MAX_MATCHES_PER_FILE) {
             // Max 5 matches per file
@@ -40,17 +44,18 @@ pub fn pack_search_results(results: &[SearchMatch], max_tokens: usize) -> Search
             } else {
                 format!("  {}\n", m.matched_text)
             };
+            let line_chars = line.chars().count();
 
-            if char_used + line.len() > char_budget {
+            if char_used + file_chars + line_chars > char_budget {
                 ctx.is_truncated = true;
                 break;
             }
 
             file_text.push_str(&line);
-            char_used += line.len();
+            file_chars += line_chars;
         }
 
-        char_used += file_text.len();
+        char_used += file_chars;
         ctx.file_clusters.push(FileCluster {
             path: file.clone(),
             snippet: file_text,
@@ -95,5 +100,45 @@ impl std::fmt::Display for SearchContext {
             writeln!(f, "\n[Results truncated — refine search to narrow scope]")?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::search::files::MatchType;
+    use std::path::PathBuf;
+
+    fn search_match(path: &str, matched_text: &str) -> SearchMatch {
+        SearchMatch {
+            path: PathBuf::from(path),
+            line_number: Some(1),
+            matched_text: matched_text.into(),
+            match_type: MatchType::CodeLine,
+        }
+    }
+
+    #[test]
+    fn packer_counts_snippet_chars_once() {
+        let results = vec![search_match("a.rs", "汉字测试")];
+        let ctx = pack_search_results(&results, 5);
+        let actual_chars: usize = ctx
+            .file_clusters
+            .iter()
+            .map(|cluster| cluster.snippet.chars().count())
+            .sum();
+
+        assert_eq!(ctx.file_clusters.len(), 1);
+        assert_eq!(ctx.estimated_tokens, actual_chars / 4);
+        assert!(!ctx.is_truncated);
+    }
+
+    #[test]
+    fn packer_uses_character_budget_for_cjk() {
+        let results = vec![search_match("a.rs", "汉字测试")];
+        let ctx = pack_search_results(&results, 5);
+
+        assert_eq!(ctx.file_clusters.len(), 1);
+        assert!(ctx.file_clusters[0].snippet.contains("汉字测试"));
     }
 }

@@ -126,6 +126,102 @@ pub fn is_safe_read_tool(name: &str) -> bool {
     SAFE_READ_TOOLS.contains(&name)
 }
 
+/// Evaluate an MCP tool call using server metadata instead of treating it as an unknown tool.
+#[must_use]
+pub fn evaluate_mcp_tool(
+    metadata: &crate::mcp::registry::McpToolApprovalMetadata,
+    arguments: &str,
+    policy: &PolicyConfig,
+) -> PolicyDecision {
+    if let Err(error) = serde_json::from_str::<serde_json::Value>(arguments) {
+        return PolicyDecision::deny(
+            format!("invalid MCP tool arguments JSON: {error}"),
+            format!("Blocked MCP: {}", metadata.identity.source),
+            "MCP tool arguments must be valid JSON",
+            RiskLevel::Blocked,
+            format_mcp_details(metadata, "read=unknown write=unknown network=unknown"),
+        );
+    }
+
+    let risk_flags = infer_mcp_risk_flags(metadata);
+    let risk = mcp_risk_level(metadata, &risk_flags);
+    let details = format_mcp_details(metadata, &risk_flags);
+
+    if !metadata.allowed_by_filters {
+        return PolicyDecision::deny(
+            format!(
+                "MCP tool blocked by include/exclude filters: {}",
+                metadata.identity.source
+            ),
+            format!("Blocked MCP: {}", metadata.identity.source),
+            "MCP server include/exclude policy blocks this tool",
+            RiskLevel::Blocked,
+            details,
+        );
+    }
+
+    if !metadata.advertised {
+        return PolicyDecision::deny(
+            format!(
+                "MCP tool was not advertised by server: {}",
+                metadata.identity.source
+            ),
+            format!("Blocked MCP: {}", metadata.identity.source),
+            "MCP server did not advertise this tool",
+            RiskLevel::Blocked,
+            details,
+        );
+    }
+
+    if risk == RiskLevel::NetworkAccess && !policy.network_access {
+        return PolicyDecision::deny(
+            "network access disabled by policy",
+            format!("Blocked MCP: {}", metadata.identity.source),
+            "MCP tool appears to require network access",
+            RiskLevel::Blocked,
+            details,
+        );
+    }
+
+    let title = format!("MCP: {}", metadata.identity.source);
+    let description = metadata
+        .description
+        .clone()
+        .unwrap_or_else(|| "MCP tool call".to_string());
+
+    if metadata.trust
+        && risk == RiskLevel::SafeRead
+        && (policy.auto_approve_safe_read || policy.auto_mode)
+    {
+        return PolicyDecision::allow(
+            format!("trusted MCP safe read: {}", metadata.identity.source),
+            title,
+            description,
+            risk,
+        );
+    }
+
+    if metadata.trust && risk == RiskLevel::WriteProject && !policy.require_approval_for_write {
+        return PolicyDecision::allow(
+            format!(
+                "trusted MCP write allowed by policy: {}",
+                metadata.identity.source
+            ),
+            title,
+            description,
+            risk,
+        );
+    }
+
+    PolicyDecision::ask_once(
+        format!("MCP tool requires approval: {}", metadata.identity.source),
+        title,
+        description,
+        risk,
+        details,
+    )
+}
+
 /// Evaluate a tool call and return a policy decision.
 #[must_use]
 pub fn evaluate_tool(
@@ -135,8 +231,18 @@ pub fn evaluate_tool(
     policy: &PolicyConfig,
 ) -> PolicyDecision {
     let auto_approve_safe_read = policy.auto_approve_safe_read || policy.auto_mode;
-    // Parse arguments for path extraction
-    let args: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+    let args: serde_json::Value = match serde_json::from_str(arguments) {
+        Ok(args) => args,
+        Err(error) => {
+            return PolicyDecision::deny(
+                format!("invalid tool arguments JSON: {error}"),
+                format!("Blocked: {tool_name}"),
+                "Tool arguments must be valid JSON",
+                RiskLevel::Blocked,
+                "Unable to parse tool arguments for policy evaluation.".to_string(),
+            );
+        }
+    };
     if let Some(violation) =
         crate::defense::BehavioralPerimeter.check_tool_call(tool_name, arguments, project_root)
     {
@@ -151,7 +257,18 @@ pub fn evaluate_tool(
 
     match tool_name {
         "read_file" | "list_dir" => {
-            let path = args["path"].as_str().unwrap_or("");
+            let path = match args.get("path").and_then(serde_json::Value::as_str) {
+                Some(path) => path,
+                None => {
+                    return PolicyDecision::deny(
+                        "missing required path",
+                        format!("Blocked: {tool_name}"),
+                        "The path argument is required",
+                        RiskLevel::Blocked,
+                        "No path argument was supplied.".to_string(),
+                    );
+                }
+            };
             let risk = evaluate_path_risk(path, project_root, policy.block_protected_paths);
 
             match risk {
@@ -245,7 +362,10 @@ pub fn evaluate_tool(
         ),
 
         "git_commit" => {
-            let message = args["message"].as_str().unwrap_or("(no message)");
+            let message = args
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("(no message)");
             if !policy.require_approval_for_write {
                 return PolicyDecision::allow(
                     "git commit allowed by policy",
@@ -264,18 +384,43 @@ pub fn evaluate_tool(
         }
 
         "edit_file" | "write_file" => {
-            let path = args["path"].as_str().unwrap_or("");
+            let path = match args.get("path").and_then(serde_json::Value::as_str) {
+                Some(path) => path,
+                None => {
+                    return PolicyDecision::deny(
+                        "missing required path",
+                        format!("Blocked: {tool_name}"),
+                        "The path argument is required",
+                        RiskLevel::Blocked,
+                        "No path argument was supplied.".to_string(),
+                    );
+                }
+            };
             write_paths_decision(tool_name, &[path.to_string()], project_root, policy)
         }
 
         "apply_patch" => {
-            let patch = args["patch"].as_str().unwrap_or("");
+            let patch = args
+                .get("patch")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
             let paths = crate::workspace::apply::parse_patch_paths(patch);
             write_paths_decision(tool_name, &paths, project_root, policy)
         }
 
         "run_command" => {
-            let command = args["command"].as_str().unwrap_or("");
+            let command = match args.get("command").and_then(serde_json::Value::as_str) {
+                Some(command) => command,
+                None => {
+                    return PolicyDecision::deny(
+                        "missing required command",
+                        "Blocked: Run Command",
+                        "The command argument is required",
+                        RiskLevel::Blocked,
+                        "No command argument was supplied.".to_string(),
+                    );
+                }
+            };
             if let Some(reason) = crate::policy::commands::contains_dangerous_pattern(command) {
                 return PolicyDecision::deny(
                     format!("dangerous command: {reason}"),
@@ -314,6 +459,14 @@ pub fn evaluate_tool(
                 ),
             )
         }
+
+        "run_subagent" => PolicyDecision::ask_once(
+            "run_subagent tool invocation requires operator approval",
+            "Run Subagent",
+            "Launching another agent can create additional tool calls",
+            RiskLevel::WriteProject,
+            "Use only trusted task inputs and allowlist agent policies.".to_string(),
+        ),
 
         _ => PolicyDecision::ask_once(
             format!("unknown tool: {tool_name}"),
@@ -410,6 +563,104 @@ fn format_path_details(paths: &[String]) -> String {
         .join("\n")
 }
 
+fn infer_mcp_risk_flags(metadata: &crate::mcp::registry::McpToolApprovalMetadata) -> String {
+    let haystack = format!(
+        "{} {} {}",
+        metadata.identity.tool,
+        metadata.description.as_deref().unwrap_or(""),
+        metadata.input_schema
+    )
+    .to_ascii_lowercase();
+    let write = contains_any(
+        &haystack,
+        &[
+            "write", "edit", "create", "update", "delete", "remove", "apply", "patch", "save",
+            "commit", "upload", "move", "rename",
+        ],
+    );
+    let network = matches!(
+        metadata.transport,
+        crate::mcp::client::McpTransport::Http | crate::mcp::client::McpTransport::Sse
+    ) || contains_any(
+        &haystack,
+        &[
+            "web", "url", "http", "fetch", "request", "download", "remote",
+        ],
+    );
+    let read = !write
+        || contains_any(
+            &haystack,
+            &["read", "list", "get", "search", "find", "query", "fetch"],
+        );
+
+    format!(
+        "read={} write={} network={}",
+        yes_no(read),
+        yes_no(write),
+        yes_no(network)
+    )
+}
+
+fn mcp_risk_level(
+    metadata: &crate::mcp::registry::McpToolApprovalMetadata,
+    risk_flags: &str,
+) -> RiskLevel {
+    if risk_flags.contains("network=yes") {
+        RiskLevel::NetworkAccess
+    } else if risk_flags.contains("write=yes") {
+        RiskLevel::WriteProject
+    } else if metadata.trust {
+        RiskLevel::SafeRead
+    } else {
+        RiskLevel::SensitiveRead
+    }
+}
+
+fn format_mcp_details(
+    metadata: &crate::mcp::registry::McpToolApprovalMetadata,
+    risk_flags: &str,
+) -> String {
+    format!(
+        "Source: {}\nServer: {}\nTool: {}\nTrust: {}\nInclude: {}\nExclude: {}\nTransport: {}\nRisk: {}",
+        metadata.identity.source,
+        metadata.identity.server,
+        metadata.identity.tool,
+        yes_no(metadata.trust),
+        format_tool_filter(&metadata.include_tools, "(all)"),
+        format_tool_filter(&metadata.exclude_tools, "(none)"),
+        mcp_transport_label(metadata.transport),
+        risk_flags,
+    )
+}
+
+fn format_tool_filter(values: &[String], empty_label: &str) -> String {
+    if values.is_empty() {
+        empty_label.to_string()
+    } else {
+        values.join(",")
+    }
+}
+
+fn mcp_transport_label(transport: crate::mcp::client::McpTransport) -> &'static str {
+    match transport {
+        crate::mcp::client::McpTransport::Stdio => "stdio",
+        crate::mcp::client::McpTransport::Http => "http",
+        crate::mcp::client::McpTransport::Sse => "sse",
+    }
+}
+
+fn contains_any(value: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| value.contains(needle))
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
 /// Strip the Windows UNC prefix (`\\?\`) from a path so that
 /// `canonicalize` output can be compared against non-canonical roots.
 fn strip_unc_prefix(path: &Path) -> std::path::PathBuf {
@@ -491,6 +742,29 @@ mod tests {
         value.to_string()
     }
 
+    fn mcp_metadata(
+        server: &str,
+        tool: &str,
+        trust: bool,
+        transport: crate::mcp::client::McpTransport,
+    ) -> crate::mcp::registry::McpToolApprovalMetadata {
+        crate::mcp::registry::McpToolApprovalMetadata {
+            identity: crate::mcp::registry::McpToolIdentity {
+                server: server.to_string(),
+                tool: tool.to_string(),
+                source: format!("mcp:{server}.{tool}"),
+            },
+            trust,
+            include_tools: vec![tool.to_string()],
+            exclude_tools: Vec::new(),
+            transport,
+            advertised: true,
+            allowed_by_filters: true,
+            description: Some(tool.replace('_', " ")),
+            input_schema: serde_json::json!({}),
+        }
+    }
+
     #[test]
     fn outside_workspace_read_requires_approval() {
         let root = tempfile::tempdir().expect("workspace");
@@ -530,6 +804,92 @@ mod tests {
 
         assert_eq!(decision.action, PolicyAction::Allow);
         assert_eq!(decision.display.risk_level, RiskLevel::SafeRead);
+    }
+
+    #[test]
+    fn malformed_tool_args_are_blocked() {
+        let root = tempfile::tempdir().expect("workspace");
+        let policy = PolicyConfig::default();
+        let decision = evaluate_tool("read_file", "{", root.path(), &policy);
+        assert_eq!(decision.action, PolicyAction::Deny);
+        assert_eq!(decision.display.risk_level, RiskLevel::Blocked);
+        assert!(decision.display.title.contains("Blocked: read_file"));
+    }
+
+    #[test]
+    fn missing_required_read_path_is_blocked() {
+        let root = tempfile::tempdir().expect("workspace");
+        let policy = PolicyConfig::default();
+        let decision = evaluate_tool("read_file", "{}", root.path(), &policy);
+        assert_eq!(decision.action, PolicyAction::Deny);
+        assert_eq!(decision.display.risk_level, RiskLevel::Blocked);
+        assert_eq!(decision.display.title, "Blocked: read_file");
+    }
+
+    #[test]
+    fn mcp_approval_details_include_source_filters_and_risk_flags() {
+        let policy = PolicyConfig::default();
+        let metadata = mcp_metadata(
+            "fs",
+            "read_file",
+            false,
+            crate::mcp::client::McpTransport::Stdio,
+        );
+
+        let decision = evaluate_mcp_tool(&metadata, "{}", &policy);
+
+        assert_eq!(decision.action, PolicyAction::AskOnce);
+        assert_eq!(decision.display.risk_level, RiskLevel::SensitiveRead);
+        assert!(decision.display.title.contains("mcp:fs.read_file"));
+        assert!(decision
+            .display
+            .details
+            .contains("Source: mcp:fs.read_file"));
+        assert!(decision.display.details.contains("Trust: no"));
+        assert!(decision
+            .display
+            .details
+            .contains("Risk: read=yes write=no network=no"));
+    }
+
+    #[test]
+    fn mcp_remote_tool_is_blocked_when_network_is_disabled() {
+        let policy = PolicyConfig {
+            network_access: false,
+            ..PolicyConfig::default()
+        };
+        let metadata = mcp_metadata(
+            "web",
+            "fetch_url",
+            true,
+            crate::mcp::client::McpTransport::Http,
+        );
+
+        let decision = evaluate_mcp_tool(&metadata, r#"{"url":"https://example.com"}"#, &policy);
+
+        assert_eq!(decision.action, PolicyAction::Deny);
+        assert_eq!(decision.display.risk_level, RiskLevel::Blocked);
+        assert!(decision.display.details.contains("Transport: http"));
+        assert!(decision.display.details.contains("network=yes"));
+    }
+
+    #[test]
+    fn mcp_filtered_tool_is_blocked_before_approval() {
+        let policy = PolicyConfig::default();
+        let mut metadata = mcp_metadata(
+            "fs",
+            "write_file",
+            true,
+            crate::mcp::client::McpTransport::Stdio,
+        );
+        metadata.allowed_by_filters = false;
+        metadata.advertised = false;
+
+        let decision = evaluate_mcp_tool(&metadata, "{}", &policy);
+
+        assert_eq!(decision.action, PolicyAction::Deny);
+        assert_eq!(decision.display.risk_level, RiskLevel::Blocked);
+        assert!(decision.display.description.contains("include/exclude"));
     }
 
     #[test]

@@ -6,6 +6,7 @@ pub mod cli_entry;
 pub mod commands;
 pub mod deepseek;
 pub mod defense;
+pub mod hooks;
 pub mod lsp;
 pub mod mcp;
 pub mod mission;

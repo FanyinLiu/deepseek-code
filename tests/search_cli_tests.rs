@@ -38,7 +38,10 @@ fn search_limit_one_can_return_code_match_when_no_filename_matches() {
     assert!(output.status.success(), "stderr={}", stderr(&output));
     let stdout = stdout(&output);
     assert!(stdout.contains("Found 1 results for: needle"));
-    assert!(stdout.contains("src/main.rs:1:"));
+    assert!(
+        stdout.replace('\\', "/").contains("src/main.rs:1:"),
+        "stdout={stdout}"
+    );
 }
 
 fn stdout(output: &std::process::Output) -> String {

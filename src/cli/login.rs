@@ -31,6 +31,17 @@ pub fn resolve_or_prompt_api_key(project_root: Option<&Path>) -> Result<String, 
     prompt_and_store_api_key(project_root)
 }
 
+/// Resolve an API key without prompting or printing interactive setup text.
+pub fn resolve_api_key_non_interactive(
+    project_root: Option<&Path>,
+) -> Result<String, anyhow::Error> {
+    storage::get_effective_api_key(project_root).ok_or_else(|| {
+        anyhow::anyhow!(
+            "No API key configured. Run `deepseek-code login --api-key sk-...` or set DEEPSEEK_API_KEY."
+        )
+    })
+}
+
 /// Prompt interactively for the API key and store it in keyring or project-local config.
 pub fn prompt_and_store_api_key(project_root: Option<&Path>) -> Result<String, anyhow::Error> {
     if !std::io::stdin().is_terminal() {

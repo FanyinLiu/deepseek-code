@@ -63,6 +63,19 @@ pub fn to_chat_messages(
             name: None,
         };
 
+        if msg.role == Role::Tool && !msg.tool_results.is_empty() {
+            for tr in &msg.tool_results {
+                let mut tool_msg = chat_msg.clone();
+                tool_msg.role = "tool".into();
+                tool_msg.content = Some(ChatMessageContent::Text(tr.result.clone()));
+                tool_msg.reasoning_content = None;
+                tool_msg.tool_calls = None;
+                tool_msg.tool_call_id = Some(tr.tool_call_id.clone());
+                chat_msgs.push(tool_msg);
+            }
+            continue;
+        }
+
         match msg.role {
             Role::Assistant => {
                 // Include reasoning_content if this message is in the
@@ -104,10 +117,18 @@ pub fn sanitize_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
         .iter()
         .map(|m| {
             let mut cleaned = m.clone();
+            if let Some(reasoning_content) = &mut cleaned.reasoning_content {
+                let sanitized = sanitize_text(reasoning_content);
+                if sanitized.is_empty() {
+                    cleaned.reasoning_content = None;
+                } else {
+                    *reasoning_content = sanitized;
+                }
+            }
             if let Some(ref mut content) = cleaned.content {
                 match content {
                     ChatMessageContent::Text(ref mut s) => {
-                        let sanitized = s.replace('\0', "").trim().to_string();
+                        let sanitized = sanitize_text(s);
                         if sanitized.is_empty() {
                             cleaned.content = None;
                         } else {
@@ -117,7 +138,7 @@ pub fn sanitize_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
                     ChatMessageContent::Parts(parts) => {
                         for part in parts {
                             if let Some(ref mut text) = part.text {
-                                *text = text.replace('\0', "").trim().to_string();
+                                *text = sanitize_text(text);
                             }
                         }
                         // Don't drop multipart messages even if text is empty
@@ -130,6 +151,17 @@ pub fn sanitize_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
         .collect()
 }
 
+fn sanitize_text(input: &str) -> String {
+    input
+        .chars()
+        .filter(|ch| !is_invalid_api_control(*ch))
+        .collect()
+}
+
+fn is_invalid_api_control(ch: char) -> bool {
+    ch == '\0' || (ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
+}
+
 /// Mark the end of a tool loop sub-turn: remove reasoning
 /// from the preserved set when the tool call is resolved.
 pub fn finalize_tool_turn(reasoning_state: &mut ReasoningState, messages: &mut [ProtocolMessage]) {
@@ -140,4 +172,80 @@ pub fn finalize_tool_turn(reasoning_state: &mut ReasoningState, messages: &mut [
         }
     }
     reasoning_state.active_tool_turn = None;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::deepseek::models::ToolResultRecord;
+    use uuid::Uuid;
+
+    fn protocol_tool_message(tool_results: Vec<ToolResultRecord>) -> ProtocolMessage {
+        ProtocolMessage {
+            id: Uuid::nil(),
+            role: Role::Tool,
+            content: MessageContent::None,
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            tool_results,
+            turn_id: Uuid::nil(),
+            sub_turn_id: None,
+            visibility: MessageVisibility::InternalProtocolState,
+        }
+    }
+
+    #[test]
+    fn converts_every_tool_result_to_api_tool_message() {
+        let protocol = protocol_tool_message(vec![
+            ToolResultRecord {
+                tool_call_id: "call_a".into(),
+                name: "read".into(),
+                result: "first".into(),
+                is_error: false,
+            },
+            ToolResultRecord {
+                tool_call_id: "call_b".into(),
+                name: "write".into(),
+                result: "second".into(),
+                is_error: false,
+            },
+        ]);
+
+        let messages = to_chat_messages(&[protocol], &ReasoningState::default());
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "tool");
+        assert_eq!(messages[0].tool_call_id.as_deref(), Some("call_a"));
+        assert_eq!(messages[1].role, "tool");
+        assert_eq!(messages[1].tool_call_id.as_deref(), Some("call_b"));
+        assert!(matches!(
+            messages[1].content.as_ref(),
+            Some(ChatMessageContent::Text(text)) if text == "second"
+        ));
+    }
+
+    #[test]
+    fn sanitize_removes_controls_without_trimming_semantic_whitespace() {
+        let messages = vec![ChatMessage {
+            role: "user".into(),
+            content: Some(ChatMessageContent::Text(
+                "  first line\0\n\tsecond\u{0007}  ".into(),
+            )),
+            reasoning_content: Some(" keep\nreasoning\u{001b} ".into()),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }];
+
+        let cleaned = sanitize_messages(&messages);
+
+        assert!(matches!(
+            cleaned[0].content.as_ref(),
+            Some(ChatMessageContent::Text(text)) if text == "  first line\n\tsecond  "
+        ));
+        assert_eq!(
+            cleaned[0].reasoning_content.as_deref(),
+            Some(" keep\nreasoning ")
+        );
+    }
 }

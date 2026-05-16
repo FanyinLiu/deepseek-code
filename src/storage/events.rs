@@ -58,6 +58,12 @@ pub enum SessionEventKind {
         duration_ms: u64,
         changed_files: Vec<String>,
     },
+    HookExecuted {
+        event: String,
+        success: bool,
+        summary: String,
+        command_count: usize,
+    },
     PlanStarted {
         summary: String,
         total: usize,

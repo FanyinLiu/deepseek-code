@@ -1,6 +1,7 @@
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
+use crate::cli::resolve_project_root;
 use crate::deepseek::DeepSeekModel;
 use crate::storage;
 
@@ -15,21 +16,13 @@ pub async fn welcome(
     model_override: Option<String>,
     session: Option<String>,
 ) -> Result<(), anyhow::Error> {
-    let root = project_root
-        .unwrap_or_else(|| storage::find_project_root().unwrap_or_else(|| PathBuf::from(".")));
+    let root = resolve_project_root(project_root, "welcome")?;
 
-    // Resolve model
+    let config = storage::Config::load(Some(&root)).unwrap_or_default();
     let model = match model_override.as_deref() {
-        Some("pro" | "v4-pro") => DeepSeekModel::Pro,
-        Some("flash" | "v4-flash") | None => DeepSeekModel::Flash,
-        Some(other) => {
-            if let Some(m) = crate::deepseek::migration::migrate_model_name(other) {
-                m
-            } else {
-                eprintln!("Unknown model: {other}. Using flash.");
-                DeepSeekModel::Flash
-            }
-        }
+        Some(value) => crate::provider::parse_model(value)
+            .map_err(|error| anyhow::anyhow!("invalid model override: {error}"))?,
+        None => config.model.default.canonical(),
     };
 
     // Collect status
@@ -74,7 +67,15 @@ pub async fn welcome(
     }
 
     // Enter interactive chat loop (reuses existing chat logic)
-    super::chat::chat(None, thinking, model_override, Some(root), session).await
+    super::chat::chat(
+        None,
+        thinking,
+        model_override,
+        Some(root),
+        session,
+        crate::cli::TurnOutputFormat::Text,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]

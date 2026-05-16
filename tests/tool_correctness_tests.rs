@@ -138,6 +138,7 @@ async fn dispatch_uses_policy_default_run_command_timeout() {
     );
     let dispatch_config = deepseek_code::tools::dispatch::ToolDispatchConfig {
         command_timeout_seconds: 1,
+        ..Default::default()
     };
 
     let (output, is_error) = deepseek_code::tools::dispatch::execute_single_tool_with_config(

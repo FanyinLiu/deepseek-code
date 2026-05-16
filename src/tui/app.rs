@@ -11,8 +11,8 @@ use std::{
 use crossterm::{
     cursor::{position as cursor_position, Hide, MoveTo, Show},
     event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, Event as CEvent,
+        KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
     },
     execute,
     style::{
@@ -24,14 +24,13 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::Style,
-    text::{Line, Span, Text},
+    text::{Line, Span},
     widgets::Paragraph,
     Frame, Terminal, TerminalOptions, Viewport,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-const CTRL_C_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 const PAGE_SCROLL_LINES: usize = 20;
 const MOUSE_SCROLL_LINES: usize = 5;
 
@@ -50,15 +49,21 @@ fn animated_token_count(target: u64, elapsed_ms: u64) -> u64 {
 
 use crate::agent::orchestrator::{AgentEvent, DecisionKind, Orchestrator};
 use crate::deepseek::{
-    CacheUsage, DeepSeekModel, MessageContent, MessageVisibility, ProtocolMessage, ReasoningState,
-    Role, Session, SessionId, SessionMetadata, ThinkingMode, ToolCall, ToolCallFunction,
+    CacheUsage, DeepSeekModel, MessageContent, MessageVisibility, ProtocolMessage, ReasoningEffort,
+    ReasoningState, Role, Session, SessionId, SessionMetadata, ThinkingMode, ToolCall,
+    ToolCallFunction,
 };
 use crate::policy::ApprovalDisplay;
+use crate::provider::ProviderKind;
 use crate::storage;
 
 use super::{
     approval_popup, diff_viewer, file_tree, input, layout, model_hint, motion, plan_tracker,
-    settings_panel, status_bar, statusline, subagent_cards, theme, transcript_view, welcome,
+    render_core, settings_panel, status_bar, statusline, subagent_cards, theme, transcript_view,
+    welcome,
+};
+use render_core::{
+    render_canvas, render_classic_divider, render_jump_to_bottom_hint, render_top_model_badge,
 };
 
 type ApprovalRequest = (ApprovalDisplay, tokio::sync::oneshot::Sender<bool>);
@@ -87,12 +92,13 @@ pub struct TuiApp {
     pub activity_log: Vec<String>,
     pub current_task_title: String,
     pub pending_user_message: Option<String>,
-    pub queued_input: Option<String>,
+    pub queued_inputs: VecDeque<String>,
     pub stream_buffer: String,
     pub is_streaming: bool,
     pub stream_start: Option<std::time::Instant>,
     pub approval: Option<ApprovalRequest>,
     approval_queue: VecDeque<ApprovalRequest>,
+    approval_selected_index: usize,
     pub session_auto_approve: bool,
     pub interaction_mode: InteractionMode,
     pub running: bool,
@@ -108,12 +114,16 @@ pub struct TuiApp {
     pub pending_options: Option<(String, Vec<String>)>,
     pub selected_option_index: usize,
     pub selected_slash_index: usize,
+    pub selected_file_mention_index: usize,
     pub pending_images: Vec<String>,
     pub reasoning_buffer: String,
+    pub current_turn_reasoning_tokens: u64,
     pub show_reasoning: bool,
     pub input_history: Vec<String>,
     pub history_cursor: Option<usize>,
     pub draft_input: String,
+    pub history_search_active: bool,
+    pub history_search_draft: String,
     // Diff viewer interaction
     pub selected_diff: Option<usize>,
     pub diff_scroll: usize,
@@ -131,7 +141,6 @@ pub struct TuiApp {
     pub settings_open: bool,
     pub settings_tab: settings_panel::SettingsTab,
     pub settings_selected: usize,
-    ctrl_c_exit_deadline: Option<std::time::Instant>,
 }
 
 pub struct DecisionPrompt {
@@ -168,6 +177,13 @@ pub enum InteractionMode {
 pub enum RendererMode {
     Classic,
     Fullscreen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApprovalAction {
+    ApproveOnce,
+    ApproveSession,
+    Deny,
 }
 
 impl RendererMode {
@@ -589,12 +605,13 @@ impl TuiApp {
             activity_log: Vec::new(),
             current_task_title: String::new(),
             pending_user_message: None,
-            queued_input: None,
+            queued_inputs: VecDeque::new(),
             stream_buffer: String::new(),
             is_streaming: false,
             stream_start: None,
             approval: None,
             approval_queue: VecDeque::new(),
+            approval_selected_index: 0,
             session_auto_approve: false,
             interaction_mode: InteractionMode::Ask,
             running: true,
@@ -610,12 +627,16 @@ impl TuiApp {
             pending_options: None,
             selected_option_index: 0,
             selected_slash_index: 0,
+            selected_file_mention_index: 0,
             pending_images: Vec::new(),
             reasoning_buffer: String::new(),
+            current_turn_reasoning_tokens: 0,
             show_reasoning: false,
             input_history: crate::storage::input_history::load_history(),
             history_cursor: None,
             draft_input: String::new(),
+            history_search_active: false,
+            history_search_draft: String::new(),
             selected_diff: None,
             diff_scroll: 0,
             diff_focused: false,
@@ -631,7 +652,6 @@ impl TuiApp {
             settings_open: false,
             settings_tab: settings_panel::SettingsTab::Model,
             settings_selected: 0,
-            ctrl_c_exit_deadline: None,
         }
     }
 
@@ -741,7 +761,7 @@ impl TuiApp {
         self.settings_selected = self
             .settings_selected
             .min(settings_panel::row_count(self.settings_tab).saturating_sub(1));
-        self.status_message = "Settings are read-only in this build".into();
+        self.status_message = "Settings: Enter/Space/←/→ edits selected value".into();
     }
 
     fn handle_settings_key(&mut self, key: KeyEvent) {
@@ -765,15 +785,209 @@ impl TuiApp {
                 let max = settings_panel::row_count(self.settings_tab).saturating_sub(1);
                 self.settings_selected = (self.settings_selected + 1).min(max);
             }
-            KeyCode::Enter => {
-                self.status_message = "Settings editing is coming later".into();
+            KeyCode::Left => {
+                self.apply_selected_setting_change(-1);
+            }
+            KeyCode::Right | KeyCode::Enter => {
+                self.apply_selected_setting_change(1);
+            }
+            KeyCode::Char(' ') => {
+                self.apply_selected_setting_change(1);
             }
             _ => {}
         }
     }
 
+    fn apply_selected_setting_change(&mut self, delta: i32) {
+        let changed = match self.settings_tab {
+            settings_panel::SettingsTab::Model => self.apply_model_setting_change(delta),
+            settings_panel::SettingsTab::Safety => self.apply_safety_setting_change(delta),
+            settings_panel::SettingsTab::Interface => self.apply_interface_setting_change(delta),
+            settings_panel::SettingsTab::Agents => self.apply_agent_setting_change(delta),
+        };
+
+        if changed {
+            self.persist_settings_change();
+        } else {
+            self.status_message = "Selected setting is informational".into();
+        }
+    }
+
+    fn apply_model_setting_change(&mut self, delta: i32) -> bool {
+        match self.settings_selected {
+            0 => {
+                self.config.provider.default =
+                    cycle_provider_kind(self.config.provider.default, delta);
+                self.status_message = format!(
+                    "Provider default: {}",
+                    self.config.provider.default.as_str()
+                );
+                true
+            }
+            1 => {
+                self.model = cycle_model(&self.model, delta);
+                self.config.model.default = self.model.clone();
+                self.welcome.model = self.model.clone();
+                self.status_message = format!("Active model: {}", self.model);
+                true
+            }
+            2 => {
+                self.config.model.default = cycle_model(&self.config.model.default, delta);
+                self.status_message = format!("Default model: {}", self.config.model.default);
+                true
+            }
+            3 => {
+                self.config.model.heavy = cycle_model(&self.config.model.heavy, delta);
+                self.status_message = format!("Heavy model: {}", self.config.model.heavy);
+                true
+            }
+            4 => {
+                self.thinking_mode = cycle_thinking_mode(&self.thinking_mode, delta);
+                self.config.model.thinking_mode = self.thinking_mode.clone();
+                self.welcome.thinking = self.thinking_mode.clone();
+                self.status_message = format!("Active thinking: {}", self.thinking_mode);
+                true
+            }
+            5 => {
+                self.config.model.thinking_mode =
+                    cycle_thinking_mode(&self.config.model.thinking_mode, delta);
+                self.status_message =
+                    format!("Default thinking: {}", self.config.model.thinking_mode);
+                true
+            }
+            6 => {
+                self.config.model.reasoning_effort =
+                    cycle_reasoning_effort(&self.config.model.reasoning_effort, delta);
+                self.status_message =
+                    format!("Reasoning effort: {}", self.config.model.reasoning_effort);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn apply_safety_setting_change(&mut self, delta: i32) -> bool {
+        match self.settings_selected {
+            0 => {
+                self.config.policy.autonomy_level =
+                    cycle_autonomy_level(self.config.policy.autonomy_level, delta);
+                self.status_message = format!(
+                    "Autonomy level: {}",
+                    self.config.policy.autonomy_level.as_str()
+                );
+                true
+            }
+            3 => {
+                self.config.policy.require_approval_for_write =
+                    !self.config.policy.require_approval_for_write;
+                self.status_message = format!(
+                    "Write approval: {}",
+                    settings_on_required(self.config.policy.require_approval_for_write)
+                );
+                true
+            }
+            4 => {
+                self.config.policy.require_approval_for_command =
+                    !self.config.policy.require_approval_for_command;
+                self.status_message = format!(
+                    "Command approval: {}",
+                    settings_on_required(self.config.policy.require_approval_for_command)
+                );
+                true
+            }
+            5 => {
+                self.config.policy.network_access = !self.config.policy.network_access;
+                self.status_message = format!(
+                    "Network access: {}",
+                    settings_on_off(self.config.policy.network_access)
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn apply_interface_setting_change(&mut self, delta: i32) -> bool {
+        match self.settings_selected {
+            1 => {
+                let next = cycle_theme_mode(self.theme_mode, delta);
+                self.set_theme_mode(next);
+                true
+            }
+            4 => {
+                self.config.ui.show_reasoning_summary = !self.config.ui.show_reasoning_summary;
+                self.status_message = format!(
+                    "Reasoning summary: {}",
+                    settings_on_off(self.config.ui.show_reasoning_summary)
+                );
+                true
+            }
+            5 => {
+                self.config.ui.show_raw_reasoning = !self.config.ui.show_raw_reasoning;
+                self.status_message = format!(
+                    "Raw reasoning: {}",
+                    settings_on_off(self.config.ui.show_raw_reasoning)
+                );
+                true
+            }
+            6 => {
+                self.config.ui.show_cache_hud = !self.config.ui.show_cache_hud;
+                self.status_message = format!(
+                    "Cache HUD: {}",
+                    settings_on_off(self.config.ui.show_cache_hud)
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn apply_agent_setting_change(&mut self, delta: i32) -> bool {
+        match self.settings_selected {
+            4 => {
+                let current = self.config.subagent.max_parallel.max(1);
+                self.config.subagent.max_parallel = if delta < 0 {
+                    current.saturating_sub(1).max(1)
+                } else {
+                    (current + 1).min(64)
+                };
+                self.status_message = format!(
+                    "Max parallel subagents: {}",
+                    self.config.subagent.max_parallel
+                );
+                true
+            }
+            7 => {
+                self.config.mcp.enabled = !self.config.mcp.enabled;
+                self.status_message = format!("MCP: {}", settings_on_off(self.config.mcp.enabled));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn persist_settings_change(&mut self) {
+        match self
+            .config
+            .save_project_local_settings(&self.file_tree.root)
+        {
+            Ok(path) => {
+                let changed = self.status_message.clone();
+                self.status_message = format!("{changed} · saved {}", path.to_string_lossy());
+            }
+            Err(err) => {
+                self.status_message = format!("Setting changed but save failed: {err}");
+            }
+        }
+    }
+
     fn handle_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<TuiAction>) {
         if !is_actionable_key_event(key) {
+            return;
+        }
+        if is_exit_key(key) {
+            self.running = false;
+            self.status_message = "Exiting".into();
             return;
         }
 
@@ -837,28 +1051,27 @@ impl TuiApp {
             return;
         }
 
-        // Approval mode: only accept a/s/d
-        if let Some((approval, respond)) = self.approval.take() {
+        // Approval mode: keyboard selection only.
+        if self.approval.is_some() {
             match key.code {
-                KeyCode::Char('a') => {
-                    let _ = respond.send(true);
-                    self.activate_next_approval();
+                KeyCode::Left | KeyCode::Up | KeyCode::BackTab => {
+                    self.move_approval_selection_prev();
                 }
-                KeyCode::Char('s') => {
-                    self.session_auto_approve = true;
-                    let _ = respond.send(true);
-                    while let Some((_, queued_respond)) = self.approval_queue.pop_front() {
-                        let _ = queued_respond.send(true);
+                KeyCode::Right | KeyCode::Down | KeyCode::Tab => {
+                    self.move_approval_selection_next();
+                }
+                KeyCode::Enter => {
+                    self.complete_current_approval(self.selected_approval_action());
+                }
+                KeyCode::Char(c) => {
+                    if let Some(action) = approval_action_from_shortcut(c) {
+                        self.complete_current_approval(action);
                     }
-                    self.status_message = "Session approvals enabled".into();
                 }
-                KeyCode::Char('d') | KeyCode::Esc => {
-                    let _ = respond.send(false);
-                    self.activate_next_approval();
+                KeyCode::Esc => {
+                    self.complete_current_approval(ApprovalAction::Deny);
                 }
-                _ => {
-                    self.approval = Some((approval, respond));
-                }
+                _ => {}
             }
             return;
         }
@@ -873,11 +1086,20 @@ impl TuiApp {
             return;
         }
 
+        if self.history_search_active {
+            self.handle_history_search_key(key);
+            return;
+        }
+
         if self.handle_pending_option_key(key, tx) {
             return;
         }
 
         if self.handle_slash_suggestion_key(key) {
+            return;
+        }
+
+        if self.handle_file_mention_key(key) {
             return;
         }
 
@@ -931,11 +1153,7 @@ impl TuiApp {
                         }
 
                         if self.is_streaming && !input.starts_with('/') {
-                            self.queued_input = Some(input);
-                            self.clear_input_editor();
-                            self.status_message =
-                                "已排队；当前回答结束后自动发送。Ctrl+S 可重新注入当前输入。"
-                                    .into();
+                            self.queue_user_input(input);
                         } else {
                             let _ = tx.send(TuiAction::Submit(input));
                         }
@@ -1067,6 +1285,9 @@ impl TuiApp {
                 self.cycle_interaction_mode();
             }
             KeyCode::Char(c) => match c {
+                'r' if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.open_history_search();
+                }
                 'j' if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.insert_text_at_cursor("\n");
                 }
@@ -1075,9 +1296,7 @@ impl TuiApp {
                     if input.is_empty() {
                         self.status_message = "No input to inject".into();
                     } else if self.is_streaming {
-                        self.queued_input = Some(input);
-                        self.clear_input_editor();
-                        self.status_message = "已注入队列；当前任务结束后发送".into();
+                        self.queue_user_input(input);
                     } else {
                         let _ = tx.send(TuiAction::Submit(input));
                     }
@@ -1103,12 +1322,12 @@ impl TuiApp {
                 'n' if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.recall_next_history();
                 }
-                't' if self.input_text.is_empty() => {
+                c if c.eq_ignore_ascii_case(&'t') && self.input_text.is_empty() => {
                     self.show_reasoning = !self.show_reasoning;
                     self.status_message = if self.show_reasoning {
-                        "Reasoning display ON".into()
+                        "Thinking panel expanded".into()
                     } else {
-                        "Reasoning display OFF".into()
+                        "Thinking panel collapsed".into()
                     };
                 }
                 'd' if self.input_text.is_empty() => {
@@ -1258,6 +1477,15 @@ impl TuiApp {
                 self.selected_slash_index = (self.selected_slash_index + 1) % suggestions.len();
                 true
             }
+            KeyCode::PageUp => {
+                self.selected_slash_index = self.selected_slash_index.saturating_sub(8);
+                true
+            }
+            KeyCode::PageDown => {
+                self.selected_slash_index =
+                    (self.selected_slash_index + 8).min(suggestions.len() - 1);
+                true
+            }
             KeyCode::Tab => {
                 self.complete_selected_slash_command(&suggestions);
                 true
@@ -1306,7 +1534,6 @@ impl TuiApp {
         registry
             .match_prefix(trimmed)
             .into_iter()
-            .take(9)
             .map(|cmd| {
                 let display_name = if cmd.name.starts_with(trimmed) {
                     cmd.name
@@ -1317,9 +1544,109 @@ impl TuiApp {
                         .find(|alias| alias.starts_with(trimmed))
                         .unwrap_or(cmd.name)
                 };
-                (display_name.to_string(), cmd.description.to_string())
+                (
+                    display_name.to_string(),
+                    format!(
+                        "{} · {} · {}",
+                        slash_command_group(cmd.name),
+                        cmd.description,
+                        cmd.usage
+                    ),
+                )
             })
             .collect()
+    }
+
+    fn handle_file_mention_key(&mut self, key: KeyEvent) -> bool {
+        let suggestions = self.file_mention_suggestions();
+        if suggestions.is_empty() {
+            self.selected_file_mention_index = 0;
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Up => {
+                self.selected_file_mention_index = if self.selected_file_mention_index == 0 {
+                    suggestions.len() - 1
+                } else {
+                    self.selected_file_mention_index - 1
+                };
+                true
+            }
+            KeyCode::Down => {
+                self.selected_file_mention_index =
+                    (self.selected_file_mention_index + 1) % suggestions.len();
+                true
+            }
+            KeyCode::Tab => {
+                self.complete_selected_file_mention(&suggestions);
+                true
+            }
+            KeyCode::Enter => {
+                if self.current_file_mention_is_exact_match(&suggestions) {
+                    false
+                } else {
+                    self.complete_selected_file_mention(&suggestions);
+                    true
+                }
+            }
+            KeyCode::Esc => {
+                self.selected_file_mention_index = 0;
+                self.status_message = "File suggestions dismissed".into();
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn file_mention_suggestions(&self) -> Vec<String> {
+        if self.api_key_entry.is_some() || self.settings_open {
+            return Vec::new();
+        }
+        let Some((_, prefix)) = mention_prefix_at_cursor(&self.input_text, self.cursor_pos) else {
+            return Vec::new();
+        };
+        let recent = recent_mention_paths(&self.input_history);
+        file_mention_candidates(&self.file_tree.mention_paths, &prefix, 8, &recent)
+    }
+
+    fn shell_hint_active(&self) -> bool {
+        self.api_key_entry.is_none()
+            && !self.settings_open
+            && !self.history_search_active
+            && self.input_text.trim_start().starts_with('!')
+    }
+
+    fn complete_selected_file_mention(&mut self, suggestions: &[String]) {
+        if suggestions.is_empty() {
+            return;
+        }
+        let idx = self
+            .selected_file_mention_index
+            .min(suggestions.len().saturating_sub(1));
+        let Some((token_start, _)) = mention_prefix_at_cursor(&self.input_text, self.cursor_pos)
+        else {
+            return;
+        };
+        let byte_cursor = char_to_byte_idx(&self.input_text, self.cursor_pos);
+        let completion = &suggestions[idx];
+        let replacement = format!("@{completion} ");
+        self.input_text
+            .replace_range(token_start..byte_cursor, &replacement);
+        self.cursor_pos =
+            self.input_text[..token_start].chars().count() + replacement.chars().count();
+        self.selected_file_mention_index = idx;
+        self.status_message = format!("@{completion} will attach file context");
+    }
+
+    fn current_file_mention_is_exact_match(&self, suggestions: &[String]) -> bool {
+        let Some((_, prefix)) = mention_prefix_at_cursor(&self.input_text, self.cursor_pos) else {
+            return false;
+        };
+        let prefix = prefix.replace('\\', "/");
+        suggestions
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(&prefix))
     }
 
     fn input_for_interaction_mode(&self, input: String) -> String {
@@ -1490,6 +1817,109 @@ impl TuiApp {
         let _ = tx.send(TuiAction::Submit(selected));
     }
 
+    fn open_history_search(&mut self) {
+        if self.input_history.is_empty() {
+            self.status_message = "No input history yet".into();
+            return;
+        }
+        self.history_search_active = true;
+        self.history_search_draft = self.input_text.clone();
+        self.input_text.clear();
+        self.cursor_pos = 0;
+        self.selected_option_index = 0;
+        self.history_cursor = None;
+        self.status_message =
+            "History search: type query, Enter inserts, Esc restores draft".into();
+    }
+
+    fn close_history_search(&mut self, restore_draft: bool) {
+        self.history_search_active = false;
+        self.selected_option_index = 0;
+        if restore_draft {
+            self.input_text = self.history_search_draft.clone();
+            self.cursor_pos = self.input_text.chars().count();
+            self.status_message = "History search closed".into();
+        }
+        self.history_search_draft.clear();
+    }
+
+    fn handle_history_search_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.close_history_search(true),
+            KeyCode::Enter => {
+                let options = self.history_search_options();
+                if options.is_empty() {
+                    self.status_message = "No matching history entry".into();
+                    return;
+                }
+                let idx = self.selected_option_index.min(options.len() - 1);
+                self.input_text = options[idx].clone();
+                self.cursor_pos = self.input_text.chars().count();
+                self.history_search_active = false;
+                self.history_search_draft.clear();
+                self.selected_option_index = 0;
+                self.status_message = "History entry inserted".into();
+            }
+            KeyCode::Up => {
+                let count = self.history_search_options().len();
+                self.move_option_selection_up(count);
+            }
+            KeyCode::Down | KeyCode::Tab => {
+                let count = self.history_search_options().len();
+                self.move_option_selection_down(count);
+            }
+            KeyCode::Backspace if self.cursor_pos > 0 => {
+                let byte_idx = self
+                    .input_text
+                    .char_indices()
+                    .nth(self.cursor_pos.saturating_sub(1))
+                    .map_or(self.input_text.len(), |(i, _)| i);
+                self.input_text.remove(byte_idx);
+                self.cursor_pos -= 1;
+                self.selected_option_index = 0;
+            }
+            KeyCode::Delete if self.cursor_pos < self.input_text.chars().count() => {
+                let byte_idx = char_to_byte_idx(&self.input_text, self.cursor_pos);
+                self.input_text.remove(byte_idx);
+                self.selected_option_index = 0;
+            }
+            KeyCode::Left if self.cursor_pos > 0 => {
+                self.cursor_pos -= 1;
+            }
+            KeyCode::Right if self.cursor_pos < self.input_text.chars().count() => {
+                self.cursor_pos += 1;
+            }
+            KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'r' => {
+                self.close_history_search(true);
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.insert_text_at_cursor(&c.to_string());
+                self.selected_option_index = 0;
+            }
+            _ => {}
+        }
+    }
+
+    fn history_search_options(&self) -> Vec<String> {
+        if !self.history_search_active {
+            return Vec::new();
+        }
+        let query = self.input_text.trim().to_lowercase();
+        let mut options = Vec::new();
+        for entry in self.input_history.iter().rev() {
+            if !query.is_empty() && !entry.to_lowercase().contains(&query) {
+                continue;
+            }
+            if !options.iter().any(|existing| existing == entry) {
+                options.push(entry.clone());
+            }
+            if options.len() >= 10 {
+                break;
+            }
+        }
+        options
+    }
+
     fn recall_previous_history(&mut self) {
         if self.input_history.is_empty() {
             self.status_message = "No input history yet".into();
@@ -1571,7 +2001,9 @@ impl TuiApp {
             return false;
         };
 
-        let candidates = file_mention_candidates(&self.file_tree.root, &prefix, 8);
+        let recent = recent_mention_paths(&self.input_history);
+        let candidates =
+            file_mention_candidates(&self.file_tree.mention_paths, &prefix, 8, &recent);
         if candidates.is_empty() {
             self.status_message = format!("No file matches @{prefix}");
             return true;
@@ -1707,6 +2139,26 @@ impl TuiApp {
         self.cursor_pos = 0;
     }
 
+    fn queue_user_input(&mut self, input: String) {
+        let input = input.trim().to_string();
+        if input.is_empty() {
+            return;
+        }
+        self.queued_inputs.push_back(input);
+        self.clear_input_editor();
+        let count = self.queued_inputs.len();
+        self.status_message = if count == 1 {
+            "已排队：当前任务完成后自动发送。".into()
+        } else {
+            format!("已排队 {count} 条：将按顺序自动发送。")
+        };
+        self.push_activity(format!("queued follow-up: {count} pending"));
+    }
+
+    fn queued_user_message_refs(&self) -> Vec<&str> {
+        self.queued_inputs.iter().map(String::as_str).collect()
+    }
+
     fn insert_text_at_cursor(&mut self, text: &str) {
         if text.is_empty() {
             return;
@@ -1837,6 +2289,7 @@ impl TuiApp {
         self.current_task_title = summarize_task_title(input);
         self.current_turn_input_tokens = 0;
         self.current_turn_output_tokens = 0;
+        self.current_turn_reasoning_tokens = 0;
         self.current_turn_tokens = 0;
         self.current_turn_usage_finalized = false;
         self.input_token_animation_started = None;
@@ -1889,6 +2342,7 @@ impl TuiApp {
         self.is_streaming = false;
         self.stream_start = None;
         self.reasoning_buffer.clear();
+        self.current_turn_reasoning_tokens = 0;
         for step in &mut self.plan_steps {
             if step.status == plan_tracker::PlanStepStatus::Running {
                 step.transition_to(plan_tracker::PlanStepStatus::Failed);
@@ -1927,6 +2381,7 @@ impl TuiApp {
     ) {
         if self.approval.is_none() {
             self.approval = Some((display, respond));
+            self.approval_selected_index = 0;
             return;
         }
 
@@ -1943,6 +2398,7 @@ impl TuiApp {
 
         if let Some(next) = self.approval_queue.pop_front() {
             self.approval = Some(next);
+            self.approval_selected_index = 0;
             let pending = self.approval_queue.len();
             self.push_activity(format!("next approval ready: {pending} pending"));
             self.status_message = if pending == 0 {
@@ -1953,7 +2409,55 @@ impl TuiApp {
         }
     }
 
+    fn move_approval_selection_prev(&mut self) {
+        let count = approval_popup::APPROVAL_ACTION_COUNT;
+        self.approval_selected_index = if self.approval_selected_index == 0 {
+            count.saturating_sub(1)
+        } else {
+            self.approval_selected_index - 1
+        };
+    }
+
+    fn move_approval_selection_next(&mut self) {
+        let count = approval_popup::APPROVAL_ACTION_COUNT.max(1);
+        self.approval_selected_index = (self.approval_selected_index + 1) % count;
+    }
+
+    fn selected_approval_action(&self) -> ApprovalAction {
+        match self.approval_selected_index {
+            1 => ApprovalAction::ApproveSession,
+            2 => ApprovalAction::Deny,
+            _ => ApprovalAction::ApproveOnce,
+        }
+    }
+
+    fn complete_current_approval(&mut self, action: ApprovalAction) {
+        let Some((_, respond)) = self.approval.take() else {
+            return;
+        };
+        self.approval_selected_index = 0;
+        match action {
+            ApprovalAction::ApproveOnce => {
+                let _ = respond.send(true);
+                self.activate_next_approval();
+            }
+            ApprovalAction::ApproveSession => {
+                self.session_auto_approve = true;
+                let _ = respond.send(true);
+                while let Some((_, queued_respond)) = self.approval_queue.pop_front() {
+                    let _ = queued_respond.send(true);
+                }
+                self.status_message = "Session approvals enabled".into();
+            }
+            ApprovalAction::Deny => {
+                let _ = respond.send(false);
+                self.activate_next_approval();
+            }
+        }
+    }
+
     fn deny_pending_approvals(&mut self) {
+        self.approval_selected_index = 0;
         if let Some((_, respond)) = self.approval.take() {
             let _ = respond.send(false);
         }
@@ -1970,6 +2474,7 @@ impl TuiApp {
             messages: self.messages.clone(),
             reasoning_state: ReasoningState {
                 mode: self.thinking_mode.clone(),
+                selected_model: Some(self.model.clone()),
                 ..ReasoningState::default()
             },
             tool_call_history: Vec::new(),
@@ -1982,6 +2487,7 @@ impl TuiApp {
 
     fn apply_agent_event(&mut self, event: AgentEvent) {
         match event {
+            AgentEvent::UserMessage { .. } => {}
             AgentEvent::ContentDelta(text) => {
                 self.add_output_token_estimate(&text);
                 if self.plan_execution_has_started() && !text.trim().is_empty() {
@@ -1992,6 +2498,9 @@ impl TuiApp {
             }
             AgentEvent::ReasoningDelta(text) => {
                 self.add_output_token_estimate(&text);
+                self.current_turn_reasoning_tokens = self
+                    .current_turn_reasoning_tokens
+                    .saturating_add(estimate_tokens(&text));
                 self.reasoning_buffer.push_str(&text);
             }
             AgentEvent::TokenDelta {
@@ -2014,6 +2523,7 @@ impl TuiApp {
                     self.enqueue_approval(display, respond);
                 }
             }
+            AgentEvent::ToolStarted { .. } => {}
             AgentEvent::ToolExecuted {
                 tool_name,
                 success,
@@ -2028,6 +2538,7 @@ impl TuiApp {
                 ));
                 self.status_message = format!("Tool {tool_name} [{status}]: {summary}");
             }
+            AgentEvent::HookExecuted { .. } => {}
             AgentEvent::StreamDone { usage, cache, .. } => {
                 if let Some(u) = usage {
                     let turn_tokens = u64::from(u.total_tokens);
@@ -2068,6 +2579,7 @@ impl TuiApp {
                 self.is_streaming = false;
                 self.stream_start = None;
                 self.reasoning_buffer.clear();
+                self.current_turn_reasoning_tokens = 0;
                 if let Some(duration_ms) = turn_duration_ms {
                     append_brewed_line(&mut self.stream_buffer, duration_ms);
                 }
@@ -2364,19 +2876,6 @@ impl TuiApp {
         }
     }
 
-    fn handle_ctrl_c_exit_request(&mut self, now: std::time::Instant) -> bool {
-        if self.ctrl_c_exit_prompt_active_at(now) {
-            return true;
-        }
-        self.ctrl_c_exit_deadline = Some(now + CTRL_C_CONFIRM_WINDOW);
-        self.status_message = "Press Ctrl-C again to exit".into();
-        false
-    }
-
-    fn dismiss_ctrl_c_exit_prompt(&mut self) {
-        self.ctrl_c_exit_deadline = None;
-    }
-
     fn scroll_older(&mut self, amount: usize) {
         self.scroll_offset = self.scroll_offset.saturating_add(amount);
     }
@@ -2396,11 +2895,6 @@ impl TuiApp {
         }
     }
 
-    fn ctrl_c_exit_prompt_active_at(&self, now: std::time::Instant) -> bool {
-        self.ctrl_c_exit_deadline
-            .is_some_and(|deadline| now <= deadline)
-    }
-
     fn render(&self, f: &mut Frame) {
         theme::set_active_theme(self.theme_mode);
         let area = f.area();
@@ -2412,9 +2906,6 @@ impl TuiApp {
         render_canvas(f, area);
         if self.should_render_minimal_runtime_surface() {
             self.render_minimal_runtime_surface(f, area);
-            if let Some((ref approval, _)) = self.approval {
-                approval_popup::render_approval_popup(f, area, approval);
-            }
             return;
         }
         let input_h = self.input_height();
@@ -2432,15 +2923,31 @@ impl TuiApp {
 
         let (status_area, body_area, model_hint_area, divider_area, input_area, footer_area) =
             layout::app_layout(main_area, input_h);
-        let slash_suggestions = self.slash_command_suggestions();
+        let slash_suggestions = if self.history_search_active {
+            Vec::new()
+        } else {
+            self.slash_command_suggestions()
+        };
+        let file_mention_suggestions = if self.history_search_active {
+            Vec::new()
+        } else {
+            self.file_mention_suggestions()
+        };
+        let history_options = self.history_search_options();
+        let shell_hint_active = self.shell_hint_active();
 
         // Reserve space for options panel when orchestrator presents choices.
         let options_count = self
             .options_needed
             .as_ref()
             .map(|decision| decision.options.len())
+            .or_else(|| (!history_options.is_empty()).then_some(history_options.len()))
             .or_else(|| self.pending_options.as_ref().map(|(_, opts)| opts.len()))
+            .or_else(|| shell_hint_active.then_some(3))
             .or_else(|| (!slash_suggestions.is_empty()).then_some(slash_suggestions.len()))
+            .or_else(|| {
+                (!file_mention_suggestions.is_empty()).then_some(file_mention_suggestions.len())
+            })
             .unwrap_or(0);
         let options_h: u16 = if options_count > 0 {
             (options_count + 5).min(12) as u16
@@ -2493,6 +3000,7 @@ impl TuiApp {
                     activity: None,
                 },
             );
+            render_top_model_badge(f, status_area, &self.model);
         }
 
         // Welcome page: full body (only when empty)
@@ -2529,12 +3037,14 @@ impl TuiApp {
             } else {
                 &self.subagents
             };
+            let queued_user_messages = self.queued_user_message_refs();
             transcript_view::render_transcript(
                 f,
                 content_area,
                 transcript_view::TranscriptProps {
                     messages: &self.messages,
                     pending_user_message: self.pending_user_message.as_deref(),
+                    queued_user_messages: &queued_user_messages,
                     scroll_offset: self.scroll_offset,
                     plan_summary: self.plan_summary.as_deref(),
                     plan_steps: &self.plan_steps,
@@ -2549,6 +3059,8 @@ impl TuiApp {
                     show_streaming_placeholder: false,
                     stream_buffer: &self.stream_buffer,
                     reasoning_buffer: &self.reasoning_buffer,
+                    reasoning_elapsed_ms: self.reasoning_elapsed_ms(),
+                    reasoning_tokens: self.current_turn_reasoning_tokens,
                     show_reasoning: self.show_reasoning,
                 },
             );
@@ -2566,6 +3078,12 @@ impl TuiApp {
                     decision.title.as_str(),
                     decision.options.as_slice(),
                 )
+            } else if self.history_search_active {
+                (
+                    DecisionKind::Clarification,
+                    "History search",
+                    history_options.as_slice(),
+                )
             } else if let Some((t, opts)) = &self.pending_options {
                 (DecisionKind::Clarification, t.as_str(), opts.as_slice())
             } else {
@@ -2580,12 +3098,21 @@ impl TuiApp {
                     options,
                     self.selected_option_index,
                 );
+            } else if shell_hint_active {
+                plan_tracker::render_shell_hint_panel(f, options_area);
             } else if !slash_suggestions.is_empty() {
                 plan_tracker::render_slash_command_panel(
                     f,
                     options_area,
                     &slash_suggestions,
                     self.selected_slash_index,
+                );
+            } else if !file_mention_suggestions.is_empty() {
+                plan_tracker::render_file_mention_panel(
+                    f,
+                    options_area,
+                    &file_mention_suggestions,
+                    self.selected_file_mention_index,
                 );
             }
         }
@@ -2626,7 +3153,11 @@ impl TuiApp {
         }
 
         // Input
-        let opts_for_input = self.pending_options.as_ref().map(|(_, o)| o.as_slice());
+        let opts_for_input = if self.history_search_active {
+            Some(history_options.as_slice())
+        } else {
+            self.pending_options.as_ref().map(|(_, o)| o.as_slice())
+        };
         if self.api_key_entry.is_some() {
             input::render_api_key_input_with_motion(
                 f,
@@ -2653,15 +3184,16 @@ impl TuiApp {
         );
         f.set_cursor_position((cursor_x, cursor_y));
 
-        if self.ctrl_c_exit_prompt_active_at(std::time::Instant::now()) {
-            self.render_ctrl_c_exit_footer(f, footer_area);
-        } else {
-            self.render_powerline_footer(f, footer_area);
-        }
+        self.render_powerline_footer(f, footer_area);
 
         // Approval popup (on top of everything)
         if let Some((ref approval, _)) = self.approval {
-            approval_popup::render_approval_popup(f, area, approval);
+            approval_popup::render_approval_popup(
+                f,
+                approval_overlay_area(area, divider_area.y),
+                approval,
+                self.approval_selected_index,
+            );
         }
     }
 
@@ -2683,13 +3215,29 @@ impl TuiApp {
             horizontal: u16::from(area.width >= 70) * 3,
             vertical: u16::from(area.height >= 10),
         });
-        let slash_suggestions = self.slash_command_suggestions();
+        let slash_suggestions = if self.history_search_active {
+            Vec::new()
+        } else {
+            self.slash_command_suggestions()
+        };
+        let file_mention_suggestions = if self.history_search_active {
+            Vec::new()
+        } else {
+            self.file_mention_suggestions()
+        };
+        let history_options = self.history_search_options();
+        let shell_hint_active = self.shell_hint_active();
         let options_count = self
             .options_needed
             .as_ref()
             .map(|decision| decision.options.len())
+            .or_else(|| (!history_options.is_empty()).then_some(history_options.len()))
             .or_else(|| self.pending_options.as_ref().map(|(_, opts)| opts.len()))
+            .or_else(|| shell_hint_active.then_some(3))
             .or_else(|| (!slash_suggestions.is_empty()).then_some(slash_suggestions.len()))
+            .or_else(|| {
+                (!file_mention_suggestions.is_empty()).then_some(file_mention_suggestions.len())
+            })
             .unwrap_or(0);
         let options_h: u16 = if options_count > 0 {
             (options_count + 5).min(12) as u16
@@ -2715,7 +3263,7 @@ impl TuiApp {
             render_jump_to_bottom_hint(f, rows[0]);
         }
         if options_h > 0 {
-            self.render_command_options(f, rows[1], &slash_suggestions);
+            self.render_command_options(f, rows[1], &slash_suggestions, &file_mention_suggestions);
         }
         self.render_minimal_runtime_activity(f, rows[2]);
         render_classic_divider(f, rows[3]);
@@ -2723,12 +3271,17 @@ impl TuiApp {
             self.render_minimal_runtime_prompt(f, rows[4]);
         }
         self.render_powerline_footer(f, rows[5]);
+        if let Some((ref approval, _)) = self.approval {
+            approval_popup::render_approval_popup(
+                f,
+                approval_overlay_area(area, rows[3].y),
+                approval,
+                self.approval_selected_index,
+            );
+        }
     }
 
     fn minimal_runtime_prompt_height(&self) -> u16 {
-        if self.ctrl_c_exit_prompt_active_at(std::time::Instant::now()) {
-            return 1;
-        }
         let line_count = self.input_text.lines().count().max(1) as u16;
         line_count.clamp(1, 3)
     }
@@ -2783,12 +3336,14 @@ impl TuiApp {
         } else {
             &self.subagents
         };
+        let queued_user_messages = self.queued_user_message_refs();
         transcript_view::render_transcript(
             f,
             area,
             transcript_view::TranscriptProps {
                 messages: &self.messages,
                 pending_user_message: self.pending_user_message.as_deref(),
+                queued_user_messages: &queued_user_messages,
                 scroll_offset: self.scroll_offset,
                 plan_summary: self.plan_summary.as_deref(),
                 plan_steps: &self.plan_steps,
@@ -2803,6 +3358,8 @@ impl TuiApp {
                 show_streaming_placeholder: false,
                 stream_buffer: &self.stream_buffer,
                 reasoning_buffer: &self.reasoning_buffer,
+                reasoning_elapsed_ms: self.reasoning_elapsed_ms(),
+                reasoning_tokens: self.current_turn_reasoning_tokens,
                 show_reasoning: self.show_reasoning,
             },
         );
@@ -2813,12 +3370,12 @@ impl TuiApp {
             return;
         }
 
-        if self.ctrl_c_exit_prompt_active_at(std::time::Instant::now()) {
-            render_classic_status_text(f, area, "Press Ctrl-C again to exit");
-            return;
-        }
-
-        let opts_for_input = self.pending_options.as_ref().map(|(_, o)| o.as_slice());
+        let history_options = self.history_search_options();
+        let opts_for_input = if self.history_search_active {
+            Some(history_options.as_slice())
+        } else {
+            self.pending_options.as_ref().map(|(_, o)| o.as_slice())
+        };
         input::render_input_with_motion(
             f,
             area,
@@ -2837,12 +3394,21 @@ impl TuiApp {
         f: &mut Frame,
         area: Rect,
         slash_suggestions: &[(String, String)],
+        file_mention_suggestions: &[String],
     ) {
+        let history_options = self.history_search_options();
+        let shell_hint_active = self.shell_hint_active();
         let (kind, title, options) = if let Some(decision) = &self.options_needed {
             (
                 decision.kind,
                 decision.title.as_str(),
                 decision.options.as_slice(),
+            )
+        } else if self.history_search_active {
+            (
+                DecisionKind::Clarification,
+                "History search",
+                history_options.as_slice(),
             )
         } else if let Some((t, opts)) = &self.pending_options {
             (DecisionKind::Clarification, t.as_str(), opts.as_slice())
@@ -2858,12 +3424,21 @@ impl TuiApp {
                 options,
                 self.selected_option_index,
             );
+        } else if shell_hint_active {
+            plan_tracker::render_shell_hint_panel(f, area);
         } else if !slash_suggestions.is_empty() {
             plan_tracker::render_slash_command_panel(
                 f,
                 area,
                 slash_suggestions,
                 self.selected_slash_index,
+            );
+        } else if !file_mention_suggestions.is_empty() {
+            plan_tracker::render_file_mention_panel(
+                f,
+                area,
+                file_mention_suggestions,
+                self.selected_file_mention_index,
             );
         }
     }
@@ -2872,28 +3447,40 @@ impl TuiApp {
         render_canvas(f, area);
         if self.should_render_minimal_runtime_surface() {
             self.render_minimal_runtime_surface(f, area);
-            if let Some((ref approval, _)) = self.approval {
-                approval_popup::render_approval_popup(f, area, approval);
-            }
             return;
         }
 
         let input_h = self.input_height();
-        let slash_suggestions = self.slash_command_suggestions();
+        let slash_suggestions = if self.history_search_active {
+            Vec::new()
+        } else {
+            self.slash_command_suggestions()
+        };
+        let file_mention_suggestions = if self.history_search_active {
+            Vec::new()
+        } else {
+            self.file_mention_suggestions()
+        };
+        let history_options = self.history_search_options();
+        let shell_hint_active = self.shell_hint_active();
         let options_count = self
             .options_needed
             .as_ref()
             .map(|decision| decision.options.len())
+            .or_else(|| (!history_options.is_empty()).then_some(history_options.len()))
             .or_else(|| self.pending_options.as_ref().map(|(_, opts)| opts.len()))
+            .or_else(|| shell_hint_active.then_some(3))
             .or_else(|| (!slash_suggestions.is_empty()).then_some(slash_suggestions.len()))
+            .or_else(|| {
+                (!file_mention_suggestions.is_empty()).then_some(file_mention_suggestions.len())
+            })
             .unwrap_or(0);
         let options_h: u16 = if options_count > 0 {
             (options_count + 4).min(10) as u16
         } else {
             0
         };
-        let show_exit_prompt = self.ctrl_c_exit_prompt_active_at(std::time::Instant::now());
-        let activity_h = u16::from(self.is_streaming || show_exit_prompt);
+        let activity_h = u16::from(self.is_streaming);
         let inner = area.inner(Margin {
             horizontal: u16::from(area.width >= 60),
             vertical: 0,
@@ -2949,12 +3536,14 @@ impl TuiApp {
             } else {
                 &self.subagents
             };
+            let queued_user_messages = self.queued_user_message_refs();
             transcript_view::render_transcript(
                 f,
                 content_area,
                 transcript_view::TranscriptProps {
                     messages: &self.messages,
                     pending_user_message: self.pending_user_message.as_deref(),
+                    queued_user_messages: &queued_user_messages,
                     scroll_offset: self.scroll_offset,
                     plan_summary: self.plan_summary.as_deref(),
                     plan_steps: &self.plan_steps,
@@ -2969,9 +3558,14 @@ impl TuiApp {
                     show_streaming_placeholder: false,
                     stream_buffer: &self.stream_buffer,
                     reasoning_buffer: &self.reasoning_buffer,
+                    reasoning_elapsed_ms: self.reasoning_elapsed_ms(),
+                    reasoning_tokens: self.current_turn_reasoning_tokens,
                     show_reasoning: self.show_reasoning,
                 },
             );
+        }
+        if !self.settings_open {
+            render_top_model_badge(f, content_area, &self.model);
         }
 
         if self.scroll_offset > 0 {
@@ -2984,6 +3578,12 @@ impl TuiApp {
                     decision.kind,
                     decision.title.as_str(),
                     decision.options.as_slice(),
+                )
+            } else if self.history_search_active {
+                (
+                    DecisionKind::Clarification,
+                    "History search",
+                    history_options.as_slice(),
                 )
             } else if let Some((t, opts)) = &self.pending_options {
                 (DecisionKind::Clarification, t.as_str(), opts.as_slice())
@@ -2999,6 +3599,8 @@ impl TuiApp {
                     options,
                     self.selected_option_index,
                 );
+            } else if shell_hint_active {
+                plan_tracker::render_shell_hint_panel(f, options_area);
             } else if !slash_suggestions.is_empty() {
                 plan_tracker::render_slash_command_panel(
                     f,
@@ -3006,12 +3608,17 @@ impl TuiApp {
                     &slash_suggestions,
                     self.selected_slash_index,
                 );
+            } else if !file_mention_suggestions.is_empty() {
+                plan_tracker::render_file_mention_panel(
+                    f,
+                    options_area,
+                    &file_mention_suggestions,
+                    self.selected_file_mention_index,
+                );
             }
         }
 
-        if show_exit_prompt {
-            render_classic_status_text(f, activity_area, "Press Ctrl-C again to exit");
-        } else if self.is_streaming {
+        if self.is_streaming {
             status_bar::render_status_bar(
                 f,
                 activity_area,
@@ -3036,7 +3643,11 @@ impl TuiApp {
         }
 
         render_classic_divider(f, top_divider_area);
-        let opts_for_input = self.pending_options.as_ref().map(|(_, o)| o.as_slice());
+        let opts_for_input = if self.history_search_active {
+            Some(history_options.as_slice())
+        } else {
+            self.pending_options.as_ref().map(|(_, o)| o.as_slice())
+        };
         if self.api_key_entry.is_some() {
             input::render_api_key_input_with_motion(
                 f,
@@ -3066,7 +3677,12 @@ impl TuiApp {
         f.set_cursor_position((cursor_x, cursor_y));
 
         if let Some((ref approval, _)) = self.approval {
-            approval_popup::render_approval_popup(f, area, approval);
+            approval_popup::render_approval_popup(
+                f,
+                approval_overlay_area(area, top_divider_area.y),
+                approval,
+                self.approval_selected_index,
+            );
         }
     }
 
@@ -3091,6 +3707,7 @@ impl TuiApp {
             area,
             statusline::StatuslineProps {
                 mode: self.current_mode(),
+                model: &self.model,
                 status,
                 tokens: self.visible_context_tokens(),
                 input_tokens: self.visible_input_tokens(),
@@ -3099,6 +3716,7 @@ impl TuiApp {
                 cost: self.total_cost,
                 cache: self.cache.as_ref(),
                 permissions,
+                context_limit: Some(self.config.search.max_context_tokens as u64),
             },
         );
     }
@@ -3114,6 +3732,11 @@ impl TuiApp {
                 thought_seconds_from_reasoning(&self.reasoning_buffer, started.elapsed().as_secs())
             }),
         }
+    }
+
+    fn reasoning_elapsed_ms(&self) -> u64 {
+        self.stream_start
+            .map_or(0, |started| started.elapsed().as_millis() as u64)
     }
 
     fn activity_input_tokens(&self) -> u64 {
@@ -3158,30 +3781,6 @@ impl TuiApp {
         } else {
             self.total_tokens
         }
-    }
-
-    fn render_ctrl_c_exit_footer(&self, f: &mut Frame, area: ratatui::layout::Rect) {
-        let p = theme::palette();
-        let lines = vec![
-            Line::from(Span::styled(
-                "─".repeat(area.width as usize),
-                Style::default().fg(p.divider).bg(p.canvas),
-            )),
-            Line::from(vec![
-                Span::styled("  ", Style::default().bg(p.canvas)),
-                Span::styled(
-                    "Press Ctrl-C again to exit",
-                    Style::default()
-                        .fg(p.dim)
-                        .bg(p.canvas)
-                        .add_modifier(ratatui::style::Modifier::BOLD),
-                ),
-            ]),
-        ];
-        f.render_widget(
-            Paragraph::new(Text::from(lines)).style(Style::default().fg(p.text).bg(p.canvas)),
-            area,
-        );
     }
 
     fn auto_complete_parent_plan_step(&mut self) {
@@ -3276,57 +3875,11 @@ pub enum TuiAction {
     ShowTranscript,
 }
 
-fn render_canvas(f: &mut Frame, area: Rect) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-
-    let p = theme::palette();
-    let line = " ".repeat(area.width as usize);
-    let lines = (0..area.height)
-        .map(|_| Line::from(Span::styled(line.clone(), Style::default().bg(p.canvas))))
-        .collect::<Vec<_>>();
-    f.render_widget(
-        Paragraph::new(Text::from(lines)).style(Style::default().fg(p.text).bg(p.canvas)),
-        area,
-    );
-}
-
-fn render_classic_divider(f: &mut Frame, area: Rect) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let p = theme::palette();
-    let line = "─".repeat(area.width as usize);
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            line,
-            Style::default().fg(p.dim).bg(p.canvas),
-        )))
-        .style(Style::default().fg(p.text).bg(p.canvas)),
-        area,
-    );
-}
-
-fn render_classic_status_text(f: &mut Frame, area: Rect, text: &str) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let p = theme::palette();
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("* ", Style::default().fg(p.warning).bg(p.canvas)),
-            Span::styled(
-                text.to_string(),
-                Style::default()
-                    .fg(p.dim)
-                    .bg(p.canvas)
-                    .add_modifier(ratatui::style::Modifier::BOLD),
-            ),
-        ]))
-        .style(Style::default().fg(p.text).bg(p.canvas)),
-        area,
-    );
+fn approval_overlay_area(area: Rect, lower_boundary_y: u16) -> Rect {
+    let bottom = lower_boundary_y
+        .min(area.bottom())
+        .max(area.y.saturating_add(1));
+    Rect::new(area.x, area.y, area.width, bottom.saturating_sub(area.y))
 }
 
 /// Non-interactive states used by `preview-tui` for dynamic layout checks.
@@ -3592,7 +4145,6 @@ impl TerminalSession {
                 Clear(ClearType::Purge),
                 Clear(ClearType::All),
                 MoveTo(0, 0),
-                EnableMouseCapture,
                 EnableBracketedPaste
             )?;
         } else {
@@ -3627,11 +4179,36 @@ impl Drop for TerminalSession {
             );
             if self.renderer.uses_alternate_screen() {
                 let _ = execute!(stdout, LeaveAlternateScreen);
+                reset_terminal_scroll_region(&mut stdout);
+            } else {
+                reset_terminal_scroll_region(&mut stdout);
+                let _ = execute!(
+                    stdout,
+                    Clear(ClearType::All),
+                    MoveTo(0, shell_prompt_row_after_clear()),
+                    Clear(ClearType::CurrentLine)
+                );
             }
             let _ = write!(stdout, "\x1b[0m\x1b[39m\x1b[49m");
             let _ = stdout.flush();
         }
     }
+}
+
+fn reset_terminal_scroll_region(stdout: &mut impl Write) {
+    // Ratatui inline/fixed viewports may leave DECSTBM scroll margins active in
+    // some terminals. Reset them before handing the screen back to the shell.
+    let _ = write!(stdout, "\x1b[r\x1b[?7h");
+}
+
+fn shell_prompt_row_after_clear() -> u16 {
+    crossterm::terminal::size()
+        .map(|(_, height)| shell_prompt_row_after_clear_for_terminal(height))
+        .unwrap_or(0)
+}
+
+fn shell_prompt_row_after_clear_for_terminal(_height: u16) -> u16 {
+    0
 }
 
 fn classic_viewport_height() -> u16 {
@@ -3783,25 +4360,6 @@ fn approval_target_summary(tool_name: &str, arguments: &str) -> (&'static str, S
     (label, summary)
 }
 
-fn render_jump_to_bottom_hint(f: &mut Frame, area: Rect) {
-    if area.width < 28 || area.height == 0 {
-        return;
-    }
-    let label = " Jump to bottom (Ctrl+End) ↓ ";
-    let width = label.chars().count() as u16;
-    let x = area.x + area.width.saturating_sub(width) / 2;
-    let y = area.y + area.height.saturating_sub(1);
-    let p = theme::palette();
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            label,
-            Style::default().fg(p.inverse_text).bg(p.text),
-        )))
-        .style(Style::default().bg(p.canvas)),
-        Rect::new(x, y, width.min(area.width), 1),
-    );
-}
-
 fn estimate_tokens(value: &str) -> u64 {
     if value.trim().is_empty() {
         return 0;
@@ -3889,6 +4447,7 @@ fn start_local_shell_command(
         ) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         app.approval = Some((decision.display, tx));
+        app.approval_selected_index = 0;
         Some(rx)
     } else {
         None
@@ -3949,66 +4508,86 @@ fn mention_prefix_at_cursor(text: &str, cursor_pos: usize) -> Option<(usize, Str
     Some((token_start, prefix.replace('\\', "/")))
 }
 
-fn file_mention_candidates(root: &Path, prefix: &str, limit: usize) -> Vec<String> {
+fn slash_command_group(name: &str) -> &'static str {
+    match name {
+        "/help" | "/features" | "/settings" | "/theme" | "/model" | "/status" => "core",
+        "/mcp" | "/hooks" | "/tools" | "/permissions" | "/sandbox" => "runtime",
+        "/agents" | "/swarm" | "/tasks" | "/plan" | "/mission" => "agents",
+        "/diff" | "/files" | "/search" | "/review" => "workspace",
+        _ => "commands",
+    }
+}
+
+fn recent_mention_paths(history: &[String]) -> Vec<String> {
+    let mut paths = Vec::new();
+    for entry in history.iter().rev().take(80) {
+        for token in entry.split_whitespace() {
+            let token = token.trim_matches(|ch: char| matches!(ch, ',' | ';' | ')' | ']' | '}'));
+            if let Some(path) = token.strip_prefix('@') {
+                let path = path.replace('\\', "/");
+                if !path.is_empty() && !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+        }
+    }
+    paths
+}
+
+fn file_mention_candidates(
+    indexed_paths: &[String],
+    prefix: &str,
+    limit: usize,
+    recent_paths: &[String],
+) -> Vec<String> {
     let prefix = prefix.replace('\\', "/").to_lowercase();
-    let mut candidates = Vec::new();
-    collect_file_mention_candidates(root, root, &prefix, limit, &mut candidates);
-    candidates.sort();
+    let mut candidates = indexed_paths
+        .iter()
+        .filter(|path| file_mention_matches(path, &prefix))
+        .cloned()
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| {
+        file_mention_score(a, &prefix, recent_paths)
+            .cmp(&file_mention_score(b, &prefix, recent_paths))
+            .then_with(|| a.cmp(b))
+    });
     candidates.truncate(limit);
     candidates
 }
 
-fn collect_file_mention_candidates(
-    root: &Path,
-    dir: &Path,
-    prefix: &str,
-    limit: usize,
-    candidates: &mut Vec<String>,
-) {
-    if candidates.len() >= limit {
-        return;
-    }
-
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
-    entries.sort_by_key(|entry| entry.path());
-
-    for entry in entries {
-        if candidates.len() >= limit {
-            return;
-        }
-        let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
-
-        if file_type.is_dir() {
-            if should_skip_mention_dir(&path) {
-                continue;
-            }
-            collect_file_mention_candidates(root, &path, prefix, limit, candidates);
-        } else if rel.to_lowercase().starts_with(prefix) {
-            candidates.push(rel);
+fn file_mention_score(path: &str, prefix: &str, recent_paths: &[String]) -> (u8, usize) {
+    let lower = path.to_lowercase();
+    let basename = lower.rsplit('/').next().unwrap_or(&lower);
+    if !prefix.ends_with('/') {
+        let recent_rank = recent_paths
+            .iter()
+            .position(|recent| recent.eq_ignore_ascii_case(path));
+        if let Some(rank) = recent_rank {
+            return (0, rank);
         }
     }
+    if lower == prefix {
+        return (1, 0);
+    }
+    if lower.starts_with(prefix) {
+        return (2, 0);
+    }
+    if basename.starts_with(prefix) {
+        return (3, 0);
+    }
+    (4, lower.len())
 }
 
-fn should_skip_mention_dir(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| {
-            matches!(
-                name,
-                ".git" | "target" | "node_modules" | ".deepseek-code" | ".cache"
-            )
-        })
+fn file_mention_matches(rel: &str, prefix: &str) -> bool {
+    if prefix.is_empty() {
+        return true;
+    }
+    let lower = rel.to_lowercase();
+    lower.starts_with(prefix)
+        || lower
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.starts_with(prefix))
 }
 
 fn common_string_prefix(values: &[String]) -> String {
@@ -4381,6 +4960,153 @@ fn option_shortcut_index(c: char, option_count: usize) -> Option<usize> {
     None
 }
 
+fn approval_action_from_shortcut(c: char) -> Option<ApprovalAction> {
+    match c.to_ascii_lowercase() {
+        'a' | 'y' => Some(ApprovalAction::ApproveOnce),
+        's' => Some(ApprovalAction::ApproveSession),
+        'd' | 'n' => Some(ApprovalAction::Deny),
+        _ => None,
+    }
+}
+
+fn cycle_provider_kind(current: ProviderKind, delta: i32) -> ProviderKind {
+    let values = [
+        ProviderKind::DeepSeek,
+        ProviderKind::OpenRouter,
+        ProviderKind::OpenAiCompatible,
+    ];
+    values[cycle_index(
+        values
+            .iter()
+            .position(|value| *value == current)
+            .unwrap_or(0),
+        values.len(),
+        delta,
+    )]
+}
+
+fn cycle_model(current: &DeepSeekModel, delta: i32) -> DeepSeekModel {
+    let values = [DeepSeekModel::Flash, DeepSeekModel::Pro];
+    values[cycle_index(
+        values
+            .iter()
+            .position(|value| value == &current.canonical())
+            .unwrap_or(0),
+        values.len(),
+        delta,
+    )]
+    .clone()
+}
+
+fn cycle_thinking_mode(current: &ThinkingMode, delta: i32) -> ThinkingMode {
+    let values = [ThinkingMode::Auto, ThinkingMode::On, ThinkingMode::Off];
+    values[cycle_index(
+        values
+            .iter()
+            .position(|value| value == current)
+            .unwrap_or(0),
+        values.len(),
+        delta,
+    )]
+    .clone()
+}
+
+fn cycle_reasoning_effort(current: &ReasoningEffort, delta: i32) -> ReasoningEffort {
+    let values = [
+        ReasoningEffort::Min,
+        ReasoningEffort::Low,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+        ReasoningEffort::Max,
+    ];
+    values[cycle_index(
+        values
+            .iter()
+            .position(|value| value == current)
+            .unwrap_or(0),
+        values.len(),
+        delta,
+    )]
+    .clone()
+}
+
+fn cycle_autonomy_level(
+    current: storage::config::AutonomyLevel,
+    delta: i32,
+) -> storage::config::AutonomyLevel {
+    let values = [
+        storage::config::AutonomyLevel::Off,
+        storage::config::AutonomyLevel::Low,
+        storage::config::AutonomyLevel::Medium,
+        storage::config::AutonomyLevel::High,
+    ];
+    values[cycle_index(
+        values
+            .iter()
+            .position(|value| *value == current)
+            .unwrap_or(0),
+        values.len(),
+        delta,
+    )]
+}
+
+fn cycle_theme_mode(current: theme::ThemeMode, delta: i32) -> theme::ThemeMode {
+    let values = [
+        theme::ThemeMode::Auto,
+        theme::ThemeMode::Light,
+        theme::ThemeMode::Dark,
+        theme::ThemeMode::HighContrast,
+    ];
+    values[cycle_index(
+        values
+            .iter()
+            .position(|value| *value == current)
+            .unwrap_or(0),
+        values.len(),
+        delta,
+    )]
+}
+
+fn cycle_index(current: usize, len: usize, delta: i32) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    if delta < 0 {
+        (current + len - 1) % len
+    } else {
+        (current + 1) % len
+    }
+}
+
+fn settings_on_off(value: bool) -> &'static str {
+    if value {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+fn settings_on_required(value: bool) -> &'static str {
+    if value {
+        "required"
+    } else {
+        "skipped"
+    }
+}
+
+fn is_ctrl_char(key: KeyEvent, expected: char) -> bool {
+    matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&expected))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+fn is_exit_key(key: KeyEvent) -> bool {
+    is_ctrl_char(key, 'd')
+}
+
+fn is_interrupt_key(key: KeyEvent) -> bool {
+    is_ctrl_char(key, 'c')
+}
+
 /// Try to match user input against a list of options.
 /// Returns `Some((1-based index, option text))` if matched.
 fn try_match_option(input: &str, options: &[String]) -> Option<(usize, String)> {
@@ -4425,6 +5151,20 @@ fn try_match_option(input: &str, options: &[String]) -> Option<(usize, String)> 
     None
 }
 
+fn apply_session_model_selection(
+    session: &mut Session,
+    requested_model: DeepSeekModel,
+    has_model_override: bool,
+    loaded_existing_session: bool,
+    thinking_mode: ThinkingMode,
+) -> DeepSeekModel {
+    session.reasoning_state.mode = thinking_mode;
+    if has_model_override || !loaded_existing_session {
+        session.reasoning_state.selected_model = Some(requested_model.canonical());
+    }
+    session.reasoning_state.effective_model()
+}
+
 /// Run the TUI interactive session.
 pub async fn run_tui(
     project_root: Option<PathBuf>,
@@ -4435,8 +5175,7 @@ pub async fn run_tui(
     let terminal_env = TerminalEnvironment::current();
     terminal_env.ensure_tui_supported()?;
 
-    let root = project_root
-        .unwrap_or_else(|| storage::find_project_root().unwrap_or_else(|| PathBuf::from(".")));
+    let root = crate::cli::resolve_project_root_or_cwd(project_root);
     let (startup, api_key) = TuiStartupData::load(&root);
     let renderer_mode = RendererMode::from_config(&startup.config.ui.renderer);
     let probe_keyring = startup.probe_keyring;
@@ -4444,11 +5183,9 @@ pub async fn run_tui(
         crate::deepseek::client::DeepSeekClient::new(api_key.unwrap_or_default());
 
     let model = match model_override.as_deref() {
-        Some("pro" | "v4-pro") => DeepSeekModel::Pro,
-        Some("flash" | "v4-flash") | None => DeepSeekModel::Flash,
-        Some(other) => {
-            crate::deepseek::migration::migrate_model_name(other).unwrap_or(DeepSeekModel::Flash)
-        }
+        Some(value) => crate::provider::parse_model(value)
+            .map_err(|error| anyhow::anyhow!("invalid model override: {error}"))?,
+        None => startup.config.model.default.canonical(),
     };
 
     let thinking_mode = if thinking {
@@ -4461,20 +5198,27 @@ pub async fn run_tui(
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
     let store = storage::SessionStore::new(home.join(".deepseek-code"));
 
-    let session = if let Some(ref sid) = session_id {
+    let mut loaded_existing_session = false;
+    let mut session = if let Some(ref sid) = session_id {
         let sid = uuid::Uuid::parse_str(sid)?;
-        store.load(&root, &sid).unwrap_or_else(|_| Session {
-            id: SessionId::new_v4(),
-            name: None,
-            project_root: root.clone(),
-            messages: Vec::new(),
-            reasoning_state: ReasoningState::default(),
-            tool_call_history: Vec::new(),
-            checkpoints: Vec::new(),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            metadata: SessionMetadata::default(),
-        })
+        match store.load(&root, &sid) {
+            Ok(session) => {
+                loaded_existing_session = true;
+                session
+            }
+            Err(_) => Session {
+                id: SessionId::new_v4(),
+                name: None,
+                project_root: root.clone(),
+                messages: Vec::new(),
+                reasoning_state: ReasoningState::default(),
+                tool_call_history: Vec::new(),
+                checkpoints: Vec::new(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                metadata: SessionMetadata::default(),
+            },
+        }
     } else {
         Session {
             id: SessionId::new_v4(),
@@ -4489,6 +5233,13 @@ pub async fn run_tui(
             metadata: SessionMetadata::default(),
         }
     };
+    let active_model = apply_session_model_selection(
+        &mut session,
+        model,
+        model_override.is_some(),
+        loaded_existing_session,
+        thinking_mode.clone(),
+    );
 
     let mut orchestrator = Some(Orchestrator::new(
         active_client.clone(),
@@ -4502,7 +5253,13 @@ pub async fn run_tui(
     terminal.clear()?;
 
     let (action_tx, mut action_rx) = mpsc::unbounded_channel::<TuiAction>();
-    let mut app = TuiApp::new_with_startup(model, thinking_mode, session_id, root.clone(), startup);
+    let mut app = TuiApp::new_with_startup(
+        active_model,
+        thinking_mode,
+        session_id,
+        root.clone(),
+        startup,
+    );
     if let Some(ref orch) = orchestrator {
         app.mcp_status = orch.mcp_status();
     }
@@ -4539,7 +5296,8 @@ pub async fn run_tui(
             }
 
             match running.handle.await {
-                Ok((returned_orchestrator, run_error)) => {
+                Ok((mut returned_orchestrator, run_error)) => {
+                    returned_orchestrator.set_active_model(app.model.clone());
                     let completion_report = app.plan_completion_report();
                     app.messages = returned_orchestrator.session.messages.clone();
                     app.stream_buffer.clear();
@@ -4572,7 +5330,13 @@ pub async fn run_tui(
         }
 
         if running_turn.is_none() && !app.is_streaming {
-            if let Some(queued) = app.queued_input.take() {
+            if let Some(queued) = app.queued_inputs.pop_front() {
+                let remaining = app.queued_inputs.len();
+                app.status_message = if remaining == 0 {
+                    "发送已排队的消息".into()
+                } else {
+                    format!("发送已排队的消息；剩余 {remaining} 条")
+                };
                 let _ = action_tx.send(TuiAction::Submit(queued));
             }
         }
@@ -4611,11 +5375,14 @@ pub async fn run_tui(
                     if !is_actionable_key_event(key) {
                         continue;
                     }
-                    if key.code == KeyCode::Char('c')
-                        && key.modifiers.contains(KeyModifiers::CONTROL)
-                    {
-                        if app.handle_ctrl_c_exit_request(std::time::Instant::now()) {
-                            break Ok(());
+                    if is_exit_key(key) {
+                        break Ok(());
+                    }
+                    if is_interrupt_key(key) {
+                        if running_turn.is_some() || local_task.is_some() || app.is_streaming {
+                            let _ = action_tx.send(TuiAction::Interrupt);
+                        } else {
+                            app.status_message = "Press Ctrl+D to exit".into();
                         }
                         continue;
                     }
@@ -4625,15 +5392,12 @@ pub async fn run_tui(
                         let _ = action_tx.send(TuiAction::Interrupt);
                         continue;
                     }
-                    app.dismiss_ctrl_c_exit_prompt();
                     app.handle_key(key, &action_tx);
                 }
                 CEvent::Paste(text) => {
-                    app.dismiss_ctrl_c_exit_prompt();
                     app.handle_paste(&text);
                 }
                 CEvent::Mouse(mouse) => {
-                    app.dismiss_ctrl_c_exit_prompt();
                     app.handle_mouse(mouse);
                 }
                 _ => {}
@@ -4662,7 +5426,7 @@ pub async fn run_tui(
                         app.finish_api_key_save_error(&error);
                     }
                 },
-                TuiAction::Submit(input) => {
+                TuiAction::Submit(mut input) => {
                     // Slash commands
                     let registry = crate::commands::CommandRegistry::new();
                     let mcp_status = app.mcp_status.clone();
@@ -4680,6 +5444,11 @@ pub async fn run_tui(
                     if let Some(result) = registry.execute(&input, &mut ctx) {
                         match result {
                             Ok(Some(msg)) => {
+                                if input.split_whitespace().next() == Some("/model") {
+                                    if let Some(orchestrator) = orchestrator.as_mut() {
+                                        orchestrator.set_active_model(app.model.clone());
+                                    }
+                                }
                                 if is_swarm_cancel_command(&input) {
                                     if let Some(running) = running_turn.as_ref() {
                                         running.cancel_token.store(true, Ordering::SeqCst);
@@ -4709,6 +5478,11 @@ pub async fn run_tui(
                                     Some("/settings" | "/set")
                                 ) {
                                     continue;
+                                }
+                                if let Some(forwarded) =
+                                    crate::commands::forwarded_agent_input(&input)
+                                {
+                                    input = forwarded;
                                 }
                                 // Command forwarded to agent (e.g. /fix, /explain, /review)
                                 // Fall through to normal processing
@@ -4744,10 +5518,8 @@ pub async fn run_tui(
                         app.session_auto_approve = true;
                     }
 
-                    if running_turn.is_some() {
-                        app.is_streaming = true;
-                        app.stream_start = Some(std::time::Instant::now());
-                        app.status_message = "A turn is already running".into();
+                    if running_turn.is_some() || app.is_streaming {
+                        app.queue_user_input(input);
                         continue;
                     }
 
@@ -4784,6 +5556,7 @@ pub async fn run_tui(
                         continue;
                     };
                     turn_orchestrator.yolo_mode = yolo_mode;
+                    turn_orchestrator.set_active_model(app.model.clone());
 
                     let (ev_tx, ev_rx) = mpsc::unbounded_channel();
                     let cancel_token = Arc::new(AtomicBool::new(false));
@@ -4893,12 +5666,151 @@ mod tests {
         app
     }
 
+    fn test_session(reasoning_state: ReasoningState) -> Session {
+        Session {
+            id: SessionId::new_v4(),
+            name: None,
+            project_root: PathBuf::from("D:/deepseek-code"),
+            messages: Vec::new(),
+            reasoning_state,
+            tool_call_history: Vec::new(),
+            checkpoints: Vec::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            metadata: SessionMetadata::default(),
+        }
+    }
+
     fn key(code: KeyCode, kind: KeyEventKind) -> KeyEvent {
         KeyEvent::new_with_kind(code, KeyModifiers::empty(), kind)
     }
 
     fn modified_key(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> KeyEvent {
         KeyEvent::new_with_kind(code, modifiers, kind)
+    }
+
+    #[test]
+    fn session_snapshot_preserves_active_model() {
+        let mut app = test_app();
+        app.model = DeepSeekModel::Pro;
+
+        let session = app.session_snapshot(Path::new("D:/deepseek-code"));
+
+        assert_eq!(
+            session.reasoning_state.selected_model,
+            Some(DeepSeekModel::Pro)
+        );
+        assert_eq!(
+            session.reasoning_state.effective_model(),
+            DeepSeekModel::Pro
+        );
+    }
+
+    #[test]
+    fn top_model_badge_renders_full_name_at_right_edge() {
+        theme::set_active_theme(theme::ThemeMode::Light);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 1)).expect("terminal");
+
+        terminal
+            .draw(|f| {
+                render_canvas(f, f.area());
+                render_top_model_badge(f, f.area(), &DeepSeekModel::Pro);
+            })
+            .expect("draw");
+
+        let line = line_symbols_to_text(
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(ratatui::buffer::Cell::symbol),
+        );
+        assert!(line.ends_with("DeepSeek V4 Pro"));
+    }
+
+    #[test]
+    fn tui_new_session_uses_requested_model() {
+        let mut session = test_session(ReasoningState::default());
+
+        let active_model = apply_session_model_selection(
+            &mut session,
+            DeepSeekModel::Pro,
+            false,
+            false,
+            ThinkingMode::Auto,
+        );
+
+        assert_eq!(active_model, DeepSeekModel::Pro);
+        assert_eq!(
+            session.reasoning_state.selected_model,
+            Some(DeepSeekModel::Pro)
+        );
+    }
+
+    #[test]
+    fn tui_resumed_session_preserves_selected_model_without_override() {
+        let mut session = test_session(ReasoningState {
+            selected_model: Some(DeepSeekModel::Pro),
+            ..ReasoningState::default()
+        });
+
+        let active_model = apply_session_model_selection(
+            &mut session,
+            DeepSeekModel::Flash,
+            false,
+            true,
+            ThinkingMode::Auto,
+        );
+
+        assert_eq!(active_model, DeepSeekModel::Pro);
+        assert_eq!(
+            session.reasoning_state.selected_model,
+            Some(DeepSeekModel::Pro)
+        );
+    }
+
+    #[test]
+    fn tui_resumed_legacy_session_preserves_effort_fallback_without_override() {
+        let mut session = test_session(ReasoningState {
+            effort: crate::deepseek::ReasoningEffort::High,
+            selected_model: None,
+            ..ReasoningState::default()
+        });
+
+        let active_model = apply_session_model_selection(
+            &mut session,
+            DeepSeekModel::Flash,
+            false,
+            true,
+            ThinkingMode::Auto,
+        );
+
+        assert_eq!(active_model, DeepSeekModel::Pro);
+        assert_eq!(session.reasoning_state.selected_model, None);
+    }
+
+    #[test]
+    fn tui_model_override_replaces_resumed_session_model() {
+        let mut session = test_session(ReasoningState {
+            selected_model: Some(DeepSeekModel::Pro),
+            ..ReasoningState::default()
+        });
+
+        let active_model = apply_session_model_selection(
+            &mut session,
+            DeepSeekModel::Flash,
+            true,
+            true,
+            ThinkingMode::Auto,
+        );
+
+        assert_eq!(active_model, DeepSeekModel::Flash);
+        assert_eq!(
+            session.reasoning_state.selected_model,
+            Some(DeepSeekModel::Flash)
+        );
     }
 
     #[test]
@@ -4947,6 +5859,14 @@ mod tests {
         assert_eq!(classic_viewport_height_for_terminal(24), 14);
         assert_eq!(classic_viewport_height_for_terminal(40), 22);
         assert_eq!(classic_viewport_height_for_terminal(80), 22);
+    }
+
+    #[test]
+    fn shell_prompt_row_after_exit_clear_uses_terminal_top() {
+        assert_eq!(shell_prompt_row_after_clear_for_terminal(0), 0);
+        assert_eq!(shell_prompt_row_after_clear_for_terminal(1), 0);
+        assert_eq!(shell_prompt_row_after_clear_for_terminal(24), 0);
+        assert_eq!(shell_prompt_row_after_clear_for_terminal(40), 0);
     }
 
     #[test]
@@ -5019,9 +5939,34 @@ mod tests {
 
         app.handle_key(key(KeyCode::Enter, KeyEventKind::Press), &tx);
 
-        assert_eq!(app.queued_input.as_deref(), Some("下一步继续"));
+        assert_eq!(app.queued_inputs.len(), 1);
+        assert_eq!(
+            app.queued_inputs.front().map(String::as_str),
+            Some("下一步继续")
+        );
         assert!(app.input_text.is_empty());
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn enter_while_streaming_keeps_followups_fifo() {
+        let mut app = test_app();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.is_streaming = true;
+
+        app.input_text = "第一条".to_string();
+        app.cursor_pos = app.input_text.chars().count();
+        app.handle_key(key(KeyCode::Enter, KeyEventKind::Press), &tx);
+
+        app.input_text = "第二条".to_string();
+        app.cursor_pos = app.input_text.chars().count();
+        app.handle_key(key(KeyCode::Enter, KeyEventKind::Press), &tx);
+
+        assert!(rx.try_recv().is_err());
+        assert_eq!(app.queued_inputs.len(), 2);
+        assert_eq!(app.queued_inputs.pop_front().as_deref(), Some("第一条"));
+        assert_eq!(app.queued_inputs.pop_front().as_deref(), Some("第二条"));
+        assert!(app.status_message.contains("2"));
     }
 
     #[test]
@@ -5582,6 +6527,81 @@ mod tests {
     }
 
     #[test]
+    fn approval_keyboard_selection_confirms_session_choice() {
+        let mut app = test_app();
+        let (approval_tx, mut approval_rx) = tokio::sync::oneshot::channel();
+        let (action_tx, _action_rx) = mpsc::unbounded_channel();
+
+        app.approval = Some((
+            ApprovalDisplay {
+                title: "Run Command".into(),
+                description: "cargo test".into(),
+                risk_level: crate::policy::RiskLevel::CommandExecution,
+                details: "command: cargo test".into(),
+            },
+            approval_tx,
+        ));
+
+        app.handle_key(key(KeyCode::Right, KeyEventKind::Press), &action_tx);
+        assert_eq!(app.approval_selected_index, 1);
+
+        app.handle_key(key(KeyCode::Enter, KeyEventKind::Press), &action_tx);
+
+        assert!(matches!(approval_rx.try_recv(), Ok(true)));
+        assert!(app.session_auto_approve);
+        assert!(app.approval.is_none());
+    }
+
+    #[test]
+    fn approval_keyboard_selection_can_deny_with_enter_or_escape() {
+        let mut app = test_app();
+        let (approval_tx, mut approval_rx) = tokio::sync::oneshot::channel();
+        let (action_tx, _action_rx) = mpsc::unbounded_channel();
+
+        app.approval = Some((
+            ApprovalDisplay {
+                title: "Run Command".into(),
+                description: "cat file".into(),
+                risk_level: crate::policy::RiskLevel::CommandExecution,
+                details: "command: cat file".into(),
+            },
+            approval_tx,
+        ));
+
+        app.handle_key(key(KeyCode::Right, KeyEventKind::Press), &action_tx);
+        app.handle_key(key(KeyCode::Right, KeyEventKind::Press), &action_tx);
+        assert_eq!(app.approval_selected_index, 2);
+
+        app.handle_key(key(KeyCode::Enter, KeyEventKind::Press), &action_tx);
+
+        assert!(matches!(approval_rx.try_recv(), Ok(false)));
+        assert!(app.approval.is_none());
+
+        let (approval_tx, mut approval_rx) = tokio::sync::oneshot::channel();
+        app.approval = Some((
+            ApprovalDisplay {
+                title: "Run Command".into(),
+                description: "cat file".into(),
+                risk_level: crate::policy::RiskLevel::CommandExecution,
+                details: "command: cat file".into(),
+            },
+            approval_tx,
+        ));
+
+        app.handle_key(key(KeyCode::Esc, KeyEventKind::Press), &action_tx);
+
+        assert!(matches!(approval_rx.try_recv(), Ok(false)));
+        assert!(app.approval.is_none());
+    }
+
+    #[test]
+    fn approval_overlay_stays_above_input_boundary() {
+        let area = Rect::new(0, 0, 100, 30);
+
+        assert_eq!(approval_overlay_area(area, 24), Rect::new(0, 0, 100, 24));
+    }
+
+    #[test]
     fn visible_context_tokens_include_live_turn_estimate_until_usage_arrives() {
         let mut app = test_app();
         app.total_tokens = 5_000;
@@ -5782,7 +6802,7 @@ mod tests {
         app.handle_key(key(KeyCode::Enter, KeyEventKind::Press), &tx);
 
         assert!(rx.try_recv().is_err());
-        assert_eq!(app.queued_input.as_deref(), Some("hello"));
+        assert_eq!(app.queued_inputs.front().map(String::as_str), Some("hello"));
         assert!(app.input_text.is_empty());
         assert!(app.status_message.contains("已排队"));
     }
@@ -5839,6 +6859,69 @@ mod tests {
     }
 
     #[test]
+    fn file_mention_menu_uses_keyboard_selection() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let src = root.path().join("src");
+        std::fs::create_dir_all(&src).expect("create src");
+        std::fs::write(src.join("alpha.rs"), "pub fn alpha() {}").expect("write alpha");
+        std::fs::write(src.join("beta.rs"), "pub fn beta() {}").expect("write beta");
+        let mut app = test_app_with_root(root.path().to_path_buf());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.input_text = "check @src/".to_string();
+        app.cursor_pos = app.input_text.chars().count();
+
+        let suggestions = app.file_mention_suggestions();
+        assert_eq!(suggestions, vec!["src/alpha.rs", "src/beta.rs"]);
+
+        app.handle_key(key(KeyCode::Down, KeyEventKind::Press), &tx);
+        app.handle_key(key(KeyCode::Enter, KeyEventKind::Press), &tx);
+
+        assert_eq!(app.input_text, "check @src/beta.rs ");
+        assert_eq!(app.cursor_pos, app.input_text.chars().count());
+        assert!(app.status_message.contains("@src/beta.rs"));
+    }
+
+    #[test]
+    fn enter_submits_when_file_mention_is_exact() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let src = root.path().join("src");
+        std::fs::create_dir_all(&src).expect("create src");
+        std::fs::write(src.join("lib.rs"), "pub fn demo() {}").expect("write file");
+        let mut app = test_app_with_root(root.path().to_path_buf());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.input_text = "review @src/lib.rs".to_string();
+        app.cursor_pos = app.input_text.chars().count();
+
+        app.handle_key(key(KeyCode::Enter, KeyEventKind::Press), &tx);
+
+        assert!(matches!(
+            rx.try_recv().expect("submit action"),
+            TuiAction::Submit(input) if input == "review @src/lib.rs"
+        ));
+    }
+
+    #[test]
+    fn file_mention_index_skips_hidden_and_whitespace_paths() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let src = root.path().join("src");
+        let docs = root.path().join("docs");
+        std::fs::create_dir_all(&src).expect("create src");
+        std::fs::create_dir_all(&docs).expect("create docs");
+        std::fs::write(src.join("lib.rs"), "pub fn demo() {}").expect("write file");
+        std::fs::write(root.path().join(".env"), "SECRET=1").expect("write hidden file");
+        std::fs::write(docs.join("My Plan.md"), "# plan").expect("write spaced file");
+        let mut app = test_app_with_root(root.path().to_path_buf());
+        app.input_text = "check @".to_string();
+        app.cursor_pos = app.input_text.chars().count();
+
+        let suggestions = app.file_mention_suggestions();
+
+        assert!(suggestions.iter().any(|path| path == "src/lib.rs"));
+        assert!(!suggestions.iter().any(|path| path == ".env"));
+        assert!(!suggestions.iter().any(|path| path.contains("My Plan.md")));
+    }
+
+    #[test]
     fn arrow_keys_cycle_single_line_input_history() {
         let mut app = test_app();
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -5858,6 +6941,57 @@ mod tests {
         app.handle_key(key(KeyCode::Down, KeyEventKind::Press), &tx);
         assert_eq!(app.input_text, "draft");
         assert!(app.history_cursor.is_none());
+    }
+
+    #[test]
+    fn ctrl_r_history_search_filters_and_inserts_without_submitting() {
+        let mut app = test_app();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.input_history = vec![
+            "run cargo test".to_string(),
+            "fix tui approval".to_string(),
+            "review docs".to_string(),
+        ];
+        app.input_text = "draft".to_string();
+        app.cursor_pos = app.input_text.chars().count();
+
+        app.handle_key(
+            modified_key(
+                KeyCode::Char('r'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            ),
+            &tx,
+        );
+        assert!(app.history_search_active);
+        assert!(app.input_text.is_empty());
+
+        for ch in "tui".chars() {
+            app.handle_key(key(KeyCode::Char(ch), KeyEventKind::Press), &tx);
+        }
+        app.handle_key(key(KeyCode::Enter, KeyEventKind::Press), &tx);
+
+        assert!(!app.history_search_active);
+        assert_eq!(app.input_text, "fix tui approval");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn settings_panel_can_edit_and_persist_provider_default() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut app = test_app_with_root(root.path().to_path_buf());
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        app.open_settings_panel();
+        app.settings_tab = settings_panel::SettingsTab::Model;
+        app.settings_selected = 0;
+        app.handle_key(key(KeyCode::Enter, KeyEventKind::Press), &tx);
+
+        assert_eq!(app.config.provider.default, ProviderKind::OpenRouter);
+        let local_config = std::fs::read_to_string(root.path().join(".deepseek-code/local.toml"))
+            .expect("settings should persist");
+        assert!(local_config.contains("[provider]"));
+        assert!(local_config.contains("default = \"openrouter\""));
     }
 
     #[tokio::test]
@@ -6102,6 +7236,36 @@ mod tests {
         let app = test_app();
 
         assert!(!app.show_reasoning);
+    }
+
+    #[test]
+    fn uppercase_t_toggles_thinking_panel_when_input_is_empty() {
+        let mut app = test_app();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        app.handle_key(key(KeyCode::Char('T'), KeyEventKind::Press), &tx);
+
+        assert!(app.show_reasoning);
+        assert_eq!(app.status_message, "Thinking panel expanded");
+
+        app.handle_key(key(KeyCode::Char('t'), KeyEventKind::Press), &tx);
+
+        assert!(!app.show_reasoning);
+        assert_eq!(app.status_message, "Thinking panel collapsed");
+    }
+
+    #[test]
+    fn reasoning_delta_updates_private_panel_state_not_stream_text() {
+        let mut app = test_app();
+        app.begin_running_turn("修复 Thinking 面板");
+
+        app.apply_agent_event(AgentEvent::ReasoningDelta(
+            "inspect layout and keep status near input".to_string(),
+        ));
+
+        assert!(app.reasoning_buffer.contains("inspect layout"));
+        assert!(app.current_turn_reasoning_tokens > 0);
+        assert!(app.stream_buffer.is_empty());
     }
 
     #[test]
@@ -6394,41 +7558,56 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_requires_second_press_before_exit() {
-        let mut app = test_app();
-        let now = std::time::Instant::now();
+    fn ctrl_d_is_exit_key_and_ctrl_c_is_interrupt_only() {
+        let ctrl_d = modified_key(
+            KeyCode::Char('d'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        );
+        let ctrl_c = modified_key(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        );
 
-        assert!(!app.handle_ctrl_c_exit_request(now));
-        assert!(app.ctrl_c_exit_prompt_active_at(now));
-        assert_eq!(app.status_message, "Press Ctrl-C again to exit");
-        assert!(app.handle_ctrl_c_exit_request(now + std::time::Duration::from_secs(1)));
+        assert!(is_exit_key(ctrl_d));
+        assert!(!is_interrupt_key(ctrl_d));
+        assert!(!is_exit_key(ctrl_c));
+        assert!(is_interrupt_key(ctrl_c));
     }
 
     #[test]
-    fn ctrl_c_prompt_expires_and_can_be_dismissed() {
+    fn ctrl_d_routed_to_handle_key_exits_without_editing_input() {
         let mut app = test_app();
-        let now = std::time::Instant::now();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.input_text = "draft".to_string();
+        app.cursor_pos = app.input_text.chars().count();
 
-        assert!(!app.handle_ctrl_c_exit_request(now));
-        assert!(!app.ctrl_c_exit_prompt_active_at(now + std::time::Duration::from_secs(3)));
-        assert!(!app.handle_ctrl_c_exit_request(now + std::time::Duration::from_secs(3)));
-        app.dismiss_ctrl_c_exit_prompt();
-        assert!(!app.ctrl_c_exit_prompt_active_at(now + std::time::Duration::from_secs(3)));
+        app.handle_key(
+            modified_key(
+                KeyCode::Char('d'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            ),
+            &tx,
+        );
+
+        assert!(!app.running);
+        assert_eq!(app.input_text, "draft");
+        assert_eq!(app.cursor_pos, 5);
+        assert_eq!(app.status_message, "Exiting");
     }
 
     #[test]
-    fn ctrl_c_prompt_replaces_powerline_footer() {
-        let mut app = test_app();
-        app.ctrl_c_exit_deadline =
-            Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+    fn render_keeps_normal_footer_without_exit_prompt() {
+        let app = test_app();
         let mut terminal =
             Terminal::new(ratatui::backend::TestBackend::new(90, 24)).expect("terminal");
 
         terminal.draw(|f| app.render(f)).expect("draw");
 
         let rendered = buffer_to_text(terminal.backend());
-        assert!(rendered.contains("Press Ctrl-C again to exit"));
-        assert!(!rendered.contains("ds-code"));
+        assert!(!rendered.contains("Press Ctrl-C again to exit"));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::agent::orchestrator::{AgentEvent, Orchestrator};
+use crate::cli::{resolve_project_root, TurnOutputFormat};
 use crate::deepseek::{ReasoningState, Session, SessionId, SessionMetadata, ThinkingMode};
 use crate::provider::{build_provider, ModelSelection, Provider};
 use crate::storage;
@@ -12,35 +13,79 @@ pub async fn chat(
     model_override: Option<String>,
     project_root: Option<PathBuf>,
     session_id: Option<String>,
+    output_format: TurnOutputFormat,
 ) -> Result<(), anyhow::Error> {
-    let root = project_root
-        .unwrap_or_else(|| storage::find_project_root().unwrap_or_else(|| PathBuf::from(".")));
-    let api_key = super::login::resolve_or_prompt_api_key(Some(&root))?;
-    let config = crate::storage::Config::load(Some(&root))?;
+    let root = match resolve_project_root(project_root, "chat") {
+        Ok(root) => root,
+        Err(error) => {
+            if output_format.is_json() {
+                crate::cli::stream_json::print_final_error(error.to_string());
+            }
+            return Err(error);
+        }
+    };
+    let api_key = match if output_format.is_json() {
+        super::login::resolve_api_key_non_interactive(Some(&root))
+    } else {
+        super::login::resolve_or_prompt_api_key(Some(&root))
+    } {
+        Ok(api_key) => api_key,
+        Err(error) => {
+            if output_format.is_json() {
+                crate::cli::stream_json::print_final_error(error.to_string());
+            }
+            return Err(error);
+        }
+    };
+    let config = match crate::storage::Config::load(Some(&root)) {
+        Ok(config) => config,
+        Err(error) => {
+            if output_format.is_json() {
+                crate::cli::stream_json::print_final_error(error.to_string());
+            }
+            return Err(error);
+        }
+    };
     let provider = build_provider(&config.provider, api_key);
     let client = provider.create_deepseek_client();
 
     let requested_model =
-        ModelSelection::resolve(&config.provider, &config.model, model_override.as_deref())?.model;
+        match ModelSelection::resolve(&config.provider, &config.model, model_override.as_deref()) {
+            Ok(selection) => selection.model,
+            Err(error) => return json_error_result(output_format, error.into()),
+        };
 
     // Create or load session
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?;
+    let home = match dirs::home_dir() {
+        Some(home) => home,
+        None => {
+            return json_error_result(output_format, anyhow::anyhow!("cannot find home directory"));
+        }
+    };
     let store = storage::SessionStore::new(home.join(".deepseek-code"));
 
     let mut session = if let Some(ref sid) = session_id {
-        let sid = uuid::Uuid::parse_str(sid)?;
+        let sid = match uuid::Uuid::parse_str(sid) {
+            Ok(sid) => sid,
+            Err(error) => return json_error_result(output_format, error.into()),
+        };
         match store.load(&root, &sid) {
             Ok(s) => {
-                eprintln!(
-                    "Resumed session: {} ({} messages, {} tool calls)",
-                    sid,
-                    s.messages.len(),
-                    s.tool_call_history.len()
-                );
+                if !output_format.is_json() {
+                    eprintln!(
+                        "Resumed session: {} ({} messages, {} tool calls)",
+                        sid,
+                        s.messages.len(),
+                        s.tool_call_history.len()
+                    );
+                }
                 s
             }
             Err(e) => {
-                anyhow::bail!("Failed to load session {sid}: {e}");
+                return json_error_result(
+                    output_format,
+                    anyhow::anyhow!("Failed to load session {sid}: {e}"),
+                );
             }
         }
     } else {
@@ -75,10 +120,35 @@ pub async fn chat(
         orch.init_mcp(&config.mcp).await;
     }
 
+    if (output_format.is_stream_json() || output_format.is_json()) && prompt.is_none() {
+        let name = if output_format.is_json() {
+            "json"
+        } else {
+            "stream-json"
+        };
+        return json_error_result(
+            output_format,
+            anyhow::anyhow!("chat --output-format {name} requires a prompt"),
+        );
+    }
+
     if let Some(p) = prompt {
         // One-shot mode: spawn the turn so approval events are handled
         // concurrently rather than deadlocking.
         let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut final_json = output_format.is_json().then(|| {
+            let session_id = orchestrator
+                .as_ref()
+                .expect("orchestrator should exist")
+                .session
+                .id;
+            crate::cli::stream_json::FinalJsonCollector::new(session_id)
+        });
+        if output_format.is_stream_json() {
+            if let Some(orch) = orchestrator.as_ref() {
+                crate::cli::stream_json::print_session_started(orch.session.id, &policy_root);
+            }
+        }
         let mut orch = orchestrator.take().expect("orchestrator already consumed");
         let p_for_turn = p.clone();
         let turn_handle = tokio::spawn(async move {
@@ -87,7 +157,36 @@ pub async fn chat(
         });
 
         while let Some(event) = ev_rx.recv().await {
+            if let Some(collector) = final_json.as_mut() {
+                collector.observe(&event);
+                match event {
+                    AgentEvent::ToolApprovalNeeded { respond, .. }
+                    | AgentEvent::SubagentToolApprovalNeeded { respond, .. } => {
+                        let _ = respond.send(false);
+                    }
+                    AgentEvent::OptionsNeeded { respond, .. } => {
+                        let _ = respond.send(0);
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            if output_format.is_stream_json() {
+                crate::cli::stream_json::print_event(&event);
+                match event {
+                    AgentEvent::ToolApprovalNeeded { respond, .. }
+                    | AgentEvent::SubagentToolApprovalNeeded { respond, .. } => {
+                        let _ = respond.send(false);
+                    }
+                    AgentEvent::OptionsNeeded { respond, .. } => {
+                        let _ = respond.send(0);
+                    }
+                    _ => {}
+                }
+                continue;
+            }
             match event {
+                AgentEvent::UserMessage { .. } => {}
                 AgentEvent::ContentDelta(text) => print!("{text}"),
                 AgentEvent::ReasoningDelta(_) => {}
                 AgentEvent::TokenDelta { .. } => {}
@@ -114,6 +213,7 @@ pub async fn chat(
                         );
                     }
                 }
+                AgentEvent::ToolStarted { .. } => {}
                 AgentEvent::ToolExecuted {
                     tool_name,
                     success,
@@ -126,6 +226,7 @@ pub async fn chat(
                         summary
                     );
                 }
+                AgentEvent::HookExecuted { .. } => {}
                 AgentEvent::StreamDone { usage, cache, .. } => {
                     if let Some(u) = usage {
                         println!(
@@ -265,20 +366,47 @@ pub async fn chat(
             }
         }
 
+        let mut turn_error: Option<anyhow::Error> = None;
         match turn_handle.await {
             Ok((returned_orch, result)) => {
-                result?;
+                if let Err(error) = result {
+                    if let Some(collector) = final_json.as_mut() {
+                        collector.record_error(error.to_string());
+                    }
+                    turn_error = Some(error);
+                }
                 orchestrator = Some(returned_orch);
             }
-            Err(e) => anyhow::bail!("Turn task failed: {e}"),
+            Err(e) => {
+                let error = anyhow::anyhow!("Turn task failed: {e}");
+                if let Some(collector) = final_json.as_mut() {
+                    collector.record_error(error.to_string());
+                }
+                turn_error = Some(error);
+            }
         }
 
         // Save session after one-shot
         if let Some(ref o) = orchestrator {
-            let home =
-                dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?;
-            let store = storage::SessionStore::new(home.join(".deepseek-code"));
-            store.save(&o.session)?;
+            if let Err(error) = store.save(&o.session) {
+                if let Some(collector) = final_json.as_mut() {
+                    collector.record_error(error.to_string());
+                    turn_error = Some(error);
+                } else {
+                    return Err(error);
+                }
+            }
+        }
+
+        if let Some(collector) = final_json {
+            collector.print_final();
+            if collector.has_error() {
+                anyhow::bail!("{}", collector.error_message().unwrap_or("turn failed"));
+            }
+        }
+
+        if let Some(error) = turn_error {
+            return Err(error);
         }
     } else {
         // Interactive mode
@@ -340,6 +468,7 @@ pub async fn chat(
             let mut auto_approve_session = false;
             while let Some(event) = ev_rx.recv().await {
                 match event {
+                    AgentEvent::UserMessage { .. } => {}
                     AgentEvent::ContentDelta(text) => print!("{text}"),
                     AgentEvent::TokenDelta { .. } => {}
                     AgentEvent::ComplexityAssessed { assessment } => {
@@ -389,6 +518,7 @@ pub async fn chat(
                         };
                         let _ = respond.send(approved);
                     }
+                    AgentEvent::ToolStarted { .. } => {}
                     AgentEvent::SubagentToolApprovalNeeded {
                         agent_id,
                         tool_name,
@@ -433,6 +563,7 @@ pub async fn chat(
                             println!("\n  [{tool_name} ✗]");
                         }
                     }
+                    AgentEvent::HookExecuted { .. } => {}
                     AgentEvent::ReasoningDelta(_) => {}
                     AgentEvent::Error(e) => eprintln!("\nError: {e}"),
                     AgentEvent::TurnComplete { .. } => {}
@@ -546,4 +677,14 @@ pub async fn chat(
     }
 
     Ok(())
+}
+
+fn json_error_result<T>(
+    output_format: TurnOutputFormat,
+    error: anyhow::Error,
+) -> Result<T, anyhow::Error> {
+    if output_format.is_json() {
+        crate::cli::stream_json::print_final_error(error.to_string());
+    }
+    Err(error)
 }

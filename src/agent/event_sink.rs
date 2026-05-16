@@ -51,6 +51,11 @@ impl<'a> EventSink<'a> {
 
     fn record_agent_event(&self, event: &AgentEvent) {
         match event {
+            AgentEvent::UserMessage { content } if !content.trim().is_empty() => {
+                self.record(SessionEventKind::UserMessage {
+                    content: content.clone(),
+                });
+            }
             AgentEvent::ContentDelta(content) if !content.trim().is_empty() => {
                 self.record(SessionEventKind::AssistantVisible {
                     content: content.clone(),
@@ -70,6 +75,17 @@ impl<'a> EventSink<'a> {
                     details: display.details.clone(),
                 });
             }
+            AgentEvent::ToolStarted {
+                tool_call_id,
+                tool_name,
+                arguments,
+            } => {
+                self.record(SessionEventKind::ToolCallStarted {
+                    tool_call_id: tool_call_id.clone(),
+                    name: tool_name.clone(),
+                    arguments: arguments.clone(),
+                });
+            }
             AgentEvent::ToolExecuted {
                 tool_name,
                 success,
@@ -82,6 +98,19 @@ impl<'a> EventSink<'a> {
                     summary: summary.clone(),
                     duration_ms: 0,
                     changed_files: Vec::new(),
+                });
+            }
+            AgentEvent::HookExecuted {
+                event,
+                success,
+                summary,
+                command_count,
+            } => {
+                self.record(SessionEventKind::HookExecuted {
+                    event: event.as_str().to_string(),
+                    success: *success,
+                    summary: summary.clone(),
+                    command_count: *command_count,
                 });
             }
             AgentEvent::PlanStarted { summary, total } => {

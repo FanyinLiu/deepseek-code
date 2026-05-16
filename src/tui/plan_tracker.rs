@@ -297,12 +297,7 @@ pub fn render_options_panel(
     }
 
     let p = theme::palette();
-    let selected_bg = match theme::active_theme() {
-        theme::ThemeMode::Light => Color::Rgb(58, 56, 48),
-        theme::ThemeMode::Auto | theme::ThemeMode::Dark | theme::ThemeMode::HighContrast => {
-            p.surface_alt
-        }
-    };
+    let selected_bg = p.surface_alt;
     let mut lines = Vec::new();
     let use_chinese = option_panel_uses_chinese(title, options);
     let prompt = questionnaire_prompt(title);
@@ -556,12 +551,21 @@ pub fn render_slash_command_panel(
     }
 
     let p = theme::palette();
-    let selected_bg = match theme::active_theme() {
-        theme::ThemeMode::Light => Color::Rgb(58, 56, 48),
-        theme::ThemeMode::Auto | theme::ThemeMode::Dark | theme::ThemeMode::HighContrast => {
-            p.surface_alt
-        }
+    let selected_bg = p.surface_alt;
+    let page_size = usize::from(area.height.saturating_sub(2)).max(1);
+    let selected_index = selected_index.min(commands.len().saturating_sub(1));
+    let page_start = (selected_index / page_size) * page_size;
+    let page_end = (page_start + page_size).min(commands.len());
+    let page_label = if commands.len() > page_size {
+        format!(
+            "  {}/{}",
+            page_start / page_size + 1,
+            commands.len().div_ceil(page_size)
+        )
+    } else {
+        String::new()
     };
+
     let mut lines = vec![Line::from(vec![
         Span::styled(
             "Commands",
@@ -572,12 +576,14 @@ pub fn render_slash_command_panel(
         ),
         Span::styled("  ", Style::default().bg(p.canvas)),
         Span::styled(
-            "↑↓ choose   Enter run exact / complete partial   Tab complete",
+            format!("↑↓ choose   PgUp/PgDn page   Enter/Tab complete{page_label}"),
             Style::default().fg(p.dim).bg(p.canvas),
         ),
     ])];
 
     let name_width = commands
+        .get(page_start..page_end)
+        .unwrap_or(&[])
         .iter()
         .map(|(name, _)| name.chars().count())
         .max()
@@ -586,8 +592,13 @@ pub fn render_slash_command_panel(
     let row_width = area.width.saturating_sub(4) as usize;
     let desc_width = row_width.saturating_sub(name_width + 5);
 
-    for (i, (name, description)) in commands.iter().enumerate() {
-        let selected = i == selected_index.min(commands.len().saturating_sub(1));
+    for (i, (name, description)) in commands
+        .iter()
+        .enumerate()
+        .skip(page_start)
+        .take(page_end.saturating_sub(page_start))
+    {
+        let selected = i == selected_index;
         let marker = if selected { "▸" } else { " " };
         let name_cell = format!("{name:<name_width$}");
         let desc = truncate(description, desc_width);
@@ -611,6 +622,98 @@ pub fn render_slash_command_panel(
         .style(Style::default().fg(p.text).bg(p.canvas))
         .wrap(Wrap { trim: false });
 
+    f.render_widget(paragraph, area);
+}
+
+/// Render @file mention suggestions while the user is typing a path token.
+pub fn render_file_mention_panel(
+    f: &mut Frame,
+    area: Rect,
+    files: &[String],
+    selected_index: usize,
+) {
+    if area.width < 18 || area.height < 3 || files.is_empty() {
+        return;
+    }
+
+    let p = theme::palette();
+    let selected_bg = p.surface_alt;
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            "Files",
+            Style::default()
+                .fg(p.text)
+                .bg(p.canvas)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  ", Style::default().bg(p.canvas)),
+        Span::styled(
+            "↑↓ choose   Enter/Tab insert mention",
+            Style::default().fg(p.dim).bg(p.canvas),
+        ),
+    ])];
+
+    let row_width = area.width.saturating_sub(4) as usize;
+    for (i, file) in files.iter().enumerate() {
+        let selected = i == selected_index.min(files.len().saturating_sub(1));
+        let marker = if selected { "▸" } else { " " };
+        let text = truncate(file, row_width.saturating_sub(5));
+        let style = if selected {
+            Style::default()
+                .fg(p.inverse_text)
+                .bg(selected_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.text).bg(p.canvas)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {marker} "), style),
+            Span::styled("@", style.fg(p.warning)),
+            Span::styled(text, style),
+        ]));
+    }
+
+    let paragraph = Paragraph::new(Text::from(lines))
+        .style(Style::default().fg(p.text).bg(p.canvas))
+        .wrap(Wrap { trim: false });
+
+    f.render_widget(paragraph, area);
+}
+
+/// Render shell command hints while the user is typing `!`.
+pub fn render_shell_hint_panel(f: &mut Frame, area: Rect) {
+    if area.width < 18 || area.height < 3 {
+        return;
+    }
+
+    let p = theme::palette();
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(
+                "Shell",
+                Style::default()
+                    .fg(p.text)
+                    .bg(p.canvas)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  Enter submits through run_command approval",
+                Style::default().fg(p.dim).bg(p.canvas),
+            ),
+        ]),
+        Line::from(Span::styled(
+            "!pwd     show current workspace",
+            Style::default().fg(p.text).bg(p.canvas),
+        )),
+        Line::from(Span::styled(
+            "!cargo test --all-features",
+            Style::default().fg(p.text).bg(p.canvas),
+        )),
+    ];
+
+    let paragraph = Paragraph::new(Text::from(lines))
+        .style(Style::default().fg(p.text).bg(p.canvas))
+        .wrap(Wrap { trim: false });
     f.render_widget(paragraph, area);
 }
 

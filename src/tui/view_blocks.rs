@@ -152,6 +152,39 @@ pub fn render_tool_lines(view: &ToolCallView, max_detail: usize) -> Vec<Line<'st
 }
 
 #[must_use]
+pub fn render_tool_card_lines(view: &ToolCallView, max_detail: usize) -> Vec<Line<'static>> {
+    render_tool_card_lines_with_motion(view, max_detail, motion::MotionFrame::disabled())
+}
+
+#[must_use]
+pub fn render_tool_card_lines_with_motion(
+    view: &ToolCallView,
+    max_detail: usize,
+    frame: motion::MotionFrame,
+) -> Vec<Line<'static>> {
+    let p = theme::palette();
+    let detail = truncate(&summarize_tool_detail(&view.detail), max_detail);
+    let mut lines = vec![Line::from(vec![
+        status_word_with_motion(view.status, frame),
+        Span::styled("  ", Style::default().fg(p.text).bg(p.canvas)),
+        Span::styled(
+            format!("tool {}", view.name),
+            Style::default()
+                .fg(p.text)
+                .bg(p.canvas)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
+    if !detail.trim().is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("  └ ", Style::default().fg(p.divider).bg(p.canvas)),
+            Span::styled(detail, Style::default().fg(p.dim).bg(p.canvas)),
+        ]));
+    }
+    lines
+}
+
+#[must_use]
 pub fn compact_tool_line(view: &ToolCallView, max_detail: usize) -> Line<'static> {
     compact_tool_line_with_motion(view, max_detail, motion::MotionFrame::disabled())
 }
@@ -231,9 +264,17 @@ pub fn classify_tool(name: &str) -> &'static str {
         "run_command" => "run",
         "git_status" | "git_diff" | "git_log" | "git_add" | "git_commit" => "git",
         "fetch_url" | "web_search" => "fetch",
-        name if name.starts_with("mcp__") || name.starts_with("mcp:") => "mcp",
+        name if is_mcp_tool_name(name) => "mcp",
         _ => "tool",
     }
+}
+
+fn is_mcp_tool_name(name: &str) -> bool {
+    name.starts_with("mcp__")
+        || name.starts_with("mcp:")
+        || name
+            .split_once('.')
+            .is_some_and(|(server, tool)| !server.is_empty() && !tool.is_empty())
 }
 
 #[must_use]
@@ -315,6 +356,12 @@ mod tests {
     }
 
     #[test]
+    fn classify_dotted_tool_names_as_mcp() {
+        assert_eq!(classify_tool("filesystem.read_file"), "mcp");
+        assert_eq!(classify_tool("mcp:filesystem.read_file"), "mcp");
+    }
+
+    #[test]
     fn tool_lines_are_compact_without_intent_detail_rows() {
         let lines = render_tool_lines(
             &ToolCallView {
@@ -357,5 +404,29 @@ mod tests {
             .collect::<String>();
         assert!(text.contains("checks"));
         assert!(text.contains("run clippy"));
+    }
+
+    #[test]
+    fn tool_card_lines_use_status_header_and_detail_tail() {
+        let lines = render_tool_card_lines(
+            &ToolCallView {
+                name: "run_command".to_string(),
+                status: ViewStatus::Running,
+                intent: "run request".to_string(),
+                detail: "cargo test --test tui_cli_tests".to_string(),
+            },
+            80,
+        );
+        let text = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(lines.len(), 2);
+        assert!(text.contains("running"));
+        assert!(text.contains("tool run_command"));
+        assert!(text.contains("cargo test --test tui_cli_tests"));
+        assert!(!text.contains("intent"));
     }
 }

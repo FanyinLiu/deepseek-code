@@ -423,9 +423,10 @@ fn render_focused_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(7),
-            Constraint::Length(5),
-            Constraint::Length(5),
-            Constraint::Min(1),
+            Constraint::Length(4),
+            Constraint::Length(3),
+            Constraint::Length(4),
+            Constraint::Length(4),
         ])
         .split(inner);
 
@@ -458,11 +459,13 @@ fn render_focused_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData
 
     if data.api_key_status == "missing" {
         render_api_key_setup(f, chunks[2], data);
+        render_quick_access(f, chunks[3], data);
     } else {
-        render_context(f, chunks[2], data);
+        render_quick_access(f, chunks[2], data);
+        render_context(f, chunks[3], data);
     }
 
-    render_invitation_and_footer(f, chunks[3], data);
+    render_invitation_and_footer(f, chunks[4], data);
 }
 
 fn welcome_horizontal_margin(width: u16) -> u16 {
@@ -519,7 +522,7 @@ fn render_identity(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
         Line::from(vec![
             Span::styled("◇ ", welcome_accent()),
             Span::styled(
-                "/help for commands, @path for files, ! for shell.",
+                "/help for commands, @path for files, !cmd for shell, /agents on demand.",
                 welcome_muted(),
             ),
         ]),
@@ -542,12 +545,14 @@ fn render_actions(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
             .constraints([
                 Constraint::Length(5),
                 Constraint::Length(5),
+                Constraint::Length(4),
                 Constraint::Min(1),
             ])
             .split(area);
         render_api_key_setup(f, chunks[0], data);
-        render_context(f, chunks[1], data);
-        render_invitation_and_footer(f, chunks[2], data);
+        render_quick_access(f, chunks[1], data);
+        render_context(f, chunks[2], data);
+        render_invitation_and_footer(f, chunks[3], data);
     } else {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -555,13 +560,15 @@ fn render_actions(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
                 Constraint::Length(2),
                 Constraint::Length(7),
                 Constraint::Length(5),
+                Constraint::Length(4),
                 Constraint::Min(1),
             ])
             .split(area);
         render_release_header(f, chunks[0]);
         render_changelog(f, chunks[1]);
-        render_context(f, chunks[2], data);
-        render_invitation_and_footer(f, chunks[3], data);
+        render_quick_access(f, chunks[2], data);
+        render_context(f, chunks[3], data);
+        render_invitation_and_footer(f, chunks[4], data);
     }
 }
 
@@ -631,7 +638,7 @@ fn render_invitation_and_footer(f: &mut Frame, area: Rect, data: &WelcomeDashboa
         (
             "What are we changing today?",
             "Type below, or press 1-3 to load a starter.",
-            "1-3 starters · plan/agents/approvals appear on demand",
+            "1-3 starters · /help for full command map",
         )
     };
     let model = format!("{} ({})", model_label(&data.model), data.thinking);
@@ -751,11 +758,13 @@ fn render_compact_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData
         action_span(" starters   "),
         key_span("enter"),
         action_span(" send"),
+        key_span(" /help"),
+        action_span(" commands"),
     ];
     let mut lines = Vec::new();
     lines.extend([
         Line::from(vec![Span::styled(
-            format!("{}  DS-CODE", ascii_art::DSCODE_TINY),
+            format!("{}  DSCODE", ascii_art::DSCODE_TINY),
             welcome_badge(),
         )]),
         Line::from(vec![Span::styled(headline, welcome_muted())]),
@@ -821,6 +830,8 @@ fn render_compact_brand_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboa
         action_span(" starters   "),
         key_span("enter"),
         action_span(" send"),
+        key_span(" /help"),
+        action_span(" commands"),
     ]);
     f.render_widget(
         Paragraph::new(footer)
@@ -838,7 +849,7 @@ fn render_compact_api_onboarding(f: &mut Frame, area: Rect, data: &WelcomeDashbo
     });
     let lines = vec![
         Line::from(vec![
-            Span::styled("DS-CODE", welcome_text().add_modifier(Modifier::BOLD)),
+            Span::styled("DSCODE", welcome_text().add_modifier(Modifier::BOLD)),
             Span::styled("  ·  ", welcome_muted()),
             Span::styled(
                 "API setup required",
@@ -915,7 +926,7 @@ fn render_product_mark(f: &mut Frame, area: Rect) {
         let lines = vec![
             Line::from(vec![Span::styled(ascii_art::DSCODE_TINY, welcome_badge())]),
             Line::from(vec![Span::styled(
-                "DS-CODE",
+                "DSCODE",
                 welcome_text().add_modifier(Modifier::BOLD),
             )]),
         ];
@@ -929,18 +940,19 @@ fn render_product_mark(f: &mut Frame, area: Rect) {
         return;
     }
 
-    let mark_width = ascii_art::WELCOME_DSCODE
-        .iter()
-        .map(|line| line.chars().count())
-        .max()
-        .unwrap_or(0);
+    let mark_width = ascii_art::welcome_dscode_solid_width();
     let title_width = "Droid-style local workbench".chars().count();
     let lockup_width = mark_width + 4 + title_width;
+    if area.width as usize <= lockup_width {
+        render_centered_product_mark(f, area, mark_width);
+        return;
+    }
+
     let left_x = area.x + ((area.width as usize).saturating_sub(lockup_width) / 2) as u16;
     let title_x = left_x + mark_width as u16 + 4;
     let title_rows: [Vec<Span<'static>>; 5] = [
         vec![
-            Span::styled("DS-", welcome_accent().add_modifier(Modifier::BOLD)),
+            Span::styled("DS", welcome_accent().add_modifier(Modifier::BOLD)),
             Span::styled("CODE", welcome_brand_alt().add_modifier(Modifier::BOLD)),
         ],
         vec![Span::styled("DeepSeek coding shell", welcome_muted())],
@@ -949,27 +961,13 @@ fn render_product_mark(f: &mut Frame, area: Rect) {
         vec![],
     ];
 
-    for (idx, mark) in ascii_art::WELCOME_DSCODE.iter().enumerate() {
+    for idx in 0..ascii_art::WELCOME_DSCODE_SOLID_HEIGHT {
         let row_y = area.y + idx as u16;
         if row_y >= area.y + area.height {
             break;
         }
 
-        let indent = mark.chars().take_while(|ch| *ch == ' ').count() as u16;
-        let mark_body = mark.trim_start();
-        if !mark_body.is_empty() {
-            let mark_area = Rect::new(
-                left_x + indent,
-                row_y,
-                area.right().saturating_sub(left_x + indent),
-                1,
-            );
-            f.render_widget(
-                Paragraph::new(mark_body.to_string())
-                    .style(welcome_accent().add_modifier(Modifier::BOLD)),
-                mark_area,
-            );
-        }
+        render_solid_product_mark_row(f, area, left_x, row_y, idx);
 
         if let Some(title_line) = title_rows.get(idx) {
             let title_area = Rect::new(title_x, row_y, area.right().saturating_sub(title_x), 1);
@@ -981,12 +979,109 @@ fn render_product_mark(f: &mut Frame, area: Rect) {
     }
 }
 
+fn render_centered_product_mark(f: &mut Frame, area: Rect, mark_width: usize) {
+    let left_x = area.x + ((area.width as usize).saturating_sub(mark_width) / 2) as u16;
+    for idx in 0..ascii_art::WELCOME_DSCODE_SOLID_HEIGHT {
+        let row_y = area.y + idx as u16;
+        if row_y >= area.y + area.height {
+            break;
+        }
+        render_solid_product_mark_row(f, area, left_x, row_y, idx);
+    }
+    let label = "DSCODE";
+    let label_y = area.y + ascii_art::WELCOME_DSCODE_SOLID_HEIGHT as u16;
+    if label_y < area.y + area.height && area.width as usize >= label.len() {
+        let label_x = area.x + ((area.width as usize).saturating_sub(label.len()) / 2) as u16;
+        f.render_widget(
+            Paragraph::new(gradient_label(label)).style(welcome_bg()),
+            Rect::new(label_x, label_y, area.right().saturating_sub(label_x), 1),
+        );
+    }
+}
+
+fn render_solid_product_mark_row(f: &mut Frame, area: Rect, left_x: u16, row_y: u16, row: usize) {
+    let mut spans = Vec::new();
+    for (idx, glyph) in ascii_art::WELCOME_DSCODE_SOLID.iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::raw(" ".repeat(ascii_art::WELCOME_DSCODE_GAP)));
+        }
+        spans.push(Span::styled(
+            glyph.rows[row].to_string(),
+            welcome_logo_color(idx).add_modifier(Modifier::BOLD),
+        ));
+    }
+    f.render_widget(
+        Paragraph::new(Line::from(spans)).style(welcome_bg()),
+        Rect::new(left_x, row_y, area.right().saturating_sub(left_x), 1),
+    );
+}
+
+fn gradient_label(label: &'static str) -> Line<'static> {
+    Line::from(
+        label
+            .chars()
+            .enumerate()
+            .map(|(idx, ch)| {
+                Span::styled(
+                    ch.to_string(),
+                    welcome_logo_color(idx).add_modifier(Modifier::BOLD),
+                )
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn welcome_logo_color(index: usize) -> Style {
+    let color = match index % 6 {
+        0 => Color::Rgb(66, 133, 244),
+        1 => Color::Rgb(23, 156, 137),
+        2 => Color::Rgb(171, 71, 188),
+        3 => Color::Rgb(234, 67, 53),
+        4 => Color::Rgb(251, 188, 5),
+        _ => Color::Rgb(52, 168, 83),
+    };
+    Style::default().fg(color)
+}
+
 fn render_capability_line(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
     let lines = vec![capability_line(data)];
     f.render_widget(
         Paragraph::new(Text::from(lines))
             .style(welcome_bg())
             .alignment(Alignment::Center),
+        area,
+    );
+}
+
+fn render_quick_access(f: &mut Frame, area: Rect, _data: &WelcomeDashboardData) {
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Quick start", welcome_accent()),
+            Span::styled(" : ", welcome_muted()),
+            Span::styled("/help for all commands", welcome_text()),
+        ]),
+        Line::from(vec![
+            Span::styled("/agents", welcome_accent()),
+            Span::styled("  list / switch agents", welcome_muted()),
+        ]),
+        Line::from(vec![
+            Span::styled("/model", welcome_accent()),
+            Span::styled("  switch model", welcome_muted()),
+        ]),
+        Line::from(vec![
+            Span::styled("@path", welcome_accent()),
+            Span::styled("  mention files", welcome_muted()),
+        ]),
+        Line::from(vec![
+            Span::styled("!command", welcome_accent()),
+            Span::styled("  shell quick action", welcome_muted()),
+        ]),
+    ];
+
+    f.render_widget(
+        Paragraph::new(Text::from(lines))
+            .style(welcome_bg())
+            .wrap(Wrap { trim: true }),
         area,
     );
 }
@@ -1123,12 +1218,39 @@ mod tests {
             .draw(|f| render_welcome(f, f.area(), &data))
             .expect("draw welcome");
         let rendered = buffer_text(terminal.backend());
-        assert!(rendered.contains("DS-CODE"));
+        assert!(rendered.contains("DSCODE"));
         assert!(rendered.contains("What are we changing today?"));
         assert!(rendered.contains("starters"));
         assert!(rendered.contains("workspace"));
         assert!(rendered.contains("memory"));
         assert!(!rendered.contains("Project"));
+    }
+
+    #[test]
+    fn wide_render_uses_multicolor_solid_wordmark() {
+        let data = test_data(Vec::new(), true);
+        let mut terminal = Terminal::new(TestBackend::new(120, 28)).expect("create test terminal");
+        terminal
+            .draw(|f| render_welcome(f, f.area(), &data))
+            .expect("draw welcome");
+
+        let mut solid_cells = 0usize;
+        let mut colors = std::collections::HashSet::new();
+        for cell in terminal.backend().buffer().content() {
+            if cell.symbol() == "█" {
+                solid_cells += 1;
+                colors.insert(format!("{:?}", cell.fg));
+            }
+        }
+
+        assert!(
+            solid_cells > 80,
+            "solid glyph should render as filled blocks"
+        );
+        assert!(
+            colors.len() >= 4,
+            "solid glyph should use multiple letter colors, got {colors:?}"
+        );
     }
 
     #[test]
@@ -1139,7 +1261,7 @@ mod tests {
             .draw(|f| render_welcome(f, f.area(), &data))
             .expect("draw welcome");
         let rendered = buffer_text(terminal.backend());
-        assert!(rendered.contains("DS-CODE"));
+        assert!(rendered.contains("DSCODE"));
         assert!(rendered.contains("What are we changing today?"));
         assert!(rendered.contains("workspace"));
         assert!(rendered.contains("starters"));
@@ -1153,7 +1275,7 @@ mod tests {
             .draw(|f| render_welcome(f, f.area(), &data))
             .expect("draw welcome");
         let rendered = buffer_text(terminal.backend());
-        assert!(rendered.contains("DS-CODE"));
+        assert!(rendered.contains("DSCODE"));
         assert!(rendered.contains("Connect DeepSeek first"));
         assert!(rendered.contains("Paste your API key"));
         assert!(rendered.contains("enter"));
@@ -1168,7 +1290,7 @@ mod tests {
             .draw(|f| render_welcome(f, f.area(), &data))
             .expect("draw compact welcome");
         let rendered = buffer_text(terminal.backend());
-        assert!(rendered.contains("DS-CODE"));
+        assert!(rendered.contains("DSCODE"));
         assert!(rendered.contains("1-3"));
         assert!(rendered.contains("enter"));
     }

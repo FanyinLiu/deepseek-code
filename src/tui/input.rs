@@ -31,14 +31,16 @@ pub fn render_input_with_motion(
     area: Rect,
     input_text: &str,
     cursor_position: usize,
-    _pending_options: Option<&[String]>,
+    pending_options: Option<&[String]>,
     motion: MotionFrame,
 ) {
     let lines: Vec<Line> = if input_text.is_empty() {
         vec![Line::from(vec![
             prompt_span(),
             cursor_span(motion),
-            Span::styled("  type message...", muted_style()),
+            Span::styled("  ", muted_style()),
+            Span::styled(input_placeholder(), muted_style()),
+            render_context_suggestions(pending_options),
         ])]
     } else {
         let mut line_start = 0usize;
@@ -67,6 +69,36 @@ pub fn render_input_with_motion(
     let p = theme::palette();
     let input = Paragraph::new(lines).style(Style::default().bg(p.canvas).fg(p.text));
     f.render_widget(input, area);
+}
+
+fn input_placeholder() -> String {
+    "type message...".to_string()
+}
+
+fn render_context_suggestions(pending_options: Option<&[String]>) -> Span<'static> {
+    if pending_options.is_some() {
+        let opts = pending_options.unwrap_or(&[]);
+        if opts.is_empty() {
+            return Span::styled(
+                "  (option list active)",
+                muted_style().add_modifier(Modifier::ITALIC),
+            );
+        }
+        let shown = opts.iter().take(3).cloned().collect::<Vec<_>>().join(" · ");
+        let mut label = format!("  {shown}");
+        if opts.len() > 3 {
+            label.push_str(&format!(" (+{})", opts.len() - 3));
+        }
+        return Span::styled(
+            format!("  {label}"),
+            muted_style().add_modifier(Modifier::ITALIC),
+        );
+    }
+
+    Span::styled(
+        "  /help · /agents · @file · !cmd",
+        muted_style().add_modifier(Modifier::ITALIC),
+    )
 }
 
 pub fn render_api_key_input(f: &mut Frame, area: Rect, input_text: &str, cursor_position: usize) {
@@ -240,7 +272,7 @@ mod tests {
 
     #[test]
     fn empty_normal_input_draws_visible_cursor() {
-        let mut terminal = Terminal::new(TestBackend::new(20, 1)).expect("terminal");
+        let mut terminal = Terminal::new(TestBackend::new(80, 1)).expect("terminal");
         terminal
             .draw(|f| render_input(f, f.area(), "", 0, None))
             .expect("draw");
@@ -248,6 +280,23 @@ mod tests {
         let rendered = buffer_text(terminal.backend());
         assert!(rendered.contains("> ▌"));
         assert!(rendered.contains("type message..."));
+        assert!(rendered.contains("/help"));
+    }
+
+    #[test]
+    fn empty_input_with_pending_options_shows_option_preview() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 1)).expect("terminal");
+        let options: Vec<String> = ["help", "agents", "model", "context"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        terminal
+            .draw(|f| render_input(f, f.area(), "", 0, Some(&options)))
+            .expect("draw");
+
+        let rendered = buffer_text(terminal.backend());
+        assert!(rendered.contains("help · agents · model"));
+        assert!(rendered.contains("(+1)"));
     }
 
     #[test]

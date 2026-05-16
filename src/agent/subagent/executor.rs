@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,6 +19,7 @@ use crate::deepseek::{
     ReasoningState, Role, Session, SessionId, SessionMetadata, SubTurnId, ThinkingConfig, ToolCall,
     ToolCallRecord, ToolResultRecord, TurnId,
 };
+use crate::hooks::{HookEvent, HookPayload};
 
 use super::types::{
     PermissionMode, SubagentConfig, SubagentResult, SubagentTask, SubagentToolArgs,
@@ -353,58 +354,31 @@ impl SubagentExecutor {
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
     ) -> Vec<(ToolCall, ToolResultRecord)> {
         let mut results = Vec::new();
-        let policy_config = crate::storage::Config::load(Some(&self.project_root))
-            .map(|c| c.policy)
-            .unwrap_or_default();
+        let mut audit_meta: HashMap<String, ToolAuditMeta> = HashMap::new();
+        let runtime_config =
+            crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
+        let policy_config = runtime_config.policy.clone();
+        let hooks_config = runtime_config.hooks.clone();
         let dispatch_config =
             crate::tools::dispatch::ToolDispatchConfig::from_policy(&policy_config);
 
         for tc in tool_calls {
-            // Delegate run_subagent to a child handler (Feature 3: recursive spawning).
-            // The free function `run_nested_subagent` breaks the opaque-type-in-defining-scope
-            // limitation, allowing Rust to verify the Send bound without a circular inference.
-            if tc.function.name == "run_subagent" {
-                let (result_text, is_error) = if self.config.spawn_depth < MAX_SPAWN_DEPTH {
-                    run_nested_subagent(
-                        self.client.clone(),
-                        self.project_root.clone(),
-                        self.config.spawn_depth + 1,
-                        tc.function.arguments.clone(),
-                        event_tx.clone(),
-                    )
-                    .await
-                } else {
-                    (
-                        "Subagent spawning is not allowed at this nesting depth.".to_string(),
-                        true,
-                    )
-                };
-                results.push((
-                    tc.clone(),
-                    ToolResultRecord {
-                        tool_call_id: tc.id.clone(),
-                        name: tc.function.name.clone(),
-                        result: result_text,
-                        is_error,
-                    },
-                ));
-                continue;
-            }
-
             // Filter by allowed_tools
             if !self.config.allowed_tools.is_empty()
                 && !self.config.allowed_tools.contains(&tc.function.name)
             {
-                let record = ToolResultRecord {
-                    tool_call_id: tc.id.clone(),
-                    name: tc.function.name.clone(),
-                    result: format!(
+                push_subagent_tool_result(
+                    &mut results,
+                    &mut audit_meta,
+                    tc,
+                    format!(
                         "Tool '{}' is not allowed for this subagent (type: {}).",
                         tc.function.name, self.config.subagent_type
                     ),
-                    is_error: true,
-                };
-                results.push((tc.clone(), record));
+                    true,
+                    false,
+                    crate::policy::RiskLevel::Blocked.to_string(),
+                );
                 continue;
             }
 
@@ -412,16 +386,18 @@ impl SubagentExecutor {
             match self.config.permission_mode {
                 PermissionMode::ReadOnly => {
                     if !read_only_allows_tool(&tc.function.name) {
-                        let record = ToolResultRecord {
-                            tool_call_id: tc.id.clone(),
-                            name: tc.function.name.clone(),
-                            result: format!(
+                        push_subagent_tool_result(
+                            &mut results,
+                            &mut audit_meta,
+                            tc,
+                            format!(
                                 "Tool '{}' is blocked: subagent is in read-only mode.",
                                 tc.function.name
                             ),
-                            is_error: true,
-                        };
-                        results.push((tc.clone(), record));
+                            true,
+                            false,
+                            crate::policy::RiskLevel::Blocked.to_string(),
+                        );
                         continue;
                     }
                 }
@@ -442,6 +418,7 @@ impl SubagentExecutor {
             // Bypass and AcceptEdits (for non-command tools) skip the popup entirely.
             // Only Default mode routes to the TUI approval popup and waits.
             let is_command = tc.function.name == "run_command";
+            let is_subagent = tc.function.name == "run_subagent";
             let policy_decision = crate::policy::evaluate_tool(
                 &tc.function.name,
                 &tc.function.arguments,
@@ -449,16 +426,18 @@ impl SubagentExecutor {
                 &policy_config,
             );
             if policy_decision.action == crate::policy::PolicyAction::Deny {
-                let record = ToolResultRecord {
-                    tool_call_id: tc.id.clone(),
-                    name: tc.function.name.clone(),
-                    result: format!(
+                push_subagent_tool_result(
+                    &mut results,
+                    &mut audit_meta,
+                    tc,
+                    format!(
                         "Tool '{}' was blocked by policy: {}",
                         tc.function.name, policy_decision.reason
                     ),
-                    is_error: true,
-                };
-                results.push((tc.clone(), record));
+                    true,
+                    false,
+                    policy_decision.display.risk_level.to_string(),
+                );
                 continue;
             }
             let approved = match self.config.permission_mode {
@@ -471,6 +450,7 @@ impl SubagentExecutor {
                 }
                 PermissionMode::AcceptEdits
                     if !is_command
+                        && !is_subagent
                         && policy_decision.display.risk_level
                             != crate::policy::RiskLevel::SensitiveRead =>
                 {
@@ -496,13 +476,86 @@ impl SubagentExecutor {
             };
 
             if !approved {
-                let record = ToolResultRecord {
-                    tool_call_id: tc.id.clone(),
-                    name: tc.function.name.clone(),
-                    result: format!("Tool '{}' was denied.", tc.function.name),
-                    is_error: true,
+                push_subagent_tool_result(
+                    &mut results,
+                    &mut audit_meta,
+                    tc,
+                    format!("Tool '{}' was denied.", tc.function.name),
+                    true,
+                    false,
+                    policy_decision.display.risk_level.to_string(),
+                );
+                continue;
+            }
+
+            let mut hook_payload = HookPayload::new(
+                HookEvent::PreToolUse,
+                session.id.to_string(),
+                self.project_root.clone(),
+            );
+            hook_payload.tool_call_id = Some(tc.id.clone());
+            hook_payload.tool_name = Some(format!("{}.{}", self.agent_id, tc.function.name));
+            hook_payload.arguments = Some(tc.function.arguments.clone());
+            if let Some(pre_hooks) = crate::hooks::run_configured_hooks(
+                HookEvent::PreToolUse,
+                &hooks_config,
+                &hook_payload,
+                &self.project_root,
+                policy_config.command_timeout_seconds,
+            )
+            .await
+            {
+                send_event(
+                    event_tx,
+                    AgentEvent::HookExecuted {
+                        event: pre_hooks.event,
+                        success: pre_hooks.success(),
+                        summary: pre_hooks.brief(),
+                        command_count: pre_hooks.outcomes.len(),
+                    },
+                );
+                if !pre_hooks.success() {
+                    push_subagent_tool_result(
+                        &mut results,
+                        &mut audit_meta,
+                        tc,
+                        format!("Blocked by pre_tool hook: {}", pre_hooks.brief()),
+                        true,
+                        approved,
+                        policy_decision.display.risk_level.to_string(),
+                    );
+                    continue;
+                }
+            }
+
+            // Delegate run_subagent to a child handler after policy and subagent permissions.
+            // The free function `run_nested_subagent` breaks the opaque-type-in-defining-scope
+            // limitation, allowing Rust to verify the Send bound without a circular inference.
+            if tc.function.name == "run_subagent" {
+                let (result_text, is_error) = if self.config.spawn_depth < MAX_SPAWN_DEPTH {
+                    run_nested_subagent(
+                        self.client.clone(),
+                        self.project_root.clone(),
+                        self.config.spawn_depth + 1,
+                        tc.function.arguments.clone(),
+                        event_tx.clone(),
+                    )
+                    .await
+                } else {
+                    (
+                        "Subagent spawning is not allowed at this nesting depth.".to_string(),
+                        true,
+                    )
                 };
-                results.push((tc.clone(), record));
+                push_subagent_tool_result(
+                    &mut results,
+                    &mut audit_meta,
+                    tc,
+                    result_text,
+                    is_error,
+                    true,
+                    policy_decision.display.risk_level.to_string(),
+                );
                 continue;
             }
 
@@ -522,19 +575,37 @@ impl SubagentExecutor {
 
             let _lock_guard: Option<FileLockGuard<'_>> = if let Some(ref bus) = self.bus {
                 if tc.function.name == "write_file" || tc.function.name == "edit_file" {
-                    let args: serde_json::Value =
-                        serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+                    let args: serde_json::Value = match serde_json::from_str(&tc.function.arguments)
+                    {
+                        Ok(args) => args,
+                        Err(error) => {
+                            push_subagent_tool_result(
+                                &mut results,
+                                &mut audit_meta,
+                                tc,
+                                format!(
+                                    "Tool arguments could not be parsed for file locking: {error}"
+                                ),
+                                true,
+                                true,
+                                policy_decision.display.risk_level.to_string(),
+                            );
+                            continue;
+                        }
+                    };
                     if let Some(path) = args["path"].as_str() {
                         if bus.is_file_locked(path) {
-                            let record = ToolResultRecord {
-                                tool_call_id: tc.id.clone(),
-                                name: tc.function.name.clone(),
-                                result: format!(
+                            push_subagent_tool_result(
+                                &mut results,
+                                &mut audit_meta,
+                                tc,
+                                format!(
                                     "File '{path}' is currently locked by another subagent. Wait for it to complete."
                                 ),
-                                is_error: true,
-                            };
-                            results.push((tc.clone(), record));
+                                true,
+                                true,
+                                policy_decision.display.risk_level.to_string(),
+                            );
                             continue;
                         }
                         bus.announce_file_lock(&self.agent_id, path);
@@ -557,21 +628,60 @@ impl SubagentExecutor {
             let (result_text, is_error) = crate::tools::dispatch::execute_single_tool_with_config(
                 tc,
                 &self.project_root,
-                dispatch_config,
+                dispatch_config.clone(),
             )
             .await;
+            let mut post_payload = HookPayload::new(
+                HookEvent::PostToolUse,
+                session.id.to_string(),
+                self.project_root.clone(),
+            );
+            post_payload.tool_call_id = Some(tc.id.clone());
+            post_payload.tool_name = Some(format!("{}.{}", self.agent_id, tc.function.name));
+            post_payload.arguments = Some(tc.function.arguments.clone());
+            post_payload.success = Some(!is_error);
+            post_payload.summary =
+                Some(crate::agent::utils::truncate_for_summary(&result_text, 200));
+            if let Some(post_hooks) = crate::hooks::run_configured_hooks(
+                HookEvent::PostToolUse,
+                &hooks_config,
+                &post_payload,
+                &self.project_root,
+                policy_config.command_timeout_seconds,
+            )
+            .await
+            {
+                send_event(
+                    event_tx,
+                    AgentEvent::HookExecuted {
+                        event: post_hooks.event,
+                        success: post_hooks.success(),
+                        summary: post_hooks.brief(),
+                        command_count: post_hooks.outcomes.len(),
+                    },
+                );
+            }
 
-            let record = ToolResultRecord {
-                tool_call_id: tc.id.clone(),
-                name: tc.function.name.clone(),
-                result: result_text,
+            push_subagent_tool_result(
+                &mut results,
+                &mut audit_meta,
+                tc,
+                result_text,
                 is_error,
-            };
-            results.push((tc.clone(), record));
+                approved,
+                policy_decision.display.risk_level.to_string(),
+            );
         }
 
         // Record in session history
         for (tc, record) in &results {
+            let meta = audit_meta
+                .get(&tc.id)
+                .cloned()
+                .unwrap_or_else(|| ToolAuditMeta {
+                    approved: false,
+                    risk_level: crate::policy::RiskLevel::Blocked.to_string(),
+                });
             let tool_record = ToolCallRecord {
                 id: tc.id.clone(),
                 name: tc.function.name.clone(),
@@ -579,8 +689,8 @@ impl SubagentExecutor {
                 result_summary: crate::agent::utils::truncate_for_summary(&record.result, 200),
                 exit_code: if record.is_error { Some(1) } else { Some(0) },
                 duration_ms: 0,
-                risk_level: crate::agent::utils::risk_level_for_tool(&tc.function.name).to_string(),
-                approved: subagent_tool_record_was_approved(record),
+                risk_level: meta.risk_level,
+                approved: meta.approved,
                 at: Utc::now(),
             };
             session.tool_call_history.push(tool_record);
@@ -590,6 +700,39 @@ impl SubagentExecutor {
     }
 
     // execute_single_tool moved to crate::tools::dispatch
+}
+
+#[derive(Debug, Clone)]
+struct ToolAuditMeta {
+    approved: bool,
+    risk_level: String,
+}
+
+fn push_subagent_tool_result(
+    results: &mut Vec<(ToolCall, ToolResultRecord)>,
+    audit_meta: &mut HashMap<String, ToolAuditMeta>,
+    tc: &ToolCall,
+    result: String,
+    is_error: bool,
+    approved: bool,
+    risk_level: String,
+) {
+    audit_meta.insert(
+        tc.id.clone(),
+        ToolAuditMeta {
+            approved,
+            risk_level,
+        },
+    );
+    results.push((
+        tc.clone(),
+        ToolResultRecord {
+            tool_call_id: tc.id.clone(),
+            name: tc.function.name.clone(),
+            result,
+            is_error,
+        },
+    ));
 }
 
 fn sanitize_subagent_task(task: &SubagentTask) -> SubagentTask {
@@ -621,18 +764,6 @@ fn collect_successful_file_access(
         "write_file" | "edit_file" => files_written.push(path.to_string()),
         _ => {}
     }
-}
-
-fn subagent_tool_record_was_approved(record: &ToolResultRecord) -> bool {
-    if !record.is_error {
-        return true;
-    }
-
-    let lower = record.result.to_ascii_lowercase();
-    !(lower.contains("not allowed")
-        || lower.contains("blocked")
-        || lower.contains("denied")
-        || lower.contains("policy"))
 }
 
 fn read_only_allows_tool(tool_name: &str) -> bool {
@@ -830,7 +961,7 @@ mod tests {
     use super::{
         collect_successful_file_access, dedupe_preserving_order, emit_subagent_chunk_delta,
         read_only_allows_tool, run_nested_subagent, structured_subagent_error_message,
-        structured_subagent_limit_message, subagent_tool_record_was_approved,
+        structured_subagent_limit_message,
     };
     use crate::agent::orchestrator::AgentEvent;
     use crate::agent::subagent::types::SubagentTask;
@@ -925,25 +1056,6 @@ mod tests {
 
         assert!(files_read.is_empty());
         assert_eq!(files_written, vec!["src/lib.rs"]);
-    }
-
-    #[test]
-    fn denied_subagent_tool_records_are_not_marked_approved() {
-        let blocked = crate::deepseek::ToolResultRecord {
-            tool_call_id: "call-1".to_string(),
-            name: "write_file".to_string(),
-            result: "Tool 'write_file' is blocked: subagent is in read-only mode.".to_string(),
-            is_error: true,
-        };
-        let runtime_error = crate::deepseek::ToolResultRecord {
-            tool_call_id: "call-2".to_string(),
-            name: "run_command".to_string(),
-            result: "Command exited with status 1".to_string(),
-            is_error: true,
-        };
-
-        assert!(!subagent_tool_record_was_approved(&blocked));
-        assert!(subagent_tool_record_was_approved(&runtime_error));
     }
 
     #[test]

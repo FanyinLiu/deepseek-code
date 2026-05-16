@@ -17,5 +17,5 @@ pub use edit_file::edit_file;
 pub use git::{git_diff, git_status};
 pub use list_dir::list_dir;
 pub use read_file::read_file;
-pub use run_command::run_command;
+pub use run_command::{run_command, run_command_with_sandbox};
 pub use write_file::write_file;

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
+use crate::cli::resolve_project_root;
 use crate::search::{self, SearchMatch};
-use crate::storage;
 
 /// Run the search command: local code search.
 pub async fn search(
@@ -10,8 +10,7 @@ pub async fn search(
     limit: usize,
     project_root: Option<PathBuf>,
 ) -> Result<(), anyhow::Error> {
-    let root = project_root
-        .unwrap_or_else(|| storage::find_project_root().unwrap_or_else(|| PathBuf::from(".")));
+    let root = resolve_project_root(project_root, "search")?;
 
     let mut all_results: Vec<SearchMatch> = Vec::new();
 

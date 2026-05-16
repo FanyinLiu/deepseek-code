@@ -23,7 +23,9 @@ use super::subagent::{
     SubagentType,
 };
 use super::supervisor::Supervisor;
-use super::team::{TeamMilestone, TeamPlan};
+use super::team::{
+    AgentRole, AgentRunState, TeamMilestone, TeamPlan, TeamRun, TeamTask, TeamTaskMode,
+};
 
 const READ_ONLY_TOOLS: &[&str] = &[
     "read_file",
@@ -78,6 +80,18 @@ impl SwarmAgentRole {
             Self::Worker | Self::Coordinator => SubagentType::GeneralPurpose,
         }
     }
+
+    fn team_role(&self) -> AgentRole {
+        match self {
+            Self::Coordinator => AgentRole::Coordinator,
+            Self::Explorer => AgentRole::Explorer,
+            Self::Reviewer => AgentRole::Reviewer,
+            Self::Planner => AgentRole::Planner,
+            Self::Tester => AgentRole::Tester,
+            Self::Worker => AgentRole::Worker,
+            Self::Verifier => AgentRole::Verifier,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +117,17 @@ impl SwarmTaskStatus {
             Self::Cancelled => "cancelled",
         }
     }
+
+    fn agent_state(&self) -> AgentRunState {
+        match self {
+            Self::Pending => AgentRunState::Pending,
+            Self::Running => AgentRunState::Running,
+            Self::Done => AgentRunState::Succeeded,
+            Self::Failed => AgentRunState::Failed,
+            Self::Blocked => AgentRunState::Blocked,
+            Self::Cancelled => AgentRunState::Cancelled,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +141,31 @@ pub struct SwarmTask {
     #[serde(default)]
     pub depends_on: Vec<String>,
     pub status: SwarmTaskStatus,
+}
+
+impl SwarmTask {
+    fn team_task(&self) -> TeamTask {
+        TeamTask {
+            id: self.id.clone(),
+            role: self.role.team_role(),
+            title: self.description.clone(),
+            prompt: self.prompt.clone(),
+            mode: self.team_task_mode(),
+            focus_files: self.focus_files.clone(),
+            depends_on: self.depends_on.clone(),
+        }
+    }
+
+    fn team_task_mode(&self) -> TeamTaskMode {
+        match self.role {
+            SwarmAgentRole::Worker => TeamTaskMode::PendingPatch,
+            SwarmAgentRole::Tester | SwarmAgentRole::Verifier => TeamTaskMode::VerifyOnly,
+            SwarmAgentRole::Coordinator
+            | SwarmAgentRole::Explorer
+            | SwarmAgentRole::Reviewer
+            | SwarmAgentRole::Planner => TeamTaskMode::ReadOnly,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,7 +202,7 @@ impl SwarmPlan {
                 .iter()
                 .map(|task| format!("{}: {}", task.role.as_str(), task.description))
                 .collect(),
-            tasks: Vec::new(),
+            tasks: self.tasks.iter().map(SwarmTask::team_task).collect(),
             validation_commands: self.validation_commands.clone(),
             risks: self.risks.clone(),
         }
@@ -164,6 +214,17 @@ pub struct SwarmRun {
     pub run_id: String,
     pub plan: SwarmPlan,
     pub status: SwarmTaskStatus,
+}
+
+impl SwarmRun {
+    #[must_use]
+    pub fn team_run(&self) -> TeamRun {
+        TeamRun {
+            id: self.run_id.clone(),
+            plan: self.plan.team_plan(),
+            status: self.status.agent_state(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1720,6 +1781,31 @@ mod tests {
         assert!(roles.contains(&SwarmAgentRole::Worker));
         assert!(roles.contains(&SwarmAgentRole::Verifier));
         assert_eq!(team.agent_roles.len(), plan.tasks.len());
+        assert_eq!(team.tasks.len(), plan.tasks.len());
+        assert!(team
+            .tasks
+            .iter()
+            .any(|task| task.mode == TeamTaskMode::PendingPatch));
+        assert!(team
+            .tasks
+            .iter()
+            .any(|task| task.mode == TeamTaskMode::VerifyOnly));
+    }
+
+    #[test]
+    fn swarm_run_converts_to_canonical_team_state() {
+        let plan = coordinator().plan("审查", "审查 src/agent/swarm.rs", &[]);
+        let run = SwarmRun {
+            run_id: "swarm-1".into(),
+            plan,
+            status: SwarmTaskStatus::Running,
+        };
+
+        let team_run = run.team_run();
+
+        assert_eq!(team_run.id, "swarm-1");
+        assert_eq!(team_run.status, AgentRunState::Running);
+        assert!(!team_run.plan.tasks.is_empty());
     }
 
     #[test]

@@ -126,6 +126,41 @@ fn agent_validate_catches_malformed_agent() {
         .any(|error| error["code"] == "frontmatter_parse"));
 }
 
+#[test]
+fn agent_validate_all_includes_toml_custom_agents() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let agents_dir = root.path().join(".deepseek-code").join("agents");
+    std::fs::create_dir_all(&agents_dir).expect("create agents dir");
+    std::fs::write(
+        agents_dir.join("toml-explorer.toml"),
+        r#"
+subagent_type = "code-explorer"
+allowed_tools = ["read_file", "search_code"]
+permission_mode = "read_only"
+model = "deepseek-v4-flash"
+max_turns = 3
+system_prompt = "Read the codebase and report concise findings."
+"#,
+    )
+    .expect("write toml agent");
+
+    let output = ds_command(root.path())
+        .args(["agent", "validate", "--all", "--json"])
+        .output()
+        .expect("run ds agent validate all");
+
+    assert!(output.status.success(), "stderr={}", stderr(&output));
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("validate json parses");
+    let report = json["reports"]
+        .as_array()
+        .expect("reports array")
+        .iter()
+        .find(|report| report["name"] == "toml-explorer")
+        .expect("toml-explorer report");
+    assert_eq!(report["valid"], true);
+}
+
 fn stderr(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stderr).to_string()
 }

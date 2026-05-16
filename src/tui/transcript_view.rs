@@ -16,6 +16,7 @@ use crate::tui::{
 pub struct TranscriptProps<'a> {
     pub messages: &'a [ProtocolMessage],
     pub pending_user_message: Option<&'a str>,
+    pub queued_user_messages: &'a [&'a str],
     pub scroll_offset: usize,
     pub plan_summary: Option<&'a str>,
     pub plan_steps: &'a [plan_tracker::PlanStepItem],
@@ -30,16 +31,27 @@ pub struct TranscriptProps<'a> {
     pub show_streaming_placeholder: bool,
     pub stream_buffer: &'a str,
     pub reasoning_buffer: &'a str,
+    pub reasoning_elapsed_ms: u64,
+    pub reasoning_tokens: u64,
     pub show_reasoning: bool,
 }
+
+const TRANSCRIPT_RENDER_MARGIN_LINES: usize = 600;
 
 pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let palette = theme::palette();
     let frame = motion::MotionFrame::new(motion::MotionLevel::Subtle, props.global_elapsed_ms);
+    let visible_height = area.height as usize;
+    let messages = transcript_message_window(
+        props.messages,
+        area.width,
+        visible_height,
+        props.scroll_offset,
+    );
 
     // ── Messages ──
-    for msg in props.messages {
+    for msg in messages {
         if msg.visibility == MessageVisibility::AuditOnly {
             continue;
         }
@@ -81,17 +93,25 @@ pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) 
         }
     }
 
-    // ── Reasoning (hidden by default, shown if toggled) ──
-    if props.show_reasoning && !props.reasoning_buffer.is_empty() {
+    if !props.queued_user_messages.is_empty() {
         if !lines.is_empty() {
             lines.push(Line::from(""));
         }
-        for line in props.reasoning_buffer.lines() {
-            lines.push(Line::from(vec![
-                Span::styled("│ ", transcript_style(palette.muted)),
-                Span::styled(line.to_string(), transcript_style(palette.dim)),
-            ]));
+        render_queued_user_messages(&mut lines, props.queued_user_messages, area.width);
+    }
+
+    // ── Thinking panel (collapsed by default, expanded with T) ──
+    if !props.reasoning_buffer.trim().is_empty() {
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
         }
+        render_thinking_panel(
+            &mut lines,
+            props.reasoning_buffer,
+            props.show_reasoning,
+            props.reasoning_elapsed_ms,
+            props.reasoning_tokens,
+        );
     }
 
     // ── Inline Plan ──
@@ -127,7 +147,6 @@ pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) 
 
     // Chat-style scrollback: offset 0 is pinned to the newest visual lines.
     let lines = wrap_visual_lines(&lines, area.width);
-    let visible_height = area.height as usize;
     let max_offset = lines.len().saturating_sub(visible_height);
     let hidden_below = props.scroll_offset.min(max_offset);
     let end = lines.len().saturating_sub(hidden_below);
@@ -140,6 +159,60 @@ pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) 
         .style(Style::default().fg(palette.text).bg(palette.canvas))
         .wrap(Wrap { trim: false });
     f.render_widget(paragraph, area);
+}
+
+fn transcript_message_window(
+    messages: &[ProtocolMessage],
+    width: u16,
+    visible_height: usize,
+    scroll_offset: usize,
+) -> &[ProtocolMessage] {
+    if messages.is_empty() {
+        return messages;
+    }
+
+    let target_lines = visible_height
+        .saturating_add(scroll_offset)
+        .saturating_add(TRANSCRIPT_RENDER_MARGIN_LINES)
+        .max(visible_height);
+    let mut estimated_lines = 0usize;
+    let mut start = messages.len();
+
+    for (index, message) in messages.iter().enumerate().rev() {
+        start = index;
+        estimated_lines =
+            estimated_lines.saturating_add(estimate_message_visual_lines(message, width));
+        if estimated_lines >= target_lines {
+            break;
+        }
+    }
+
+    &messages[start..]
+}
+
+fn estimate_message_visual_lines(message: &ProtocolMessage, width: u16) -> usize {
+    if message.visibility == MessageVisibility::AuditOnly {
+        return 0;
+    }
+
+    let max_width = (width as usize).max(1);
+    let mut lines = estimate_text_visual_lines(&message.content.to_string_lossy(), max_width);
+    lines = lines.saturating_add(message.tool_calls.len().saturating_mul(3));
+    lines = lines.saturating_add(message.tool_results.len().saturating_mul(3));
+    lines.saturating_add(1)
+}
+
+fn estimate_text_visual_lines(text: &str, max_width: usize) -> usize {
+    if text.is_empty() {
+        return 1;
+    }
+
+    let mut count = 0usize;
+    for raw_line in text.lines() {
+        let width = raw_line.chars().map(char_display_width).sum::<usize>();
+        count = count.saturating_add((width / max_width).saturating_add(1));
+    }
+    count.max(1)
 }
 
 fn wrap_visual_lines(lines: &[Line<'static>], width: u16) -> Vec<Line<'static>> {
@@ -192,7 +265,7 @@ fn wrap_visual_lines(lines: &[Line<'static>], width: u16) -> Vec<Line<'static>> 
     out
 }
 
-fn render_message(lines: &mut Vec<Line>, msg: &ProtocolMessage, width: u16) {
+fn render_message(lines: &mut Vec<Line<'static>>, msg: &ProtocolMessage, width: u16) {
     let palette = theme::palette();
     if msg.role == Role::User {
         render_user_message(lines, msg, width);
@@ -219,7 +292,7 @@ fn render_message(lines: &mut Vec<Line>, msg: &ProtocolMessage, width: u16) {
                 intent: format!("{kind} result"),
                 detail: view_blocks::summarize_tool_result(&result.result),
             };
-            lines.extend(view_blocks::render_tool_lines(&view, 88));
+            lines.extend(view_blocks::render_tool_card_lines(&view, width as usize));
         }
         return;
     }
@@ -244,7 +317,7 @@ fn render_message(lines: &mut Vec<Line>, msg: &ProtocolMessage, width: u16) {
 }
 
 fn render_assistant_content(
-    lines: &mut Vec<Line>,
+    lines: &mut Vec<Line<'static>>,
     content: &str,
     width: u16,
     prefix: &str,
@@ -321,6 +394,15 @@ fn render_assistant_content(
                 lines.push(Line::from(spans));
                 first_line = false;
             }
+            syntax_highlight::MarkdownBlock::ListItem {
+                marker,
+                text,
+                indent,
+            } => {
+                let p = if first_line { prefix } else { "" };
+                render_markdown_list_item(lines, p, &marker, &text, indent, fg);
+                first_line = false;
+            }
             syntax_highlight::MarkdownBlock::CodeBlock { language: _, code } => {
                 first_line = false;
                 // No language label: code blocks stay compact in the transcript.
@@ -343,6 +425,64 @@ fn render_assistant_content(
             }
         }
     }
+}
+
+fn render_markdown_list_item(
+    lines: &mut Vec<Line<'static>>,
+    prefix: &str,
+    marker: &str,
+    text: &str,
+    indent: usize,
+    fg: Color,
+) {
+    let p = theme::palette();
+    let (task_marker, text) =
+        task_list_marker(text).map_or((None, text), |(marker, rest)| (Some(marker), rest));
+    let marker = if let Some(task_marker) = task_marker {
+        task_marker.to_string()
+    } else if matches!(marker, "-" | "*" | "+") {
+        "•".to_string()
+    } else {
+        marker.to_string()
+    };
+    let marker_color = if marker == "☑" {
+        p.success
+    } else if marker == "☐" {
+        p.dim
+    } else {
+        p.warning
+    };
+    let mut spans = vec![Span::styled(prefix.to_string(), transcript_style(fg))];
+    spans.push(Span::styled(
+        " ".repeat(indent.min(8)),
+        transcript_style(p.dim),
+    ));
+    spans.push(Span::styled(
+        format!("{marker} "),
+        transcript_style(marker_color).add_modifier(Modifier::BOLD),
+    ));
+    spans.extend(inline_spans(text, fg));
+    lines.push(Line::from(spans));
+}
+
+fn task_list_marker(text: &str) -> Option<(&'static str, &str)> {
+    let trimmed = text.trim_start();
+    if let Some(rest) = trimmed
+        .strip_prefix("[ ] ")
+        .or_else(|| trimmed.strip_prefix("[ ]\t"))
+    {
+        return Some(("☐", rest.trim_start()));
+    }
+    checked_task_list_marker(trimmed)
+}
+
+fn checked_task_list_marker(text: &str) -> Option<(&'static str, &str)> {
+    let rest = text
+        .strip_prefix("[x] ")
+        .or_else(|| text.strip_prefix("[X] "))
+        .or_else(|| text.strip_prefix("[x]\t"))
+        .or_else(|| text.strip_prefix("[X]\t"))?;
+    Some(("☑", rest.trim_start()))
 }
 
 fn is_markdown_rule(line: &str) -> bool {
@@ -442,12 +582,7 @@ fn render_markdown_table(lines: &mut Vec<Line>, table_lines: &[&str], width: u16
     shrink_table_widths(&mut widths, max_width);
 
     let p = theme::palette();
-    let border_style = transcript_style(match theme::active_theme() {
-        theme::ThemeMode::Light => Color::Rgb(42, 42, 36),
-        theme::ThemeMode::Auto | theme::ThemeMode::Dark | theme::ThemeMode::HighContrast => {
-            p.divider
-        }
-    });
+    let border_style = transcript_style(p.divider);
 
     lines.push(table_border_line(
         prefix,
@@ -594,12 +729,7 @@ fn table_border_line(
 
 fn table_row_line(row: &[String], widths: &[usize], is_header: bool) -> Line<'static> {
     let p = theme::palette();
-    let border_style = transcript_style(match theme::active_theme() {
-        theme::ThemeMode::Light => Color::Rgb(42, 42, 36),
-        theme::ThemeMode::Auto | theme::ThemeMode::Dark | theme::ThemeMode::HighContrast => {
-            p.divider
-        }
-    });
+    let border_style = transcript_style(p.divider);
     let mut spans = vec![Span::styled("│", border_style)];
     for (cell, width) in row.iter().zip(widths.iter().copied()) {
         spans.push(Span::styled(" ", transcript_style(p.text)));
@@ -649,12 +779,12 @@ fn is_blocked_status(value: &str) -> bool {
     lower.contains("blocked") || lower.contains("pending")
 }
 
-fn render_user_message(lines: &mut Vec<Line>, msg: &ProtocolMessage, width: u16) {
+fn render_user_message(lines: &mut Vec<Line<'static>>, msg: &ProtocolMessage, width: u16) {
     let content = msg.content.to_string_lossy();
     render_user_text(lines, &content, width);
 }
 
-fn render_user_text(lines: &mut Vec<Line>, content: &str, width: u16) {
+fn render_user_text(lines: &mut Vec<Line<'static>>, content: &str, width: u16) {
     lines.extend(user_text_lines(content, width));
 }
 
@@ -672,6 +802,97 @@ fn user_text_lines(content: &str, width: u16) -> Vec<Line<'static>> {
     lines
 }
 
+fn render_queued_user_messages(lines: &mut Vec<Line<'static>>, messages: &[&str], width: u16) {
+    let p = theme::palette();
+    let use_chinese = messages.iter().any(|message| contains_cjk(message));
+    let count = messages.len();
+    let title = if use_chinese {
+        if count == 1 {
+            "已排队：当前任务完成后自动发送".to_string()
+        } else {
+            format!("已排队 {count} 条：将按顺序自动发送")
+        }
+    } else if count == 1 {
+        "Queued: will send after the current task finishes".to_string()
+    } else {
+        format!("Queued {count}: will send in order after the current task finishes")
+    };
+    lines.push(Line::from(vec![
+        Span::styled("↳ ", transcript_style(p.accent)),
+        Span::styled(title, transcript_style(p.dim).add_modifier(Modifier::BOLD)),
+    ]));
+
+    let max_width = width.saturating_sub(6) as usize;
+    for (idx, message) in messages.iter().take(3).enumerate() {
+        let prefix = if count == 1 {
+            "  > ".to_string()
+        } else {
+            format!("  {}. ", idx + 1)
+        };
+        let text = truncate_display_width(message.trim(), max_width);
+        lines.push(Line::from(vec![
+            Span::styled(prefix, transcript_style(p.muted)),
+            Span::styled(text, transcript_style(p.text)),
+        ]));
+    }
+    if count > 3 {
+        let extra = count - 3;
+        let label = if use_chinese {
+            format!("  ... 还有 {extra} 条")
+        } else {
+            format!("  ... {extra} more")
+        };
+        lines.push(Line::from(Span::styled(label, transcript_style(p.dim))));
+    }
+}
+
+fn render_thinking_panel(
+    lines: &mut Vec<Line<'static>>,
+    reasoning: &str,
+    expanded: bool,
+    elapsed_ms: u64,
+    tokens: u64,
+) {
+    let p = theme::palette();
+    let state = if expanded { "expanded" } else { "collapsed" };
+    let mut metadata = Vec::new();
+    if elapsed_ms > 0 {
+        metadata.push(format_duration(elapsed_ms));
+    }
+    if tokens > 0 {
+        metadata.push(format!("{tokens} tokens"));
+    }
+    let suffix = if metadata.is_empty() {
+        format!(" · {state} · T toggles")
+    } else {
+        format!(" · {state} · {} · T toggles", metadata.join(" · "))
+    };
+
+    lines.push(Line::from(vec![
+        Span::styled("◌ ", transcript_style(p.accent)),
+        Span::styled(
+            "Thinking",
+            transcript_style(p.text).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(suffix, transcript_style(p.dim)),
+    ]));
+
+    if !expanded {
+        return;
+    }
+
+    let visible_lines = reasoning
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(12);
+    for line in visible_lines {
+        lines.push(Line::from(vec![
+            Span::styled("  │ ", transcript_style(p.divider)),
+            Span::styled(line.trim().to_string(), transcript_style(p.dim)),
+        ]));
+    }
+}
+
 fn streaming_status_line(frame: motion::MotionFrame) -> Line<'static> {
     let p = theme::palette();
     Line::from(vec![
@@ -687,49 +908,7 @@ fn streaming_status_line(frame: motion::MotionFrame) -> Line<'static> {
 }
 
 fn render_connected_tool_lines(view: &view_blocks::ToolCallView, width: u16) -> Vec<Line<'static>> {
-    if view.status == view_blocks::ViewStatus::Running {
-        if view.name == "run_command" {
-            return connected_tool_lines("Running 1 shell command.", &view.detail, width);
-        }
-        if view.name == "read_file" {
-            return connected_tool_lines("Reading 1 file.", &view.detail, width);
-        }
-        if view.name == "list_dir" {
-            return connected_tool_lines("Listing 1 directory.", &view.detail, width);
-        }
-        if matches!(
-            view.name.as_str(),
-            "search_files" | "search_code" | "semantic_search"
-        ) {
-            return connected_tool_lines("Searching workspace.", &view.detail, width);
-        }
-        if matches!(view.name.as_str(), "fetch_url" | "web_search") {
-            return connected_tool_lines("Fetching.", &view.detail, width);
-        }
-    }
-
-    view_blocks::render_tool_lines(view, 88)
-}
-
-fn connected_tool_lines(title: &str, detail: &str, width: u16) -> Vec<Line<'static>> {
-    let p = theme::palette();
-    let detail = truncate(detail, width.saturating_sub(8) as usize);
-    vec![
-        Line::from(vec![
-            Span::styled("* ", Style::default().fg(p.muted).bg(p.canvas)),
-            Span::styled(
-                title.to_string(),
-                Style::default()
-                    .fg(p.text)
-                    .bg(p.canvas)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  └ ", Style::default().fg(p.dim).bg(p.canvas)),
-            Span::styled(detail, Style::default().fg(p.dim).bg(p.canvas)),
-        ]),
-    ]
+    view_blocks::render_tool_card_lines(view, width.saturating_sub(4) as usize)
 }
 
 fn should_hide_transcript_line(line: &str) -> bool {
@@ -790,6 +969,22 @@ fn inline_spans(text: &str, default_fg: Color) -> Vec<Span<'static>> {
 fn next_inline_token(input: &str, default_fg: Color) -> Option<(String, usize, Style)> {
     let p = theme::palette();
 
+    if let Some(stripped) = input.strip_prefix("***") {
+        if let Some(end) = stripped.find("***") {
+            let content = &stripped[..end];
+            let consumed = 3 + end + 3;
+            if !content.is_empty() {
+                return Some((
+                    content.to_string(),
+                    consumed,
+                    transcript_style(default_fg)
+                        .add_modifier(Modifier::BOLD)
+                        .add_modifier(Modifier::ITALIC),
+                ));
+            }
+        }
+    }
+
     if let Some(stripped) = input.strip_prefix("**") {
         if let Some(end) = stripped.find("**") {
             let content = &stripped[..end];
@@ -802,6 +997,22 @@ fn next_inline_token(input: &str, default_fg: Color) -> Option<(String, usize, S
                 ));
             }
         }
+    }
+
+    if let Some((token, consumed)) = italic_inline_token(input, '*') {
+        return Some((
+            token,
+            consumed,
+            transcript_style(default_fg).add_modifier(Modifier::ITALIC),
+        ));
+    }
+
+    if let Some((token, consumed)) = italic_inline_token(input, '_') {
+        return Some((
+            token,
+            consumed,
+            transcript_style(default_fg).add_modifier(Modifier::ITALIC),
+        ));
     }
 
     if let Some(stripped) = input.strip_prefix('`') {
@@ -832,7 +1043,7 @@ fn next_inline_token(input: &str, default_fg: Color) -> Option<(String, usize, S
         return Some((
             token,
             consumed,
-            transcript_style(p.info).add_modifier(Modifier::BOLD),
+            transcript_style(p.warning).add_modifier(Modifier::BOLD),
         ));
     }
 
@@ -874,6 +1085,26 @@ fn next_inline_token(input: &str, default_fg: Color) -> Option<(String, usize, S
     }
 
     None
+}
+
+fn italic_inline_token(input: &str, delimiter: char) -> Option<(String, usize)> {
+    let mut chars = input.chars();
+    if chars.next()? != delimiter {
+        return None;
+    }
+    if chars.next().is_some_and(|ch| ch == delimiter) {
+        return None;
+    }
+    let stripped = &input[delimiter.len_utf8()..];
+    let end = stripped.find(delimiter)?;
+    let content = &stripped[..end];
+    if content.trim().is_empty() {
+        return None;
+    }
+    Some((
+        content.to_string(),
+        delimiter.len_utf8() + end + delimiter.len_utf8(),
+    ))
 }
 
 fn is_toolish_identifier(token: &str) -> bool {
@@ -1505,6 +1736,27 @@ mod tests {
         assert_eq!(line_text(&wrapped[2]), "kl");
     }
 
+    #[test]
+    fn markdown_lists_render_with_visible_markers() {
+        theme::set_active_theme(theme::ThemeMode::Light);
+        let mut lines = Vec::new();
+        render_assistant_content(
+            &mut lines,
+            "- first\n  - nested\n- [x] done\n- [ ] next\n1. second",
+            80,
+            "● ",
+            theme::palette().text,
+        );
+
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(rendered.contains("● • first"));
+        assert!(rendered.contains("  • nested"));
+        assert!(rendered.contains("☑ done"));
+        assert!(rendered.contains("☐ next"));
+        assert!(rendered.contains("1. second"));
+        theme::set_active_theme(theme::ThemeMode::Light);
+    }
+
     fn test_message(content: &str) -> ProtocolMessage {
         ProtocolMessage {
             id: Uuid::new_v4(),
@@ -1590,6 +1842,7 @@ mod tests {
                     TranscriptProps {
                         messages,
                         pending_user_message: None,
+                        queued_user_messages: &[],
                         scroll_offset,
                         plan_summary: None,
                         plan_steps: &[],
@@ -1604,6 +1857,8 @@ mod tests {
                         show_streaming_placeholder: true,
                         stream_buffer: "",
                         reasoning_buffer: "",
+                        reasoning_elapsed_ms: 0,
+                        reasoning_tokens: 0,
                         show_reasoning: false,
                     },
                 );
@@ -1644,6 +1899,34 @@ mod tests {
     }
 
     #[test]
+    fn transcript_message_window_limits_latest_render_work() {
+        let messages = (0..900)
+            .map(|index| test_message(&format!("message {index}")))
+            .collect::<Vec<_>>();
+
+        let window = transcript_message_window(&messages, 80, 10, 0);
+
+        assert!(window.len() < messages.len());
+        assert!(window
+            .last()
+            .unwrap()
+            .content
+            .to_string_lossy()
+            .contains("message 899"));
+    }
+
+    #[test]
+    fn transcript_message_window_expands_for_deep_scrollback() {
+        let messages = (0..120)
+            .map(|index| test_message(&format!("message {index}")))
+            .collect::<Vec<_>>();
+
+        let window = transcript_message_window(&messages, 80, 10, 10_000);
+
+        assert_eq!(window.len(), messages.len());
+    }
+
+    #[test]
     fn light_theme_transcript_uses_dark_readable_ink_for_chinese_text() {
         theme::set_active_theme(theme::ThemeMode::Light);
         let mut terminal = Terminal::new(TestBackend::new(80, 4)).expect("terminal");
@@ -1657,6 +1940,7 @@ mod tests {
                     TranscriptProps {
                         messages: &[msg],
                         pending_user_message: None,
+                        queued_user_messages: &[],
                         scroll_offset: 0,
                         plan_summary: None,
                         plan_steps: &[],
@@ -1671,6 +1955,8 @@ mod tests {
                         show_streaming_placeholder: true,
                         stream_buffer: "",
                         reasoning_buffer: "",
+                        reasoning_elapsed_ms: 0,
+                        reasoning_tokens: 0,
                         show_reasoning: false,
                     },
                 );
@@ -1730,6 +2016,30 @@ mod tests {
     }
 
     #[test]
+    fn inline_spans_strip_markup_from_italic_and_code_text() {
+        theme::set_active_theme(theme::ThemeMode::Light);
+        let spans = inline_spans("Use *care* with `cargo test`.", theme::palette().text);
+
+        let italic = spans
+            .iter()
+            .find(|span| span.content.as_ref() == "care")
+            .expect("italic span");
+        assert!(italic.style.add_modifier.contains(Modifier::ITALIC));
+
+        let code = spans
+            .iter()
+            .find(|span| span.content.as_ref() == "cargo test")
+            .expect("code span");
+        assert_eq!(code.style.fg, Some(theme::palette().warning));
+        assert!(code.style.add_modifier.contains(Modifier::BOLD));
+        assert!(!spans.iter().any(|span| {
+            let text = span.content.as_ref();
+            text.contains('*') || text.contains('`')
+        }));
+        theme::set_active_theme(theme::ThemeMode::Light);
+    }
+
+    #[test]
     fn inline_spans_highlight_report_keywords() {
         theme::set_active_theme(theme::ThemeMode::Light);
         let spans = inline_spans(
@@ -1784,14 +2094,28 @@ mod tests {
     }
 
     #[test]
-    fn running_read_file_uses_connector_detail_line() {
+    fn running_read_file_uses_view_block_tool_card() {
         theme::set_active_theme(theme::ThemeMode::Light);
         let msg = assistant_tool_call("read_file", r#"{"path":"src/tui/status_bar.rs"}"#);
 
         let rendered = render_text(&[msg], 0, 4);
 
-        assert!(rendered.contains("Reading 1 file."));
+        assert!(rendered.contains("running"));
+        assert!(rendered.contains("tool read_file"));
         assert!(rendered.contains("└ src/tui/status_bar.rs"));
+        theme::set_active_theme(theme::ThemeMode::Light);
+    }
+
+    #[test]
+    fn assistant_reasoning_content_is_not_rendered_as_message_text() {
+        theme::set_active_theme(theme::ThemeMode::Light);
+        let mut msg = test_message("visible answer");
+        msg.reasoning_content = Some("private chain should stay hidden".to_string());
+
+        let rendered = render_text(&[msg], 0, 4);
+
+        assert!(rendered.contains("visible answer"));
+        assert!(!rendered.contains("private chain"));
         theme::set_active_theme(theme::ThemeMode::Light);
     }
 
@@ -1809,6 +2133,7 @@ mod tests {
                     TranscriptProps {
                         messages: &[msg],
                         pending_user_message: None,
+                        queued_user_messages: &[],
                         scroll_offset: 0,
                         plan_summary: None,
                         plan_steps: &[],
@@ -1823,6 +2148,8 @@ mod tests {
                         show_streaming_placeholder: true,
                         stream_buffer: "",
                         reasoning_buffer: "",
+                        reasoning_elapsed_ms: 0,
+                        reasoning_tokens: 0,
                         show_reasoning: false,
                     },
                 );
@@ -1867,6 +2194,7 @@ mod tests {
                     TranscriptProps {
                         messages: &[msg],
                         pending_user_message: None,
+                        queued_user_messages: &[],
                         scroll_offset: 0,
                         plan_summary: None,
                         plan_steps: &[],
@@ -1881,6 +2209,8 @@ mod tests {
                         show_streaming_placeholder: true,
                         stream_buffer: "",
                         reasoning_buffer: "",
+                        reasoning_elapsed_ms: 0,
+                        reasoning_tokens: 0,
                         show_reasoning: false,
                     },
                 );
@@ -1947,6 +2277,7 @@ mod tests {
                     TranscriptProps {
                         messages: &[],
                         pending_user_message: Some("user question should stay visible"),
+                        queued_user_messages: &[],
                         scroll_offset: 0,
                         plan_summary: None,
                         plan_steps: &[],
@@ -1961,6 +2292,8 @@ mod tests {
                         show_streaming_placeholder: true,
                         stream_buffer: "answering now",
                         reasoning_buffer: "",
+                        reasoning_elapsed_ms: 0,
+                        reasoning_tokens: 0,
                         show_reasoning: false,
                     },
                 );
@@ -1980,6 +2313,57 @@ mod tests {
     }
 
     #[test]
+    fn queued_user_messages_render_as_guidance_while_streaming() {
+        theme::set_active_theme(theme::ThemeMode::Light);
+        let mut terminal = Terminal::new(TestBackend::new(90, 8)).expect("terminal");
+        let queued = ["下一步继续", "再检查审批位置"];
+
+        terminal
+            .draw(|f| {
+                render_transcript(
+                    f,
+                    f.area(),
+                    TranscriptProps {
+                        messages: &[],
+                        pending_user_message: Some("当前任务"),
+                        queued_user_messages: &queued,
+                        scroll_offset: 0,
+                        plan_summary: None,
+                        plan_steps: &[],
+                        plan_current_step: 0,
+                        plan_total_steps: 0,
+                        plan_warnings: &[],
+                        subagents: &[],
+                        global_elapsed_ms: 0,
+                        diffs: &[],
+                        selected_diff: None,
+                        is_streaming: true,
+                        show_streaming_placeholder: true,
+                        stream_buffer: "answering now",
+                        reasoning_buffer: "",
+                        reasoning_elapsed_ms: 0,
+                        reasoning_tokens: 0,
+                        show_reasoning: false,
+                    },
+                );
+            })
+            .expect("draw");
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        let compact = rendered.split_whitespace().collect::<String>();
+        assert!(compact.contains("已排队2条"));
+        assert!(compact.contains("下一步继续"));
+        assert!(compact.contains("再检查审批位置"));
+        theme::set_active_theme(theme::ThemeMode::Light);
+    }
+
+    #[test]
     fn streaming_placeholder_can_be_suppressed_by_app_layout() {
         theme::set_active_theme(theme::ThemeMode::Light);
         let mut terminal = Terminal::new(TestBackend::new(80, 4)).expect("terminal");
@@ -1992,6 +2376,7 @@ mod tests {
                     TranscriptProps {
                         messages: &[],
                         pending_user_message: Some("测试 CLI"),
+                        queued_user_messages: &[],
                         scroll_offset: 0,
                         plan_summary: None,
                         plan_steps: &[],
@@ -2006,6 +2391,8 @@ mod tests {
                         show_streaming_placeholder: false,
                         stream_buffer: "",
                         reasoning_buffer: "",
+                        reasoning_elapsed_ms: 0,
+                        reasoning_tokens: 0,
                         show_reasoning: false,
                     },
                 );
@@ -2025,6 +2412,106 @@ mod tests {
     }
 
     #[test]
+    fn thinking_panel_collapsed_shows_metadata_without_reasoning_text() {
+        theme::set_active_theme(theme::ThemeMode::Light);
+        let mut terminal = Terminal::new(TestBackend::new(90, 6)).expect("terminal");
+
+        terminal
+            .draw(|f| {
+                render_transcript(
+                    f,
+                    f.area(),
+                    TranscriptProps {
+                        messages: &[],
+                        pending_user_message: Some("修复输入框"),
+                        queued_user_messages: &[],
+                        scroll_offset: 0,
+                        plan_summary: None,
+                        plan_steps: &[],
+                        plan_current_step: 0,
+                        plan_total_steps: 0,
+                        plan_warnings: &[],
+                        subagents: &[],
+                        global_elapsed_ms: 0,
+                        diffs: &[],
+                        selected_diff: None,
+                        is_streaming: true,
+                        show_streaming_placeholder: false,
+                        stream_buffer: "",
+                        reasoning_buffer: "private reasoning should not look like an answer",
+                        reasoning_elapsed_ms: 1_500,
+                        reasoning_tokens: 12,
+                        show_reasoning: false,
+                    },
+                );
+            })
+            .expect("draw");
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(rendered.contains("Thinking"));
+        assert!(rendered.contains("collapsed"));
+        assert!(rendered.contains("1.5s"));
+        assert!(rendered.contains("12 tokens"));
+        assert!(!rendered.contains("private reasoning"));
+        theme::set_active_theme(theme::ThemeMode::Light);
+    }
+
+    #[test]
+    fn thinking_panel_expanded_renders_reasoning_inside_panel() {
+        theme::set_active_theme(theme::ThemeMode::Light);
+        let mut terminal = Terminal::new(TestBackend::new(90, 7)).expect("terminal");
+
+        terminal
+            .draw(|f| {
+                render_transcript(
+                    f,
+                    f.area(),
+                    TranscriptProps {
+                        messages: &[],
+                        pending_user_message: Some("修复输入框"),
+                        queued_user_messages: &[],
+                        scroll_offset: 0,
+                        plan_summary: None,
+                        plan_steps: &[],
+                        plan_current_step: 0,
+                        plan_total_steps: 0,
+                        plan_warnings: &[],
+                        subagents: &[],
+                        global_elapsed_ms: 0,
+                        diffs: &[],
+                        selected_diff: None,
+                        is_streaming: true,
+                        show_streaming_placeholder: false,
+                        stream_buffer: "",
+                        reasoning_buffer: "trace layout\nkeep input visible",
+                        reasoning_elapsed_ms: 2_000,
+                        reasoning_tokens: 9,
+                        show_reasoning: true,
+                    },
+                );
+            })
+            .expect("draw");
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(rendered.contains("expanded"));
+        assert!(rendered.contains("trace layout"));
+        assert!(rendered.contains("keep input visible"));
+        theme::set_active_theme(theme::ThemeMode::Light);
+    }
+
+    #[test]
     fn pending_user_message_stays_in_transcript_order() {
         theme::set_active_theme(theme::ThemeMode::Light);
         let mut terminal = Terminal::new(TestBackend::new(80, 8)).expect("terminal");
@@ -2038,6 +2525,7 @@ mod tests {
                     TranscriptProps {
                         messages: &[previous],
                         pending_user_message: Some("测试 CLI"),
+                        queued_user_messages: &[],
                         scroll_offset: 0,
                         plan_summary: None,
                         plan_steps: &[],
@@ -2052,6 +2540,8 @@ mod tests {
                         show_streaming_placeholder: true,
                         stream_buffer: "AI 正在回答",
                         reasoning_buffer: "",
+                        reasoning_elapsed_ms: 0,
+                        reasoning_tokens: 0,
                         show_reasoning: false,
                     },
                 );
@@ -2088,6 +2578,7 @@ mod tests {
                     TranscriptProps {
                         messages: &[],
                         pending_user_message: Some("测试 CLI"),
+                        queued_user_messages: &[],
                         scroll_offset: 0,
                         plan_summary: None,
                         plan_steps: &[],
@@ -2102,6 +2593,8 @@ mod tests {
                         show_streaming_placeholder: true,
                         stream_buffer: long_stream,
                         reasoning_buffer: "",
+                        reasoning_elapsed_ms: 0,
+                        reasoning_tokens: 0,
                         show_reasoning: false,
                     },
                 );
@@ -2133,6 +2626,7 @@ mod tests {
                     TranscriptProps {
                         messages: &[],
                         pending_user_message: None,
+                        queued_user_messages: &[],
                         scroll_offset: 0,
                         plan_summary: None,
                         plan_steps: &[],
@@ -2147,6 +2641,8 @@ mod tests {
                         show_streaming_placeholder: true,
                         stream_buffer: "## Heading\nThis is **important**.\n---",
                         reasoning_buffer: "",
+                        reasoning_elapsed_ms: 0,
+                        reasoning_tokens: 0,
                         show_reasoning: false,
                     },
                 );
@@ -2192,6 +2688,7 @@ mod tests {
                     TranscriptProps {
                         messages: &[],
                         pending_user_message: None,
+                        queued_user_messages: &[],
                         scroll_offset: 0,
                         plan_summary: Some("并行构建演示"),
                         plan_steps: &steps,
@@ -2206,6 +2703,8 @@ mod tests {
                         show_streaming_placeholder: true,
                         stream_buffer: "Done.\n\n* Brewed for 1m 2s",
                         reasoning_buffer: "",
+                        reasoning_elapsed_ms: 0,
+                        reasoning_tokens: 0,
                         show_reasoning: false,
                     },
                 );
@@ -2245,6 +2744,7 @@ mod tests {
                     TranscriptProps {
                         messages: &[],
                         pending_user_message: None,
+                        queued_user_messages: &[],
                         scroll_offset: 0,
                         plan_summary: Some("Build project"),
                         plan_steps: &steps,
@@ -2259,6 +2759,8 @@ mod tests {
                         show_streaming_placeholder: true,
                         stream_buffer: "",
                         reasoning_buffer: "",
+                        reasoning_elapsed_ms: 0,
+                        reasoning_tokens: 0,
                         show_reasoning: false,
                     },
                 );
@@ -2328,6 +2830,7 @@ mod tests {
                     TranscriptProps {
                         messages: &[],
                         pending_user_message: None,
+                        queued_user_messages: &[],
                         scroll_offset: 0,
                         plan_summary: Some("Audit project"),
                         plan_steps: &steps,
@@ -2342,6 +2845,8 @@ mod tests {
                         show_streaming_placeholder: true,
                         stream_buffer: "",
                         reasoning_buffer: "",
+                        reasoning_elapsed_ms: 0,
+                        reasoning_tokens: 0,
                         show_reasoning: false,
                     },
                 );

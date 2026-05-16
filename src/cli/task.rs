@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
+use crate::cli::resolve_project_root;
 use crate::deepseek::SessionId;
 use crate::storage::{
-    find_project_root, EventLogStore, ScheduledTask, ScheduledTaskKind, ScheduledTaskStatus,
-    ScheduledTaskStore, SessionEvent, SessionEventKind,
+    EventLogStore, ScheduledTask, ScheduledTaskKind, ScheduledTaskStatus, ScheduledTaskStore,
+    SessionEvent, SessionEventKind,
 };
 
 pub async fn task(
@@ -16,9 +17,7 @@ pub async fn task(
             print_task_list(&store)?;
         }
         TaskCommand::Add { kind, prompt } => {
-            let root = project_root
-                .or_else(find_project_root)
-                .unwrap_or_else(|| ".".into());
+            let root = resolve_project_root(project_root, "task")?;
             let task = store.create(kind, prompt, root)?;
             println!("created {}", task.id);
             println!("kind    {}", task.kind.as_str());
@@ -63,8 +62,13 @@ pub async fn task(
                 "running",
                 "scheduled task run started",
             );
-            let result =
-                crate::cli::run(task.prompt.clone(), false, Some(task.project_root.clone())).await;
+            let result = crate::cli::run(
+                task.prompt.clone(),
+                false,
+                Some(task.project_root.clone()),
+                crate::cli::TurnOutputFormat::Text,
+            )
+            .await;
             match result {
                 Ok(()) => {
                     store.record_run_finish(&task.id, "done")?;

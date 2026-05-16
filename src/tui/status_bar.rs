@@ -30,11 +30,11 @@ impl AppMode {
 
     #[must_use]
     pub fn color(self) -> Color {
+        let palette = theme::palette();
         match self {
-            Self::Chat => theme::DROID_ACCENT,
-            Self::Plan => theme::ACCENT_BLUE,
-            Self::Run => theme::ACCENT_GREEN,
-            Self::Review => theme::ACCENT_PURPLE,
+            Self::Chat | Self::Plan => palette.accent,
+            Self::Run => palette.success,
+            Self::Review => palette.info,
         }
     }
 }
@@ -92,7 +92,7 @@ pub(crate) fn activity_hint_text_with_motion(
 
 fn activity_state_label(activity: &StatusActivity<'_>, thinking: &ThinkingMode) -> String {
     if activity.thought_seconds > 0 && activity.tokens > 0 {
-        return format!("thought for {}", format_elapsed(activity.thought_seconds));
+        return "reasoning".to_string();
     }
 
     let elapsed_seconds = activity.elapsed_ms / 1_000;
@@ -218,7 +218,7 @@ mod tests {
 
         assert_eq!(
             hint,
-            "⠴ Fix input colors... (6s · ↓ 578 tokens · thought for 2s)"
+            "⠴ Fix input colors... (6s · ↓ 578 tokens · reasoning)"
         );
     }
 
@@ -236,10 +236,7 @@ mod tests {
             &ThinkingMode::Auto,
         );
 
-        assert_eq!(
-            hint,
-            "⠴ 修复输入颜色... (6s · ↓ 578 tokens · thought for 2s)"
-        );
+        assert_eq!(hint, "⠴ 修复输入颜色... (6s · ↓ 578 tokens · reasoning)");
     }
 
     #[test]

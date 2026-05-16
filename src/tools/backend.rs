@@ -43,7 +43,7 @@ impl ToolBackend for LocalToolBackend {
             let (content, is_error) = crate::tools::dispatch::execute_single_tool_with_config(
                 call,
                 &context.project_root,
-                context.dispatch_config,
+                context.dispatch_config.clone(),
             )
             .await;
             let changed_files = changed_files_for_call(call);

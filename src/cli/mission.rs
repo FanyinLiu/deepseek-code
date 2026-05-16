@@ -2,8 +2,9 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
+use crate::cli::resolve_project_root;
 use crate::mission::{MissionBundle, MissionEvent, MissionState, MissionSummary};
-use crate::storage::{find_project_root, MissionStore};
+use crate::storage::MissionStore;
 
 pub enum MissionCommand {
     New {
@@ -32,9 +33,7 @@ pub async fn mission(
     command: MissionCommand,
     project_root: Option<PathBuf>,
 ) -> Result<(), anyhow::Error> {
-    let root = project_root
-        .or_else(find_project_root)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let root = resolve_project_root(project_root, "mission")?;
     let store = MissionStore::for_project(&root);
 
     match command {
@@ -194,16 +193,15 @@ fn print_inspect(payload: &MissionInspectPayload, include_events: bool) {
 }
 
 fn print_replay(events: &[MissionEvent], skipped: usize, state: &MissionState) {
-    println!("Mission replay");
-    for event in events {
-        println!("  {} {}", event.at, event_kind_label(event));
-    }
-    if skipped > 0 {
-        println!("  skipped malformed event lines: {skipped}");
-    }
-    println!();
-    println!("replayed status  {}", state.status.as_str());
-    println!("replayed summary {}", state.summary);
+    let lines = events
+        .iter()
+        .map(crate::cli::replay::mission_line)
+        .collect::<Vec<_>>();
+    let footer = vec![
+        format!("replayed status  {}", state.status.as_str()),
+        format!("replayed summary {}", state.summary),
+    ];
+    crate::cli::replay::print_replay_lines("Mission replay", &lines, skipped, &footer);
 }
 
 fn print_list(payload: &MissionListPayload) {

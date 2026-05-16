@@ -6,22 +6,6 @@ use std::env;
 #[cfg(not(test))]
 use std::sync::atomic::{AtomicU8, Ordering};
 
-// ═══════════════════════════════════════════════════════════
-//  Base Layer (Backgrounds)
-// ═══════════════════════════════════════════════════════════
-pub const BG_DEEP: Color = Color::Reset; // terminal-native background
-pub const BG_BASE: Color = Color::Reset; // terminal-native canvas
-pub const BG_CARD: Color = Color::Reset; // terminal-native panel surface
-pub const BG_CARD_HOVER: Color = Color::Reset;
-pub const BG_CARD_ALT: Color = BG_CARD_HOVER; // deprecated alias //  card hover/selected
-pub const BG_INPUT: Color = Color::Reset; // terminal-native input area
-
-// Droid-like light canvas used by the welcome surface and composer.
-pub const DROID_CANVAS_BG: Color = Color::Reset;
-pub const DROID_INK: Color = Color::Rgb(17, 17, 14);
-pub const DROID_MUTED: Color = Color::Rgb(78, 78, 72);
-pub const DROID_ACCENT: Color = Color::Rgb(224, 82, 0);
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeMode {
     Auto,
@@ -105,7 +89,7 @@ pub const LIGHT_PALETTE: ThemePalette = ThemePalette {
     warning: Color::Rgb(148, 88, 0),
     danger: Color::Rgb(188, 36, 44),
     info: Color::Rgb(0, 82, 182),
-    inverse_text: Color::Reset,
+    inverse_text: Color::Rgb(255, 255, 255),
 };
 
 pub const DARK_PALETTE: ThemePalette = ThemePalette {
@@ -123,7 +107,7 @@ pub const DARK_PALETTE: ThemePalette = ThemePalette {
     warning: Color::Magenta,
     danger: Color::Red,
     info: Color::Blue,
-    inverse_text: Color::Reset,
+    inverse_text: Color::Black,
 };
 
 pub const HIGH_CONTRAST_PALETTE: ThemePalette = ThemePalette {
@@ -190,7 +174,16 @@ pub fn active_theme() -> ThemeMode {
 
 #[must_use]
 pub fn detect_terminal_theme() -> ThemeMode {
-    if let Ok(value) = env::var("DEEPSEEK_CODE_THEME") {
+    let override_theme = env::var("DEEPSEEK_CODE_THEME").ok();
+    let colorfgbg = env::var("COLORFGBG").ok();
+    detect_terminal_theme_from_values(override_theme.as_deref(), colorfgbg.as_deref())
+}
+
+fn detect_terminal_theme_from_values(
+    override_theme: Option<&str>,
+    colorfgbg: Option<&str>,
+) -> ThemeMode {
+    if let Some(value) = override_theme {
         match value.trim().to_ascii_lowercase().as_str() {
             "light" | "bright" => return ThemeMode::Light,
             "dark" | "terminal" => return ThemeMode::Dark,
@@ -201,8 +194,8 @@ pub fn detect_terminal_theme() -> ThemeMode {
         }
     }
 
-    if let Ok(value) = env::var("COLORFGBG") {
-        if let Some(light_bg) = colorfgbg_prefers_light_background(&value) {
+    if let Some(value) = colorfgbg {
+        if let Some(light_bg) = colorfgbg_prefers_light_background(value) {
             return if light_bg {
                 ThemeMode::Light
             } else {
@@ -211,7 +204,7 @@ pub fn detect_terminal_theme() -> ThemeMode {
         }
     }
 
-    ThemeMode::Dark
+    ThemeMode::Light
 }
 
 fn colorfgbg_prefers_light_background(value: &str) -> Option<bool> {
@@ -240,49 +233,6 @@ pub fn palette() -> ThemePalette {
         ThemeMode::HighContrast => HIGH_CONTRAST_PALETTE,
     }
 }
-
-// ═══════════════════════════════════════════════════════════
-//  Border & Divider Layer
-// ═══════════════════════════════════════════════════════════
-pub const BORDER_DIM: Color = Color::Rgb(44, 44, 56);
-pub const BORDER_DEFAULT: Color = Color::Rgb(58, 58, 74);
-pub const BORDER_FOCUS: Color = Color::Rgb(88, 88, 108);
-pub const DIVIDER: Color = Color::Rgb(48, 48, 62);
-
-// ═══════════════════════════════════════════════════════════
-//  Text Layer
-// ═══════════════════════════════════════════════════════════
-pub const FG_PRIMARY: Color = Color::Rgb(230, 230, 236);
-pub const FG_SECONDARY: Color = Color::Rgb(176, 176, 190);
-pub const FG_DIM: Color = Color::Rgb(120, 120, 138);
-pub const FG_MUTED: Color = Color::Rgb(76, 76, 96);
-
-// ═══════════════════════════════════════════════════════════
-//  Accent Layer
-// ═══════════════════════════════════════════════════════════
-pub const ACCENT_AMBER: Color = Color::Rgb(210, 150, 100);
-pub const ACCENT_GREEN: Color = Color::Rgb(110, 184, 140);
-pub const ACCENT_RED: Color = Color::Rgb(220, 100, 100);
-pub const ACCENT_YELLOW: Color = Color::Rgb(210, 180, 100);
-pub const ACCENT_BLUE: Color = Color::Rgb(120, 160, 210);
-pub const ACCENT_PURPLE: Color = Color::Rgb(170, 140, 200);
-
-// ═══════════════════════════════════════════════════════════
-//  Semantic Colors
-// ═══════════════════════════════════════════════════════════
-pub const SUCCESS: Color = ACCENT_GREEN;
-pub const WARNING: Color = ACCENT_YELLOW;
-pub const ERROR: Color = ACCENT_RED;
-pub const INFO: Color = ACCENT_BLUE;
-pub const BRAND: Color = ACCENT_AMBER;
-
-// ═══════════════════════════════════════════════════════════
-//  Role Colors
-// ═══════════════════════════════════════════════════════════
-pub const USER_BG: Color = BG_DEEP;
-pub const ASSISTANT_BG: Color = BG_DEEP;
-pub const SYSTEM_FG: Color = FG_DIM;
-pub const TOOL_FG: Color = ACCENT_AMBER;
 
 // ═══════════════════════════════════════════════════════════
 //  Style Helpers
@@ -457,5 +407,25 @@ mod tests {
         assert_eq!(colorfgbg_prefers_light_background("7;232"), Some(false));
         assert_eq!(colorfgbg_prefers_light_background("0;231"), Some(true));
         assert_eq!(colorfgbg_prefers_light_background(""), None);
+    }
+
+    #[test]
+    fn auto_theme_without_terminal_background_metadata_uses_reset_canvas() {
+        assert_eq!(
+            detect_terminal_theme_from_values(None, None),
+            ThemeMode::Light
+        );
+        assert_eq!(
+            detect_terminal_theme_from_values(None, Some("0;15")),
+            ThemeMode::Light
+        );
+        assert_eq!(
+            detect_terminal_theme_from_values(None, Some("15;0")),
+            ThemeMode::Dark
+        );
+        assert_eq!(
+            detect_terminal_theme_from_values(Some("dark"), None),
+            ThemeMode::Dark
+        );
     }
 }

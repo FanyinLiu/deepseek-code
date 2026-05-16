@@ -1,12 +1,14 @@
 use std::path::Path;
 
+use crate::policy::sandbox::CommandSandboxConfig;
 use crate::search;
 use crate::storage::config::PolicyConfig;
 use crate::tools;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ToolDispatchConfig {
     pub command_timeout_seconds: u64,
+    pub command_sandbox: CommandSandboxConfig,
 }
 
 impl ToolDispatchConfig {
@@ -14,6 +16,7 @@ impl ToolDispatchConfig {
     pub fn from_policy(policy: &PolicyConfig) -> Self {
         Self {
             command_timeout_seconds: policy.command_timeout_seconds.clamp(1, 600),
+            command_sandbox: policy.command_sandbox.clone(),
         }
     }
 }
@@ -277,19 +280,27 @@ pub async fn execute_single_tool_with_config(
                 .or_else(|| args["timeout"].as_u64())
                 .unwrap_or(dispatch_config.command_timeout_seconds)
                 .clamp(1, 600);
-            match tools::run_command(project_root, command, cwd, timeout_seconds).await {
+            match tools::run_command_with_sandbox(
+                project_root,
+                command,
+                cwd,
+                timeout_seconds,
+                &dispatch_config.command_sandbox,
+            )
+            .await
+            {
                 Ok(result) => {
                     if !result.is_success() {
                         let mut summary = result.summary();
                         if let Some(suggestion) = suggest_command_fix(&result) {
                             summary.push_str(&format!("\n\nSuggestion: {suggestion}"));
                         }
-                        (summary, true)
+                        (crate::policy::redact_all(&summary), true)
                     } else {
-                        (result.summary(), false)
+                        (crate::policy::redact_all(&result.summary()), false)
                     }
                 }
-                Err(e) => (e.to_string(), true),
+                Err(e) => (crate::policy::redact_all(&e.to_string()), true),
             }
         }
         "git_add" => {

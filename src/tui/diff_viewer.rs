@@ -1,6 +1,6 @@
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Paragraph, Wrap},
     Frame,
@@ -49,6 +49,7 @@ pub fn render_diff_viewer(
         return;
     }
 
+    let palette = theme::palette();
     let mut all_lines = Vec::new();
 
     for (idx, item) in diffs.iter().enumerate() {
@@ -65,21 +66,21 @@ pub fn render_diff_viewer(
             DiffStatus::Rejected => "✗",
         };
         let status_color = match item.status {
-            DiffStatus::Pending => theme::FG_DIM,
-            DiffStatus::Accepted => theme::ACCENT_GREEN,
-            DiffStatus::Rejected => theme::ACCENT_RED,
+            DiffStatus::Pending => palette.dim,
+            DiffStatus::Accepted => palette.success,
+            DiffStatus::Rejected => palette.danger,
         };
 
         // Header: path + stats + status
         let _header = format!("{} {} ({})", status_icon, item.path, item.stats);
         let header_style = if is_selected {
             Style::default()
-                .fg(theme::ACCENT_AMBER)
-                .bg(theme::BG_CARD_ALT)
+                .fg(palette.warning)
+                .bg(palette.surface_alt)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
-                .fg(theme::FG_PRIMARY)
+                .fg(palette.text)
                 .add_modifier(Modifier::BOLD)
         };
 
@@ -97,12 +98,12 @@ pub fn render_diff_viewer(
             let styled_line = if line.starts_with("+++ ") || line.starts_with("--- ") {
                 Line::from(Span::styled(
                     truncate(line, area.width as usize),
-                    Style::default().fg(theme::FG_DIM),
+                    Style::default().fg(palette.dim),
                 ))
             } else if line.starts_with("@@") {
                 Line::from(Span::styled(
                     truncate(line, area.width as usize),
-                    Style::default().fg(theme::ACCENT_AMBER),
+                    Style::default().fg(palette.warning),
                 ))
             } else if line.starts_with('+') {
                 // Try to highlight the added code portion
@@ -115,12 +116,12 @@ pub fn render_diff_viewer(
                 // "\ No newline at end of file"
                 Line::from(Span::styled(
                     truncate(line, area.width as usize),
-                    Style::default().fg(theme::FG_DIM),
+                    Style::default().fg(palette.dim),
                 ))
             } else {
                 Line::from(Span::styled(
                     truncate(line, area.width as usize),
-                    Style::default().fg(theme::FG_DIM),
+                    Style::default().fg(palette.dim),
                 ))
             };
             all_lines.push(styled_line);
@@ -138,7 +139,7 @@ pub fn render_diff_viewer(
     let visible_lines = all_lines[start..end].to_vec();
 
     let paragraph = Paragraph::new(Text::from(visible_lines))
-        .style(Style::default().bg(theme::BG_DEEP))
+        .style(Style::default().bg(palette.canvas))
         .wrap(Wrap { trim: false });
 
     f.render_widget(paragraph, area);
@@ -148,16 +149,13 @@ pub fn render_diff_viewer(
 fn try_highlight_diff_line(line: &str, lang: Option<&str>, is_add: bool) -> Vec<Span<'static>> {
     let prefix = &line[..1];
     let rest = &line[1..];
+    let palette = theme::palette();
     let prefix_color = if is_add {
-        theme::ACCENT_GREEN
+        palette.success
     } else {
-        theme::ACCENT_RED
+        palette.danger
     };
-    let prefix_bg: Color = if is_add {
-        Color::Rgb(20, 50, 30)
-    } else {
-        Color::Rgb(50, 20, 20)
-    };
+    let prefix_bg = palette.surface_alt;
 
     let mut spans = vec![Span::styled(
         prefix.to_string(),

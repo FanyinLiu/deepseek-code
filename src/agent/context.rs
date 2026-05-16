@@ -191,6 +191,7 @@ impl ContextAssembler {
                 | SessionEventKind::ReasoningInternal { .. }
                 | SessionEventKind::UserMessage { .. }
                 | SessionEventKind::ToolCallStarted { .. }
+                | SessionEventKind::HookExecuted { .. }
                 | SessionEventKind::ApprovalRequested { .. }
                 | SessionEventKind::TurnFinished { .. }
                 | SessionEventKind::Error { .. } => {}

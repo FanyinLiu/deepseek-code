@@ -236,76 +236,50 @@ fn cmd_commit(args: &str, ctx: &mut CommandContext) -> CommandResult {
     } else {
         args.trim()
     };
-    if let Err(e) = crate::workspace::git::git_add(ctx.project_root, &["."]) {
-        return Err(format!("git add failed: {e}"));
-    }
-    match crate::workspace::git::git_commit(ctx.project_root, message) {
-        Ok(()) => Ok(Some(format!("Committed: {message}"))),
-        Err(e) => Err(format!("git commit failed: {e}")),
-    }
+    ctx.app.status_message = format!("Commit request queued: {message}");
+    Ok(None)
 }
 
 fn cmd_test(args: &str, ctx: &mut CommandContext) -> CommandResult {
     let framework = args.trim();
-    let result: Result<String, String> = if framework.is_empty() {
-        crate::workspace::test_runner::detect_and_run_tests(ctx.project_root)
-            .map_err(|e| e.to_string())
+    ctx.app.status_message = if framework.is_empty() {
+        "Test request queued".to_string()
     } else {
-        run_local_shell_command(ctx.project_root, framework)
+        format!("Test command queued: {framework}")
     };
-    match result {
-        Ok(output) => Ok(Some(output)),
-        Err(e) => Err(format!("Test run failed: {e}")),
-    }
+    Ok(None)
 }
 
-fn run_local_shell_command(
-    project_root: &std::path::Path,
-    command: &str,
-) -> Result<String, String> {
-    const MAX_COMMAND_LEN: usize = 4096;
-    if command.len() > MAX_COMMAND_LEN {
-        return Err(format!(
-            "command exceeds maximum length of {MAX_COMMAND_LEN} characters"
-        ));
-    }
-    if let Some(reason) = crate::policy::commands::contains_dangerous_pattern(command) {
-        return Err(format!("dangerous command blocked: {reason}"));
-    }
-
-    let (shell, shell_arg) = if cfg!(target_os = "windows") {
-        ("cmd", "/C")
-    } else {
-        ("sh", "-c")
-    };
-    let output = std::process::Command::new(shell)
-        .arg(shell_arg)
-        .arg(command)
-        .current_dir(project_root)
-        .output()
-        .map_err(|e| e.to_string())?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let mut result = String::new();
-    if !stdout.is_empty() {
-        result.push_str(&stdout);
-    }
-    if !stderr.is_empty() {
-        if !result.is_empty() {
-            result.push('\n');
+#[must_use]
+pub fn forwarded_agent_input(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    let mut parts = trimmed.splitn(2, ' ');
+    let name = parts.next()?;
+    let args = parts.next().unwrap_or("").trim();
+    match name {
+        "/commit" => {
+            let message = if args.is_empty() {
+                "Auto-commit by deepseek-code"
+            } else {
+                args
+            };
+            Some(format!(
+                "Stage the appropriate workspace changes and create a git commit with this message: {message}"
+            ))
         }
-        result.push_str("stderr:\n");
-        result.push_str(&stderr);
-    }
-    let code = output.status.code().unwrap_or(-1);
-    if !output.status.success() {
-        if !result.is_empty() {
-            result.push('\n');
+        "/test" => {
+            if args.is_empty() {
+                Some(
+                    "Run the project test suite through the normal tool approval flow.".to_string(),
+                )
+            } else {
+                Some(format!(
+                    "Run this test command through the normal tool approval flow: {args}"
+                ))
+            }
         }
-        result.push_str(&format!("exit_code: {code}"));
+        _ => None,
     }
-    Ok(result)
 }
 
 fn cmd_fix(args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -780,30 +754,26 @@ fn cmd_permissions(_args: &str, ctx: &mut CommandContext) -> CommandResult {
 fn cmd_model(args: &str, ctx: &mut CommandContext) -> CommandResult {
     let requested = args.trim();
     if requested.is_empty() {
+        let current_model = crate::tui::model_hint::model_display_name(&ctx.app.model);
         ctx.app.pending_options = Some((
             "Choose model".to_string(),
             vec!["/model flash".to_string(), "/model pro".to_string()],
         ));
         ctx.app.selected_option_index = 0;
         return Ok(Some(format!(
-            "Current model: {:?}\n\nSelect a model, or type /model flash | /model pro",
-            ctx.app.model
+            "Current model: {current_model}\n\nSelect a model:\n- DeepSeek V4 Flash: /model flash\n- DeepSeek V4 Pro: /model pro"
         )));
     }
 
-    let model = match requested {
-        "pro" | "v4-pro" => crate::deepseek::DeepSeekModel::Pro,
-        "flash" | "v4-flash" => crate::deepseek::DeepSeekModel::Flash,
-        other => crate::deepseek::migration::migrate_model_name(other)
-            .ok_or_else(|| format!("Unknown model: {other}"))?,
-    };
+    let model = crate::provider::parse_model(requested).map_err(|error| error.to_string())?;
+    let model_name = crate::tui::model_hint::model_display_name(&model);
     ctx.app.model = model.clone();
     ctx.app.welcome = crate::tui::welcome::WelcomeDashboardData::load(
         ctx.project_root,
         ctx.app.model.clone(),
         ctx.app.thinking_mode.clone(),
     );
-    Ok(Some(format!("Session model set to {:?}", model)))
+    Ok(Some(format!("Session model set to {model_name}")))
 }
 
 fn cmd_config(_args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -831,13 +801,8 @@ fn cmd_config(_args: &str, ctx: &mut CommandContext) -> CommandResult {
 }
 
 fn cmd_memory(_args: &str, ctx: &mut CommandContext) -> CommandResult {
-    let candidates = [
-        ctx.project_root.join("AGENTS.md"),
-        ctx.project_root.join(".deepseek-code").join("AGENTS.md"),
-        ctx.project_root.join(".deepseek-code").join("rules.md"),
-    ];
     let mut lines = vec!["Memory files".to_string(), "".to_string()];
-    for path in candidates {
+    for path in crate::agent::prompt_builder::project_rule_candidates(ctx.project_root) {
         if path.exists() {
             let content = std::fs::read_to_string(&path).unwrap_or_default();
             lines.push(format!("{} — {} bytes", path.display(), content.len()));
@@ -999,10 +964,17 @@ fn cmd_hooks(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     Ok(Some(
         [
             manager_header("hooks", "ready"),
+            format!(
+                "user_prompt_submit {}",
+                config.hooks.user_prompt_submit.len()
+            ),
             format!("pre_tool   {}", config.hooks.pre_tool.len()),
             format!("post_tool  {}", config.hooks.post_tool.len()),
+            format!("session_start {}", config.hooks.session_start.len()),
+            format!("session_end {}", config.hooks.session_end.len()),
             format!("stop       {}", config.hooks.stop.len()),
-            "events     PreToolUse, PostToolUse, Stop".to_string(),
+            "events     UserPromptSubmit, PreToolUse, PostToolUse, SessionStart, SessionEnd"
+                .to_string(),
         ]
         .join("\n"),
     ))
@@ -1602,7 +1574,7 @@ impl CommandRegistry {
         self.register(&SlashCommand {
             name: "/settings",
             aliases: &["/set"],
-            description: "Open the read-only settings panel",
+            description: "Open the editable settings panel",
             usage: "/settings",
             handler: cmd_settings,
         });
@@ -1826,6 +1798,8 @@ mod tests {
             .expect("model should show output");
 
         assert!(output.contains("Current model"));
+        assert!(output.contains("DeepSeek V4 Flash"));
+        assert!(output.contains("DeepSeek V4 Pro"));
         let (_, options) = ctx.app.pending_options.as_ref().expect("model picker");
         assert_eq!(
             options,
@@ -1857,7 +1831,7 @@ mod tests {
             .expect("model should run")
             .expect("model should show output");
 
-        assert!(output.contains("Session model set"));
+        assert!(output.contains("Session model set to DeepSeek V4 Pro"));
         assert_eq!(ctx.app.model, crate::deepseek::DeepSeekModel::Pro);
     }
 
@@ -2175,7 +2149,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_command_opens_read_only_panel() {
+    fn settings_command_opens_editable_panel() {
         let result = execute_with_test_app("/settings").expect("settings should run");
 
         assert!(result.is_none());
@@ -2203,24 +2177,30 @@ mod tests {
 
         assert!(output.is_none());
         assert!(ctx.app.settings_open);
-        assert!(ctx.app.status_message.contains("read-only"));
+        assert!(ctx.app.status_message.contains("edits selected value"));
     }
 
     #[test]
-    fn test_command_uses_platform_shell() {
+    fn test_command_forwards_to_agent_tool_flow() {
         let output = execute_with_test_app("/test echo deepseek-code-test")
-            .expect("test command should run")
-            .expect("test command should show output");
+            .expect("test command should run");
 
-        assert!(output.contains("deepseek-code-test"));
+        assert!(output.is_none());
+        assert_eq!(
+            forwarded_agent_input("/test echo deepseek-code-test").as_deref(),
+            Some("Run this test command through the normal tool approval flow: echo deepseek-code-test")
+        );
     }
 
     #[test]
-    fn test_command_blocks_dangerous_patterns() {
-        let result = execute_with_test_app("/test rm -rf /");
+    fn commit_command_forwards_to_agent_tool_flow() {
+        let output = execute_with_test_app("/commit ship it").expect("commit command should run");
 
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("dangerous command blocked"));
+        assert!(output.is_none());
+        assert_eq!(
+            forwarded_agent_input("/commit ship it").as_deref(),
+            Some("Stage the appropriate workspace changes and create a git commit with this message: ship it")
+        );
     }
 
     fn execute_with_test_app(input: &str) -> CommandResult {

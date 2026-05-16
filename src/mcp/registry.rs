@@ -1,7 +1,7 @@
 //! MCP server registry — manages multiple MCP connections and aggregates their tools.
 use std::collections::HashMap;
 
-use super::client::{McpClient, McpServerConfig, DEFAULT_MCP_TIMEOUT_MS};
+use super::client::{McpClient, McpServerConfig, McpTransport, DEFAULT_MCP_TIMEOUT_MS};
 use super::protocol::McpTool;
 
 #[derive(Debug, Clone, Default)]
@@ -48,6 +48,34 @@ pub struct McpRegistry {
     servers: HashMap<String, McpServerEntry>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpToolIdentity {
+    pub server: String,
+    pub tool: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct McpToolApprovalMetadata {
+    pub identity: McpToolIdentity,
+    pub trust: bool,
+    pub include_tools: Vec<String>,
+    pub exclude_tools: Vec<String>,
+    pub transport: McpTransport,
+    pub advertised: bool,
+    pub allowed_by_filters: bool,
+    pub description: Option<String>,
+    pub input_schema: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerRuntimeStatus {
+    pub name: String,
+    pub connected: bool,
+    pub tool_count: usize,
+    pub last_error: Option<String>,
+}
+
 impl McpRegistry {
     #[must_use]
     pub fn new() -> Self {
@@ -86,9 +114,12 @@ impl McpRegistry {
         self.register_with_options(
             McpServerConfig {
                 name,
+                transport: server_config.transport,
                 command: server_config.command.clone(),
                 args: server_config.args.clone(),
                 env: server_config.env.clone(),
+                url: server_config.url.clone(),
+                headers: server_config.headers.clone(),
             },
             McpServerOptions {
                 include_tools: server_config.include_tools.clone(),
@@ -140,22 +171,58 @@ impl McpRegistry {
         result
     }
 
+    #[must_use]
+    pub fn is_mcp_tool_name(&self, server_tool: &str) -> bool {
+        parse_server_tool(server_tool)
+            .is_some_and(|(server_name, _)| self.servers.contains_key(server_name))
+    }
+
+    #[must_use]
+    pub fn tool_approval_metadata(&self, server_tool: &str) -> Option<McpToolApprovalMetadata> {
+        let (server_name, tool_name) = parse_server_tool(server_tool)?;
+        let entry = self.servers.get(server_name)?;
+        let advertised_tool = entry.tools.iter().find(|tool| tool.name == tool_name);
+        Some(McpToolApprovalMetadata {
+            identity: McpToolIdentity {
+                server: server_name.to_string(),
+                tool: tool_name.to_string(),
+                source: format!("mcp:{server_name}.{tool_name}"),
+            },
+            trust: entry.options.trust,
+            include_tools: entry.options.include_tools.clone(),
+            exclude_tools: entry.options.exclude_tools.clone(),
+            transport: entry.config.transport,
+            advertised: advertised_tool.is_some(),
+            allowed_by_filters: entry.options.allows_tool(tool_name),
+            description: advertised_tool.and_then(|tool| tool.description.clone()),
+            input_schema: advertised_tool
+                .map(|tool| tool.input_schema.clone())
+                .unwrap_or_else(|| serde_json::json!({})),
+        })
+    }
+
     /// Call a tool by its server-prefixed name (`server_name.tool_name`).
     pub async fn call_tool(
         &mut self,
         server_tool: &str,
         arguments: serde_json::Value,
     ) -> Result<String, anyhow::Error> {
-        let parts: Vec<&str> = server_tool.splitn(2, '.').collect();
-        if parts.len() != 2 {
-            anyhow::bail!("tool name must be 'server_name.tool_name', got: {server_tool}");
-        }
-        let (server_name, tool_name) = (parts[0], parts[1]);
+        let (server_name, tool_name) = parse_server_tool(server_tool).ok_or_else(|| {
+            anyhow::anyhow!("tool name must be 'server_name.tool_name', got: {server_tool}")
+        })?;
 
         let entry = self
             .servers
             .get_mut(server_name)
             .ok_or_else(|| anyhow::anyhow!("unknown MCP server: {server_name}"))?;
+
+        if !entry.options.allows_tool(tool_name) {
+            anyhow::bail!("MCP tool {server_tool} is blocked by include/exclude filters");
+        }
+
+        if !entry.tools.iter().any(|tool| tool.name == tool_name) {
+            anyhow::bail!("MCP tool {server_tool} was not advertised by the connected server");
+        }
 
         let client = entry
             .client
@@ -204,6 +271,22 @@ impl McpRegistry {
         lines.join("\n")
     }
 
+    #[must_use]
+    pub fn server_statuses(&self) -> Vec<McpServerRuntimeStatus> {
+        let mut statuses = self
+            .servers
+            .iter()
+            .map(|(name, entry)| McpServerRuntimeStatus {
+                name: name.clone(),
+                connected: entry.connected,
+                tool_count: entry.tools.len(),
+                last_error: entry.error.clone(),
+            })
+            .collect::<Vec<_>>();
+        statuses.sort_by(|a, b| a.name.cmp(&b.name));
+        statuses
+    }
+
     /// Disconnect all servers gracefully.
     pub async fn disconnect_all(&mut self) {
         for entry in self.servers.values_mut() {
@@ -218,6 +301,14 @@ impl McpRegistry {
 pub fn parse_mcp_tool_arguments(arguments: &str) -> Result<serde_json::Value, anyhow::Error> {
     serde_json::from_str(arguments)
         .map_err(|e| anyhow::anyhow!("invalid MCP tool arguments JSON: {e}"))
+}
+
+fn parse_server_tool(server_tool: &str) -> Option<(&str, &str)> {
+    let (server, tool) = server_tool.split_once('.')?;
+    if server.is_empty() || tool.is_empty() || tool.contains('.') {
+        return None;
+    }
+    Some((server, tool))
 }
 
 fn filter_tools(tools: Vec<McpTool>, options: &McpServerOptions) -> Vec<McpTool> {
@@ -278,9 +369,12 @@ mod tests {
     #[test]
     fn register_config_copies_per_server_options() {
         let server_config = crate::storage::config::McpServerEntryConfig {
-            command: "cmd".into(),
+            transport: crate::mcp::client::McpTransport::Stdio,
+            command: Some("cmd".into()),
             args: vec!["--serve".into()],
             env: None,
+            url: None,
+            headers: None,
             include_tools: vec!["read".into()],
             exclude_tools: vec!["write".into()],
             trust: true,
@@ -295,6 +389,47 @@ mod tests {
         assert_eq!(entry.options.exclude_tools, vec!["write"]);
         assert!(entry.options.trust);
         assert_eq!(entry.options.timeout_ms(), 1_234);
+        assert_eq!(
+            entry.config.transport,
+            crate::mcp::client::McpTransport::Stdio
+        );
+        assert_eq!(entry.config.command.as_deref(), Some("cmd"));
+    }
+
+    #[test]
+    fn tool_metadata_reports_source_filters_and_advertised_state() {
+        let server_config = crate::storage::config::McpServerEntryConfig {
+            transport: crate::mcp::client::McpTransport::Stdio,
+            command: Some("cmd".into()),
+            args: Vec::new(),
+            env: None,
+            url: None,
+            headers: None,
+            include_tools: vec!["read".into()],
+            exclude_tools: vec!["write".into()],
+            trust: true,
+            timeout_ms: 1_234,
+        };
+        let mut reg = McpRegistry::new();
+        reg.register_config("fs".into(), &server_config);
+        let entry = reg.servers.get_mut("fs").expect("server");
+        entry.connected = true;
+        entry.tools = vec![tool("read")];
+
+        assert!(reg.is_mcp_tool_name("fs.read"));
+        let metadata = reg
+            .tool_approval_metadata("fs.read")
+            .expect("metadata for advertised tool");
+        assert_eq!(metadata.identity.source, "mcp:fs.read");
+        assert!(metadata.trust);
+        assert!(metadata.advertised);
+        assert!(metadata.allowed_by_filters);
+
+        let blocked = reg
+            .tool_approval_metadata("fs.write")
+            .expect("metadata for filtered tool");
+        assert!(!blocked.advertised);
+        assert!(!blocked.allowed_by_filters);
     }
 
     fn tool(name: &str) -> McpTool {

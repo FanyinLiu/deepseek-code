@@ -164,7 +164,7 @@ fn char_display_width(ch: char) -> usize {
     }
 }
 
-fn model_display_name(model: &DeepSeekModel) -> &'static str {
+pub(crate) fn model_display_name(model: &DeepSeekModel) -> &'static str {
     match model {
         DeepSeekModel::Pro => "DeepSeek V4 Pro",
         DeepSeekModel::Flash => "DeepSeek V4 Flash",
@@ -230,7 +230,7 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect();
-        assert!(rendered.contains("⠴ Fix input colors... (2s · ↓ 578 tokens · thought for 2s"));
+        assert!(rendered.contains("⠴ Fix input colors... (2s · ↓ 578 tokens · reasoning"));
         assert!(!rendered.contains("↑ 41 tokens"));
         assert!(rendered.contains("DeepSeek V4 Flash (on)"));
     }

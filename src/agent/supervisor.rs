@@ -1,7 +1,7 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 
 use crate::deepseek::client::DeepSeekClient;
 
@@ -12,6 +12,8 @@ use super::subagent::{
     MergeStrategy, ParallelBatch, SubagentConfig, SubagentExecutor, SubagentRegistry,
     SubagentResult, SubagentTask, SubagentType,
 };
+
+const DEFAULT_MAX_PARALLEL_SUBAGENTS: usize = 8;
 
 /// The supervisor orchestrates multi-agent execution.
 ///
@@ -24,6 +26,7 @@ use super::subagent::{
 pub struct Supervisor {
     client: Arc<DeepSeekClient>,
     project_root: PathBuf,
+    max_parallel_subagents: usize,
     pub registry: SubagentRegistry,
 }
 
@@ -31,9 +34,11 @@ impl Supervisor {
     #[must_use]
     pub fn new(client: Arc<DeepSeekClient>, project_root: PathBuf) -> Self {
         let registry = SubagentRegistry::load_from_project(&project_root);
+        let max_parallel_subagents = configured_max_parallel_subagents(&project_root);
         Self {
             client,
             project_root,
+            max_parallel_subagents,
             registry,
         }
     }
@@ -52,13 +57,15 @@ impl Supervisor {
 
     /// Run a batch of subagent tasks in parallel.
     ///
-    /// All tasks are spawned concurrently. Results are returned in the same order.
+    /// Tasks are spawned concurrently up to the configured supervisor limit.
+    /// Results are returned in the same order.
     pub async fn run_parallel(
         &self,
         batch: ParallelBatch,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
     ) -> Vec<SubagentResult> {
         let mut handles = Vec::with_capacity(batch.tasks.len());
+        let semaphore = Arc::new(Semaphore::new(self.max_parallel_subagents));
 
         // Create a shared message bus for inter-agent coordination
         let bus = MessageBus::new(64);
@@ -76,7 +83,17 @@ impl Supervisor {
                 SubagentExecutor::new(self.client.clone(), self.project_root.clone(), config)
                     .with_bus(bus.clone());
             let event_tx = event_tx.clone();
-            let handle = tokio::spawn(async move { executor.run(&task, &event_tx).await });
+            let semaphore = semaphore.clone();
+            let handle = tokio::spawn(async move {
+                let Ok(_permit) = semaphore.acquire_owned().await else {
+                    return subagent_failure(
+                        "Subagent skipped because the supervisor limiter closed".to_string(),
+                        "Supervisor limiter closed before the subagent could start".to_string(),
+                        "supervisor limiter closed".to_string(),
+                    );
+                };
+                executor.run(&task, &event_tx).await
+            });
             handles.push(handle);
         }
 
@@ -85,19 +102,11 @@ impl Supervisor {
             match handle.await {
                 Ok(result) => results.push(result),
                 Err(e) => {
-                    results.push(SubagentResult {
-                        success: false,
-                        summary: format!("Subagent panicked: {e}"),
-                        output: format!("Panicked: {e}"),
-                        tool_calls_used: Vec::new(),
-                        files_read: Vec::new(),
-                        files_written: Vec::new(),
-                        duration_ms: 0,
-                        token_usage: 0,
-                        error: Some(e.to_string()),
-                        started_at: chrono::Utc::now(),
-                        completed_at: chrono::Utc::now(),
-                    });
+                    results.push(subagent_failure(
+                        format!("Subagent panicked: {e}"),
+                        format!("Panicked: {e}"),
+                        e.to_string(),
+                    ));
                 }
             }
         }
@@ -351,6 +360,52 @@ Provide clear, actionable feedback."
 // Helpers
 // ------------------------------------------------------------------
 
+fn configured_max_parallel_subagents(project_root: &Path) -> usize {
+    let mut configured = None;
+
+    if let Some(home_dir) = dirs::home_dir() {
+        let global_path = home_dir.join(".deepseek-code").join("config.toml");
+        configured = read_configured_subagent_max_parallel(&global_path).or(configured);
+    }
+
+    let root = crate::storage::config::normalize_project_root(project_root);
+    let project_config = root.join(".deepseek-code").join("config.toml");
+    configured = read_configured_subagent_max_parallel(&project_config).or(configured);
+    let local_config = root.join(".deepseek-code").join("local.toml");
+    configured = read_configured_subagent_max_parallel(&local_config).or(configured);
+
+    configured
+        .map(normalize_max_parallel_subagents)
+        .unwrap_or(DEFAULT_MAX_PARALLEL_SUBAGENTS)
+}
+
+fn read_configured_subagent_max_parallel(path: &Path) -> Option<usize> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let value = content.parse::<toml::Value>().ok()?;
+    let max_parallel = value.get("subagent")?.get("max_parallel")?.as_integer()?;
+    usize::try_from(max_parallel).ok()
+}
+
+fn normalize_max_parallel_subagents(limit: usize) -> usize {
+    limit.max(1)
+}
+
+fn subagent_failure(summary: String, output: String, error: String) -> SubagentResult {
+    SubagentResult {
+        success: false,
+        summary,
+        output,
+        tool_calls_used: Vec::new(),
+        files_read: Vec::new(),
+        files_written: Vec::new(),
+        duration_ms: 0,
+        token_usage: 0,
+        error: Some(error),
+        started_at: chrono::Utc::now(),
+        completed_at: chrono::Utc::now(),
+    }
+}
+
 /// Heuristically extract file paths from a prompt string.
 fn extract_file_paths(text: &str) -> Vec<String> {
     let mut paths = Vec::new();
@@ -400,6 +455,32 @@ mod tests {
         assert!(paths.contains(&"src/main.rs".to_string()));
         assert!(paths.contains(&"src/lib.rs".to_string()));
         assert!(paths.contains(&"tests/test_main.rs".to_string()));
+    }
+
+    #[test]
+    fn default_parallel_limit_is_eight_and_never_zero() {
+        assert_eq!(DEFAULT_MAX_PARALLEL_SUBAGENTS, 8);
+        assert_eq!(normalize_max_parallel_subagents(0), 1);
+        assert_eq!(normalize_max_parallel_subagents(3), 3);
+    }
+
+    #[test]
+    fn supervisor_reads_project_parallel_limit() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config_dir = root.path().join(".deepseek-code");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        std::fs::write(
+            config_dir.join("local.toml"),
+            "[subagent]\nmax_parallel = 2\n",
+        )
+        .expect("write config");
+
+        let supervisor = Supervisor::new(
+            Arc::new(DeepSeekClient::new("test".to_string())),
+            root.path().to_path_buf(),
+        );
+
+        assert_eq!(supervisor.max_parallel_subagents, 2);
     }
 
     #[test]

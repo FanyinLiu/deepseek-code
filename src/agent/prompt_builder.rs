@@ -71,7 +71,7 @@ impl PromptBuilder {
         tool_defs: &[ToolDefinition],
         transient_context: &[String],
     ) -> (String, Vec<ChatMessage>) {
-        let system_prompt = self.build_system_prompt(project_rules, tool_defs);
+        let system_prompt = self.build_system_prompt(session, project_rules, tool_defs);
         let system_tokens = Self::estimate_tokens(&system_prompt);
 
         // Assemble model context from durable/user-visible state rather than
@@ -273,6 +273,7 @@ impl PromptBuilder {
 
     fn build_system_prompt(
         &self,
+        session: &Session,
         project_rules: Option<&str>,
         tool_defs: &[ToolDefinition],
     ) -> String {
@@ -287,6 +288,14 @@ impl PromptBuilder {
         prompt.push_str(
             "Your task is to help with software engineering: \
             read code, search repositories, plan changes, write edits, run commands.\n\n",
+        );
+        prompt.push_str(&format!(
+            "Current workspace root: {}\n",
+            session.project_root.display()
+        ));
+        prompt.push_str(
+            "Resolve relative paths and project/folder references from this workspace root unless \
+             the user provides a different absolute path.\n\n",
         );
 
         // Execution lane instructions
@@ -339,9 +348,20 @@ impl PromptBuilder {
                  read/search tools are available.\n",
             );
             prompt.push_str(
+                "- Treat requests about local folders, computer folders, `电脑里`, `电脑里面`, \
+                 `文件夹`, or `目录` as local filesystem inspection requests: call `list_dir`, \
+                 `search_files`, `search_code`, or `read_file` before answering.\n",
+            );
+            prompt.push_str(
                 "- You can read local computer files through `read_file` and `list_dir`: \
                  workspace-relative paths are safe reads, and absolute paths outside the workspace \
                  are allowed only after user approval. Protected secret/system paths may be blocked.\n",
+            );
+            prompt.push_str(
+                "- Do not use `run_command` for `cat`, `ls`, `find`, `grep`, `rg`, `sed`, `head`, \
+                 or `tail` just to inspect local files, folders, or code. Those are command \
+                 executions and interrupt the user with approval prompts. Use `read_file`, \
+                 `list_dir`, `search_files`, or `search_code` instead.\n",
             );
             prompt.push_str(
                 "- When calling tools with Windows absolute paths, prefer forward slashes such as \
@@ -394,23 +414,17 @@ impl PromptBuilder {
     }
 }
 
-/// Load project rules from AGENTS.md or .deepseek-code/ files.
+/// Load layered project rules from user, project, and cwd instruction files.
 #[must_use]
 pub fn load_project_rules(project_root: &Path) -> Option<String> {
-    let candidates = [
-        project_root.join("AGENTS.md"),
-        project_root.join(".deepseek-code").join("AGENTS.md"),
-        project_root.join(".deepseek-code").join("rules.md"),
-    ];
-
     let mut loaded = Vec::new();
-    for path in &candidates {
+    for path in project_rule_candidates(project_root) {
         if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(path) {
+            if let Ok(content) = std::fs::read_to_string(&path) {
                 if !content.trim().is_empty() {
                     let label = path
                         .strip_prefix(project_root)
-                        .unwrap_or(path)
+                        .unwrap_or(&path)
                         .display()
                         .to_string();
                     loaded.push(format!("### {label}\n\n{}", content.trim()));
@@ -423,6 +437,41 @@ pub fn load_project_rules(project_root: &Path) -> Option<String> {
     } else {
         Some(loaded.join("\n\n"))
     }
+}
+
+#[must_use]
+pub fn project_rule_candidates(project_root: &Path) -> Vec<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join(".deepseek-code").join("DEEPSEEK.md"));
+    }
+    candidates.extend([
+        project_root.join("AGENTS.md"),
+        project_root.join("DEEPSEEK.md"),
+        project_root.join(".deepseek-code").join("AGENTS.md"),
+        project_root.join(".deepseek-code").join("rules.md"),
+    ]);
+    if let Ok(cwd) = std::env::current_dir() {
+        let cwd_deepseek = cwd.join("DEEPSEEK.md");
+        let already_listed = candidates.iter().any(|path| path == &cwd_deepseek);
+        if path_is_within(&cwd, project_root) && !already_listed {
+            candidates.push(cwd_deepseek);
+        }
+    }
+    candidates
+}
+
+fn path_is_within(path: &Path, root: &Path) -> bool {
+    if path.starts_with(root) {
+        return true;
+    }
+    let Ok(path) = path.canonicalize() else {
+        return false;
+    };
+    let Ok(root) = root.canonicalize() else {
+        return false;
+    };
+    path.starts_with(root)
 }
 
 #[cfg(test)]
@@ -446,6 +495,8 @@ mod tests {
         let temp = tempfile::tempdir().expect("create tempdir");
         std::fs::create_dir(temp.path().join(".deepseek-code")).expect("create config dir");
         std::fs::write(temp.path().join("AGENTS.md"), "Project agents").expect("write AGENTS");
+        std::fs::write(temp.path().join("DEEPSEEK.md"), "Project deepseek")
+            .expect("write project DEEPSEEK");
         std::fs::write(
             temp.path().join(".deepseek-code").join("AGENTS.md"),
             "Local agents",
@@ -457,9 +508,31 @@ mod tests {
         let rules = load_project_rules(temp.path()).expect("rules should load");
 
         let project_agents = rules.find("Project agents").expect("project agents");
+        let project_deepseek = rules.find("Project deepseek").expect("project deepseek");
         let local_agents = rules.find("Local agents").expect("local agents");
         assert!(project_agents < local_agents);
+        assert!(project_agents < project_deepseek);
+        assert!(project_deepseek < local_agents);
+        assert!(rules.contains("### DEEPSEEK.md"));
         assert!(!rules.contains("rules.md\n\n  "));
+    }
+
+    #[test]
+    fn load_project_rules_adds_cwd_deepseek_after_project_rules() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let child = temp.path().join("crates").join("core");
+        std::fs::create_dir_all(&child).expect("create child");
+        std::fs::write(temp.path().join("DEEPSEEK.md"), "root rules").expect("write root");
+        std::fs::write(child.join("DEEPSEEK.md"), "child rules").expect("write child");
+
+        let original = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(&child).expect("set cwd");
+        let rules = load_project_rules(temp.path()).expect("rules should load");
+        std::env::set_current_dir(original).expect("restore cwd");
+
+        let root_rules = rules.find("root rules").expect("root rules");
+        let child_rules = rules.find("child rules").expect("child rules");
+        assert!(root_rules < child_rules);
     }
 
     #[test]
@@ -483,9 +556,13 @@ mod tests {
                 .build(&session, None, None, &tools);
 
         assert!(prompt.contains("read local computer files"));
+        assert!(prompt.contains("Current workspace root: ."));
         assert!(prompt.contains("absolute paths outside the workspace"));
         assert!(prompt.contains("forward slashes"));
         assert!(prompt.contains("Do not say you have no tools"));
+        assert!(prompt.contains("电脑里面"));
+        assert!(prompt.contains("Do not use `run_command` for `cat`, `ls`, `find`, `grep`"));
+        assert!(prompt.contains("interrupt the user with approval prompts"));
     }
 
     #[test]

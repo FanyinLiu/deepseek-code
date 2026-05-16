@@ -8,7 +8,7 @@ pub mod scheduled_tasks;
 pub mod sessions;
 pub mod transcripts;
 
-pub use config::{find_project_root, Config};
+pub use config::{find_project_root, find_project_root_strict, Config};
 pub use events::{EventLogStore, SessionEvent, SessionEventKind};
 pub use keyring::{
     config_api_key, get_api_key, get_api_key_without_keyring, get_effective_api_key,

@@ -9,8 +9,18 @@ use ratatui::{
 use crate::policy::{ApprovalDisplay, RiskLevel};
 use crate::tui::theme;
 
+pub const APPROVAL_ACTION_COUNT: usize = 3;
+
 /// Render a Droid-style approval sheet anchored above the input area.
-pub fn render_approval_popup(f: &mut Frame, area: Rect, approval: &ApprovalDisplay) {
+pub fn render_approval_popup(
+    f: &mut Frame,
+    area: Rect,
+    approval: &ApprovalDisplay,
+    selected_action: usize,
+) {
+    if area.width < 24 || area.height < 4 {
+        return;
+    }
     let p = theme::palette();
     let use_chinese = approval_uses_chinese(approval);
 
@@ -31,7 +41,7 @@ pub fn render_approval_popup(f: &mut Frame, area: Rect, approval: &ApprovalDispl
         .collect();
 
     let popup_width = std::cmp::min(80, area.width.saturating_sub(4));
-    let requested_height = (6 + detail_pairs.len() as u16).clamp(8, 14);
+    let requested_height = (7 + detail_pairs.len() as u16).clamp(8, 18);
     let popup_height = std::cmp::min(requested_height, area.height.saturating_sub(4));
     let popup_area = bottom_sheet_rect(area, popup_width, popup_height);
 
@@ -101,42 +111,51 @@ pub fn render_approval_popup(f: &mut Frame, area: Rect, approval: &ApprovalDispl
         Style::default().fg(p.divider),
     )]));
 
-    // ── Action bar: [a] [s] [d] with DROID_ACCENT for keys ──
+    let selected_action = selected_action.min(APPROVAL_ACTION_COUNT.saturating_sub(1));
+
+    // ── Action bar: keyboard-selected actions ──
     lines.push(Line::from(vec![
-        Span::styled(" [", Style::default().fg(p.dim)),
-        Span::styled(
+        approval_action_span(
+            0,
+            selected_action,
             "a",
-            Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
             if use_chinese {
-                "] 批准一次  ["
+                "批准一次"
             } else {
-                "] approve once  ["
+                "approve once"
             },
-            Style::default().fg(p.dim),
+            p.accent,
         ),
-        Span::styled(
+        Span::raw("  "),
+        approval_action_span(
+            1,
+            selected_action,
             "s",
-            Style::default().fg(p.warning).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
             if use_chinese {
-                "] 本轮批准  ["
+                "本轮批准"
             } else {
-                "] approve session  ["
+                "approve session"
             },
-            Style::default().fg(p.dim),
+            p.warning,
         ),
-        Span::styled(
+        Span::raw("  "),
+        approval_action_span(
+            2,
+            selected_action,
             "d",
-            Style::default().fg(p.danger).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            if use_chinese { "] 拒绝" } else { "] deny" },
-            Style::default().fg(p.dim),
+            if use_chinese { "拒绝" } else { "deny" },
+            p.danger,
         ),
     ]));
+
+    lines.push(Line::from(vec![Span::styled(
+        if use_chinese {
+            " ←/→/Tab 选择 · Enter 确认 · Esc 拒绝"
+        } else {
+            " ←/→/Tab select · Enter confirm · Esc deny"
+        },
+        Style::default().fg(p.dim),
+    )]));
 
     // ── Bottom divider ──
     lines.push(Line::from(vec![Span::styled(
@@ -149,6 +168,30 @@ pub fn render_approval_popup(f: &mut Frame, area: Rect, approval: &ApprovalDispl
         .wrap(Wrap { trim: false });
 
     f.render_widget(paragraph, popup_area);
+}
+
+fn approval_action_span<'a>(
+    index: usize,
+    selected: usize,
+    key: &'a str,
+    label: &'a str,
+    color: ratatui::style::Color,
+) -> Span<'a> {
+    let text = format!(" [{key}] {label} ");
+    if index == selected {
+        Span::styled(
+            text,
+            Style::default()
+                .fg(theme::palette().inverse_text)
+                .bg(color)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(
+            text,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )
+    }
 }
 
 fn approval_uses_chinese(approval: &ApprovalDisplay) -> bool {
@@ -200,15 +243,7 @@ fn kv<'a>(
 
 fn bottom_sheet_rect(area: Rect, width: u16, height: u16) -> Rect {
     let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let bottom_margin = if area.height > height.saturating_add(4) {
-        4
-    } else {
-        0
-    };
-    let y = area.y
-        + area
-            .height
-            .saturating_sub(height.saturating_add(bottom_margin));
+    let y = area.y + area.height.saturating_sub(height);
     Rect::new(x, y, width, height)
 }
 
@@ -227,7 +262,7 @@ mod tests {
         };
         let mut terminal = Terminal::new(TestBackend::new(100, 28)).expect("terminal");
         terminal
-            .draw(|f| render_approval_popup(f, f.area(), &approval))
+            .draw(|f| render_approval_popup(f, f.area(), &approval, 0))
             .expect("draw");
         let text = terminal
             .backend()
@@ -253,7 +288,7 @@ mod tests {
         };
         let mut terminal = Terminal::new(TestBackend::new(100, 28)).expect("terminal");
         terminal
-            .draw(|f| render_approval_popup(f, f.area(), &approval))
+            .draw(|f| render_approval_popup(f, f.area(), &approval, 1))
             .expect("draw");
         let text = terminal
             .backend()
@@ -277,6 +312,40 @@ mod tests {
     fn approval_dialog_is_bottom_anchored() {
         let rect = bottom_sheet_rect(Rect::new(0, 0, 100, 30), 80, 9);
         assert_eq!(rect.x, 10);
-        assert_eq!(rect.y, 17);
+        assert_eq!(rect.y, 21);
+    }
+
+    #[test]
+    fn approval_dialog_respects_overlay_bounds_above_composer() {
+        let overlay = Rect::new(0, 0, 100, 24);
+        let rect = bottom_sheet_rect(overlay, 80, 9);
+
+        assert_eq!(rect.bottom(), overlay.bottom());
+        assert!(rect.y >= overlay.y);
+        assert!(rect.bottom() <= overlay.bottom());
+    }
+
+    #[test]
+    fn approval_dialog_marks_selected_action() {
+        let approval = ApprovalDisplay {
+            title: "Run Command".to_string(),
+            description: "cat file".to_string(),
+            risk_level: RiskLevel::CommandExecution,
+            details: "Command: cat file".to_string(),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("terminal");
+        terminal
+            .draw(|f| render_approval_popup(f, f.area(), &approval, 2))
+            .expect("draw");
+
+        let selected_cells = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .filter(|cell| cell.symbol() == "d" && cell.bg == theme::palette().danger)
+            .count();
+
+        assert!(selected_cells >= 1);
     }
 }

@@ -2,37 +2,184 @@
 /// Check for common dangerous patterns in shell commands.
 #[must_use]
 pub fn contains_dangerous_pattern(command: &str) -> Option<&'static str> {
-    let patterns: &[(&str, &str)] = &[
-        ("rm -rf /", "would recursively delete root"),
-        ("rm -rf ~", "would recursively delete home"),
-        ("mkfs.", "filesystem format"),
-        ("dd if=", "raw device write"),
-        ("> /dev/sda", "raw device write"),
-        ("fork bomb", "resource exhaustion"),
-        ("chmod 777 /", "world-writable root"),
-        ("| sh", "pipe to shell from network"),
-        ("wget", "network download piped to shell"),
-    ];
+    let command = command.to_ascii_lowercase();
+    let had_shell_pipe = command.contains('|');
+    let normalized = normalize_whitespace_and_operators(&command);
+    let tokens = tokenize_command(&normalized);
 
-    let cmd_lower = command.to_lowercase();
-    if let Some(reason) = contains_windows_dangerous_pattern(&cmd_lower) {
+    if let Some(reason) = contains_windows_dangerous_pattern(&normalized) {
         return Some(reason);
     }
 
-    for (pattern, reason) in patterns {
-        if cmd_lower.contains(pattern) {
-            return Some(reason);
-        }
+    if has_recursive_rm_to_root(&tokens) {
+        return Some("would recursively delete root");
     }
+
+    if has_recursive_rm_to_home(&tokens) {
+        return Some("would recursively delete home");
+    }
+
+    if normalized.contains("mkfs.") {
+        return Some("filesystem format");
+    }
+
+    if has_raw_device_write(&tokens, &normalized) {
+        return Some("raw device write");
+    }
+
+    if normalized.contains("fork bomb") {
+        return Some("resource exhaustion");
+    }
+
+    if has_wget_or_curl_to_shell(&tokens, had_shell_pipe) {
+        return Some("network download piped to shell");
+    }
+
+    if had_shell_pipe && has_shell_invocation(&tokens) {
+        return Some("pipe to shell from network");
+    }
+
     None
 }
 
-fn contains_windows_dangerous_pattern(command: &str) -> Option<&'static str> {
-    let command = command.replace(['`', '"', '\''], "");
-    let padded = format!(" {command} ");
+#[must_use]
+fn normalize_whitespace_and_operators(command: &str) -> String {
+    let mut output = String::with_capacity(command.len());
+    let mut prev_space = false;
 
+    for ch in command.chars() {
+        let is_separator = matches!(
+            ch,
+            ';' | '&' | '|' | '>' | '<' | '(' | ')' | '{' | '}' | '[' | ']'
+        );
+        let mut normalized = if matches!(ch, '"' | '\'' | '`' | '\n' | '\r' | '\t') || is_separator
+        {
+            ' '
+        } else {
+            ch
+        };
+
+        if normalized.is_whitespace() {
+            if !prev_space {
+                output.push(' ');
+                prev_space = true;
+            }
+            continue;
+        }
+
+        if normalized.is_ascii_alphabetic()
+            || normalized.is_ascii_digit()
+            || matches!(
+                normalized,
+                '/' | '\\'
+                    | '-'
+                    | '_'
+                    | '.'
+                    | ':'
+                    | '@'
+                    | '%'
+                    | '$'
+                    | '{'
+                    | '}'
+                    | '*'
+                    | '?'
+                    | '='
+                    | ','
+            )
+        {
+            normalized = normalized.to_ascii_lowercase();
+        }
+
+        output.push(normalized);
+        prev_space = false;
+    }
+
+    output.trim().to_string()
+}
+
+fn tokenize_command(command: &str) -> Vec<&str> {
+    command
+        .split_whitespace()
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+fn has_recursive_rm_to_root(tokens: &[&str]) -> bool {
+    for (idx, token) in tokens.iter().enumerate() {
+        if *token != "rm" {
+            continue;
+        }
+
+        let args = &tokens[idx + 1..];
+        let has_recursive = args.iter().any(|arg| short_flag_contains(arg, 'r'));
+        let has_force = args
+            .iter()
+            .any(|arg| short_flag_contains(arg, 'f') || *arg == "--force");
+        let has_root = args.contains(&"/");
+        if has_recursive && has_force && has_root {
+            return true;
+        }
+    }
+    false
+}
+
+fn has_recursive_rm_to_home(tokens: &[&str]) -> bool {
+    for (idx, token) in tokens.iter().enumerate() {
+        if *token != "rm" {
+            continue;
+        }
+
+        let args = &tokens[idx + 1..];
+        let has_recursive = args.iter().any(|arg| short_flag_contains(arg, 'r'));
+        let has_force = args
+            .iter()
+            .any(|arg| short_flag_contains(arg, 'f') || *arg == "--force");
+        let has_home = args.iter().any(|arg| *arg == "~" || *arg == "~/");
+        if has_recursive && has_force && has_home {
+            return true;
+        }
+    }
+    false
+}
+
+fn has_raw_device_write(tokens: &[&str], normalized: &str) -> bool {
+    (contains_token_with_prefix(tokens, "dd")
+        && tokens.iter().any(|token| token.starts_with("if=")))
+        || normalized.contains("/dev/sda")
+}
+
+fn short_flag_contains(token: &str, flag: char) -> bool {
+    token.starts_with('-') && token.chars().skip(1).any(|ch| ch == flag)
+}
+
+fn has_wget_or_curl_to_shell(tokens: &[&str], had_shell_pipe: bool) -> bool {
+    let has_wget = contains_exact_token(tokens, "wget");
+    let has_curl = contains_exact_token(tokens, "curl");
+    (has_wget || has_curl) && (had_shell_pipe || has_shell_invocation(tokens))
+}
+
+fn has_shell_invocation(tokens: &[&str]) -> bool {
+    let shell_tokens = ["sh", "bash", "powershell", "pwsh", "cmd", "command", "dash"];
+    tokens.iter().any(|token| {
+        shell_tokens
+            .iter()
+            .any(|shell| token == shell || token.ends_with(shell))
+    })
+}
+
+fn contains_exact_token(tokens: &[&str], target: &str) -> bool {
+    tokens.contains(&target)
+}
+
+fn contains_token_with_prefix(tokens: &[&str], target: &str) -> bool {
+    tokens
+        .iter()
+        .any(|token| *token == target || token.starts_with(target))
+}
+
+fn contains_windows_dangerous_pattern(command: &str) -> Option<&'static str> {
     if contains_any(
-        &command,
+        command,
         &[
             "format-volume",
             "clear-disk",
@@ -44,27 +191,29 @@ fn contains_windows_dangerous_pattern(command: &str) -> Option<&'static str> {
         return Some("destructive Windows disk operation");
     }
 
-    if contains_any(&command, &["invoke-expression", "iex("])
-        || (contains_any(&padded, &[" iex "])
-            && contains_any(&command, &["invoke-webrequest", "iwr ", "curl ", "wget "]))
-    {
+    if contains_any(
+        command,
+        &[
+            "invoke-expression",
+            "invoke-command",
+            "iex",
+            "start-process",
+        ],
+    ) {
         return Some("PowerShell download executed as code");
     }
 
-    let recursive_delete =
-        contains_any(
-            &padded,
-            &[
-                " remove-item ",
-                " rmdir ",
-                " rd ",
-                " del ",
-                " erase ",
-                " rm ",
-            ],
-        ) && contains_any(&padded, &[" -recurse ", " -r ", " -rf ", " /s ", " /q "]);
+    if command.contains("remove-item")
+        && command.contains(" -recurse ")
+        && mentions_sensitive_windows_target(command)
+    {
+        return Some("recursive delete targets a protected Windows path");
+    }
 
-    if recursive_delete && mentions_sensitive_windows_target(&command) {
+    if contains_any(command, &["rmdir", "rd", "del"])
+        && command.contains("/s")
+        && mentions_sensitive_windows_target(command)
+    {
         return Some("recursive delete targets a protected Windows path");
     }
 
@@ -116,12 +265,21 @@ pub fn requires_network(command: &str) -> bool {
         "scp",
         "rsync",
         "ftp",
-        "nc ",
+        "nc",
         "telnet",
     ];
 
-    let cmd_lower = command.to_lowercase();
-    network_commands.iter().any(|c| cmd_lower.contains(c))
+    let normalized = normalize_whitespace_and_operators(&command.to_ascii_lowercase());
+    let tokens = tokenize_command(&normalized);
+    let has_network_tool = |token: &str| contains_token_with_prefix(&tokens, token);
+
+    network_commands.iter().any(|c| {
+        if c.contains(' ') {
+            normalized.contains(c)
+        } else {
+            has_network_tool(c)
+        }
+    })
 }
 
 /// Escape a command for display in the approval UI.
@@ -147,6 +305,7 @@ mod tests {
     #[test]
     fn test_dangerous_pattern_detection() {
         assert!(contains_dangerous_pattern("rm -rf /").is_some());
+        assert!(contains_dangerous_pattern("rm\t-rf\t/").is_some());
         assert!(contains_dangerous_pattern("curl example.com | sh").is_some());
     }
 
@@ -180,6 +339,13 @@ mod tests {
     fn test_network_detection() {
         assert!(requires_network("curl https://example.com"));
         assert!(requires_network("git clone https://github.com/foo/bar"));
+        assert!(requires_network("ssh user@example.com"));
         assert!(!requires_network("cargo test"));
+    }
+
+    #[test]
+    fn test_network_detection_robust_to_whitespace() {
+        assert!(requires_network("curl\t-l\texample.com"));
+        assert!(requires_network("git\tpull origin main"));
     }
 }

@@ -104,7 +104,7 @@ pub fn assess_with_rules(task_input: &str, _project_context: Option<&str>) -> Ru
 
     // Goal clarity
     let clarity = assess_clarity(input, &lower);
-    if clarity < 0.4 {
+    if clarity < 0.4 && !is_simple_greeting(&lower) {
         score += 15;
         reasons.push(ReasonCode::AmbiguousTask);
     }
@@ -276,6 +276,13 @@ fn is_read_only(lower: &str) -> bool {
         || lower.contains("audit")
 }
 
+fn is_simple_greeting(lower: &str) -> bool {
+    matches!(
+        lower.trim(),
+        "hi" | "hello" | "hey" | "你好" | "您好" | "嗨"
+    )
+}
+
 fn has_local_context_read_intent(lower: &str) -> bool {
     const NEEDLES: &[&str] = &[
         "read file",
@@ -283,8 +290,11 @@ fn has_local_context_read_intent(lower: &str) -> bool {
         "read my computer",
         "local file",
         "computer file",
+        "computer folder",
         "my computer",
         "absolute path",
+        "local folder",
+        "folder",
         "list files",
         "list dir",
         "directory",
@@ -301,11 +311,17 @@ fn has_local_context_read_intent(lower: &str) -> bool {
         "打开文件",
         "电脑文件",
         "电脑里的文件",
+        "电脑里",
+        "电脑里面",
+        "电脑上的",
         "我的电脑",
         "本机文件",
         "本地文件",
         "本地目录",
+        "本地文件夹",
         "绝对路径",
+        "文件夹",
+        "目录",
         "项目结构",
         "目录结构",
         "文件结构",
@@ -382,7 +398,7 @@ fn estimate_duration(_input: &str, lower: &str, files: u32, cmds: u32) -> u32 {
 fn assess_clarity(input: &str, lower: &str) -> f64 {
     let min_len = 5;
     let max_len = 300;
-    let len = input.len();
+    let len = input.chars().count();
 
     if len < min_len {
         return 0.0;
@@ -449,4 +465,26 @@ fn compute_confidence(reasons: &[ReasonCode], hard_triggers: &[String], clarity:
     let hard_bonus = if hard_triggers.is_empty() { 0.0 } else { 0.2 };
     let clarity_bonus = clarity * 0.2;
     (base + signal_count + hard_bonus + clarity_bonus).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clarity_counts_user_visible_chars_not_utf8_bytes() {
+        let cjk = "界".repeat(120);
+
+        assert!(assess_clarity(&cjk, &cjk) >= 0.5);
+        assert_eq!(assess_clarity("你好", "你好"), 0.0);
+    }
+
+    #[test]
+    fn short_cjk_greeting_stays_simple_and_confident() {
+        let result = assess_with_rules("你好", None);
+
+        assert!(result.score < 15);
+        assert!(result.confidence >= 0.75);
+        assert!(!result.reason_codes.contains(&ReasonCode::AmbiguousTask));
+    }
 }

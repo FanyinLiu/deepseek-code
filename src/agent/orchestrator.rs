@@ -12,6 +12,7 @@ use crate::deepseek::{
     SessionId, StreamResult, SubTurnId, ThinkingConfig, ToolCall, ToolCallFunction, ToolDefinition,
     ToolResultRecord, TurnId, Usage,
 };
+use crate::hooks::{HookEvent, HookPayload, HookRunSummary};
 use crate::plan;
 use crate::plan::schema::{Plan, RiskLevel};
 use crate::policy;
@@ -32,6 +33,9 @@ use super::tool_loop::ToolLoop;
 /// Events emitted by the orchestrator during execution.
 #[derive(Debug)]
 pub enum AgentEvent {
+    UserMessage {
+        content: String,
+    },
     ContentDelta(String),
     ReasoningDelta(String),
     TokenDelta {
@@ -43,10 +47,21 @@ pub enum AgentEvent {
         display: policy::ApprovalDisplay,
         respond: tokio::sync::oneshot::Sender<bool>,
     },
+    ToolStarted {
+        tool_call_id: String,
+        tool_name: String,
+        arguments: String,
+    },
     ToolExecuted {
         tool_name: String,
         success: bool,
         summary: String,
+    },
+    HookExecuted {
+        event: HookEvent,
+        success: bool,
+        summary: String,
+        command_count: usize,
     },
     StreamDone {
         finish_reason: Option<FinishReason>,
@@ -433,6 +448,7 @@ pub struct Orchestrator {
     mcp_initialized: bool,
     event_log_store: Option<EventLogStore>,
     swarm_cancel_token: Option<Arc<AtomicBool>>,
+    lifecycle_hooks_started: bool,
 }
 
 impl Orchestrator {
@@ -451,7 +467,27 @@ impl Orchestrator {
             mcp_initialized: false,
             event_log_store,
             swarm_cancel_token: None,
+            lifecycle_hooks_started: false,
         }
+    }
+
+    pub fn set_active_model(&mut self, model: DeepSeekModel) {
+        let model = model.canonical();
+        let previous = self.session.reasoning_state.effective_model();
+        if previous == model {
+            self.session.reasoning_state.selected_model = Some(model);
+            return;
+        }
+        self.session.reasoning_state.selected_model = Some(model.clone());
+        self.session
+            .metadata
+            .model_switches
+            .push(crate::deepseek::ModelSwitchRecord {
+                from: previous,
+                to: model,
+                at: Utc::now(),
+                reason: "user selection".to_string(),
+            });
     }
 
     pub fn set_swarm_cancel_token(&mut self, token: Arc<AtomicBool>) {
@@ -492,6 +528,51 @@ impl Orchestrator {
         .emit(event);
     }
 
+    fn record_hook_summary(
+        &self,
+        turn_id: Option<TurnId>,
+        summary: &HookRunSummary,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) {
+        emit_hook_summary_event(
+            event_tx,
+            &self.event_log_store,
+            &self.project_root,
+            self.session.id,
+            turn_id,
+            summary,
+        );
+    }
+
+    async fn run_lifecycle_hook(
+        &mut self,
+        hook_event: HookEvent,
+        turn_id: Option<TurnId>,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+        summary: Option<String>,
+    ) {
+        let runtime_config =
+            crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
+        let mut payload = HookPayload::new(
+            hook_event,
+            self.session.id.to_string(),
+            self.project_root.clone(),
+        );
+        payload.turn_id = turn_id.map(|id| id.to_string());
+        payload.summary = summary;
+        if let Some(result) = crate::hooks::run_configured_hooks(
+            hook_event,
+            &runtime_config.hooks,
+            &payload,
+            &self.project_root,
+            runtime_config.policy.command_timeout_seconds,
+        )
+        .await
+        {
+            self.record_hook_summary(turn_id, &result, event_tx);
+        }
+    }
+
     fn should_run_swarm(
         &self,
         user_input: &str,
@@ -528,7 +609,8 @@ impl Orchestrator {
 
     async fn run_swarm_mode(
         &mut self,
-        user_input: &str,
+        description: &str,
+        prompt: &str,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
         turn_id: TurnId,
     ) -> Result<(), anyhow::Error> {
@@ -538,11 +620,11 @@ impl Orchestrator {
             self.project_root.clone(),
             config.subagent.max_parallel,
         );
-        let plan = coordinator.plan_hybrid(user_input, user_input, &[]).await;
-        let use_chinese = contains_cjk(user_input);
+        let plan = coordinator.plan_hybrid(description, prompt, &[]).await;
+        let use_chinese = contains_cjk(description) || contains_cjk(prompt);
         self.write_artifact(
             "swarm-plan",
-            &format_swarm_plan_artifact(user_input, &plan, use_chinese),
+            &format_swarm_plan_artifact(prompt, &plan, use_chinese),
         );
         self.emit_event(
             event_tx,
@@ -765,9 +847,9 @@ impl Orchestrator {
                 arguments: serde_json::json!({ "patch": combined_patch }).to_string(),
             },
         };
-        let policy_config = crate::storage::Config::load(Some(&self.project_root))
-            .map(|c| c.policy)
-            .unwrap_or_default();
+        let runtime_config =
+            crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
+        let policy_config = runtime_config.policy.clone();
         let patch_policy = policy::evaluate_tool(
             &call.function.name,
             &call.function.arguments,
@@ -955,9 +1037,9 @@ impl Orchestrator {
         if result.validation_commands.is_empty() {
             return None;
         }
-        let policy_config = crate::storage::Config::load(Some(&self.project_root))
-            .map(|c| c.policy)
-            .unwrap_or_default();
+        let runtime_config =
+            crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
+        let policy_config = runtime_config.policy.clone();
         let backend = crate::tools::backend::LocalToolBackend;
         let mut lines = Vec::new();
         let mut failed = false;
@@ -1171,7 +1253,7 @@ impl Orchestrator {
         }
 
         let timeout = std::time::Duration::from_mins(10);
-        if let Ok(result) = tokio::time::timeout(
+        let result = if let Ok(result) = tokio::time::timeout(
             timeout,
             self.run_turn_inner(user_input, images, &event_tx, None),
         )
@@ -1184,7 +1266,10 @@ impl Orchestrator {
                 AgentEvent::Error("Turn timed out after 10 minutes".into()),
             );
             Err(anyhow::anyhow!("Turn timed out after 10 minutes"))
-        }
+        };
+        self.run_lifecycle_hook(HookEvent::SessionEnd, None, &event_tx, None)
+            .await;
+        result
     }
 
     /// Run a turn forcing a specific lane (for `run` command).
@@ -1195,7 +1280,7 @@ impl Orchestrator {
         lane: ExecutionLane,
     ) -> Result<(), anyhow::Error> {
         let timeout = std::time::Duration::from_mins(10);
-        if let Ok(result) = tokio::time::timeout(
+        let result = if let Ok(result) = tokio::time::timeout(
             timeout,
             self.run_turn_inner(user_input, &[], &event_tx, Some(lane)),
         )
@@ -1208,7 +1293,10 @@ impl Orchestrator {
                 AgentEvent::Error("Turn timed out after 10 minutes".into()),
             );
             Err(anyhow::anyhow!("Turn timed out after 10 minutes"))
-        }
+        };
+        self.run_lifecycle_hook(HookEvent::SessionEnd, None, &event_tx, None)
+            .await;
+        result
     }
 
     async fn run_turn_inner(
@@ -1221,13 +1309,27 @@ impl Orchestrator {
         let defense = crate::defense::DefenseProtocol::default();
         let sanitized_user_input = defense.sanitize_input(user_input);
         let user_input = sanitized_user_input.safe_text();
+        if !self.lifecycle_hooks_started {
+            self.run_lifecycle_hook(HookEvent::SessionStart, None, event_tx, None)
+                .await;
+            self.lifecycle_hooks_started = true;
+        }
+        self.run_lifecycle_hook(
+            HookEvent::UserPromptSubmit,
+            None,
+            event_tx,
+            Some(user_input.to_string()),
+        )
+        .await;
+        let turn_input = ContextualTurnInput::from_session(&self.session, user_input);
+        let routing_input = turn_input.routing_input();
 
         // Load project rules once and reuse throughout the turn.
         let project_rules = load_project_rules(&self.project_root);
-        let force_swarm = should_force_swarm(user_input);
+        let force_swarm = should_force_swarm(user_input) || should_force_swarm(routing_input);
 
         // 1. Legacy classify (for search / explicit triggers)
-        let task = classify_task(user_input);
+        let task = classify_task(routing_input);
         let has_forced_lane = force_lane.is_some();
 
         // 2. Complexity router assessment (for all non-forced plan modes)
@@ -1245,7 +1347,7 @@ impl Orchestrator {
                 ComplexityRouter::new().rules_only()
             };
             let assessment = router
-                .assess(user_input, project_rules.as_deref(), Some(&self.client))
+                .assess(routing_input, project_rules.as_deref(), Some(&self.client))
                 .await;
             send_event(
                 event_tx,
@@ -1269,15 +1371,15 @@ impl Orchestrator {
             };
             match route {
                 Route::Clarify => {
-                    let questions = generate_clarification_questions(user_input, a);
+                    let questions = generate_clarification_questions(routing_input, a);
                     send_event(event_tx, AgentEvent::ClarificationNeeded { questions });
                     return Ok(());
                 }
                 Route::PlanReview => {
                     // Override into plan mode even if not explicitly requested
-                    let search_ctx = self.run_search_phase(user_input, event_tx).await;
+                    let search_ctx = self.run_search_phase(routing_input, event_tx).await;
                     return self
-                        .run_plan_mode(user_input, &search_ctx, event_tx, None)
+                        .run_plan_mode(routing_input, user_input, &search_ctx, event_tx, None)
                         .await;
                 }
                 Route::DirectExecute => {
@@ -1332,20 +1434,28 @@ impl Orchestrator {
             sub_turn_id: None,
             visibility: MessageVisibility::UserVisible,
         });
-        self.record_event(
+        self.emit_event(
+            event_tx,
             Some(turn_id),
-            SessionEventKind::UserMessage {
+            AgentEvent::UserMessage {
                 content: event_user_content,
             },
         );
 
-        if self.should_run_swarm(user_input, assessment.as_ref(), force_swarm) {
-            return self.run_swarm_mode(user_input, event_tx, turn_id).await;
+        if self.should_run_swarm(routing_input, assessment.as_ref(), force_swarm) {
+            return self
+                .run_swarm_mode(
+                    turn_input.task_description(),
+                    routing_input,
+                    event_tx,
+                    turn_id,
+                )
+                .await;
         }
 
         // 6. Search if needed
         let search_ctx = if matches!(task, TaskClass::Search | TaskClass::Plan) {
-            self.run_search_phase(user_input, event_tx).await
+            self.run_search_phase(routing_input, event_tx).await
         } else {
             None
         };
@@ -1353,7 +1463,13 @@ impl Orchestrator {
         // 7. Plan mode (explicit / router-overridden already handled above)
         if task == TaskClass::Plan {
             return self
-                .run_plan_mode(user_input, &search_ctx, event_tx, Some(turn_id))
+                .run_plan_mode(
+                    routing_input,
+                    user_input,
+                    &search_ctx,
+                    event_tx,
+                    Some(turn_id),
+                )
                 .await;
         }
 
@@ -1377,12 +1493,13 @@ impl Orchestrator {
 
         let session_events = self.load_session_events();
         let (_, messages) = PromptBuilder::new(cap.model.clone(), lane.clone(), true)
-            .build_with_events(
+            .build_with_events_and_context(
                 &self.session,
                 Some(&session_events),
                 project_rules.as_deref(),
                 search_ctx.as_deref(),
                 &effective_tools,
+                turn_input.transient_context(),
             );
 
         let request = ChatRequest {
@@ -1525,7 +1642,8 @@ impl Orchestrator {
 
     async fn run_plan_mode(
         &mut self,
-        user_input: &str,
+        planner_input: &str,
+        visible_user_input: &str,
         search_ctx: &Option<String>,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
         existing_turn_id: Option<TurnId>,
@@ -1541,7 +1659,7 @@ impl Orchestrator {
             self.session.messages.push(ProtocolMessage {
                 id: MessageId::new_v4(),
                 role: Role::User,
-                content: MessageContent::from(user_input),
+                content: MessageContent::from(visible_user_input),
                 reasoning_content: None,
                 tool_calls: Vec::new(),
                 tool_results: Vec::new(),
@@ -1549,10 +1667,11 @@ impl Orchestrator {
                 sub_turn_id: None,
                 visibility: MessageVisibility::UserVisible,
             });
-            self.record_event(
+            self.emit_event(
+                event_tx,
                 Some(turn_id),
-                SessionEventKind::UserMessage {
-                    content: user_input.to_string(),
+                AgentEvent::UserMessage {
+                    content: visible_user_input.to_string(),
                 },
             );
         }
@@ -1560,7 +1679,7 @@ impl Orchestrator {
         let plan = plan::generate_plan(
             &self.client,
             &DeepSeekModel::Pro,
-            user_input,
+            planner_input,
             search_ctx.as_deref(),
             load_project_rules(&self.project_root).as_deref(),
         )
@@ -1591,7 +1710,8 @@ impl Orchestrator {
                     );
                 }
 
-                let use_chinese = plan_or_input_uses_chinese(&p, user_input);
+                let use_chinese = plan_or_input_uses_chinese(&p, planner_input)
+                    || contains_cjk(visible_user_input);
                 let original_yolo_mode = self.yolo_mode;
                 let mut scoped_plan_auto = false;
 
@@ -1604,7 +1724,7 @@ impl Orchestrator {
                 self.write_artifact(
                     "execution-plan",
                     &format_plan_artifact(
-                        user_input,
+                        planner_input,
                         &p,
                         &step_lines,
                         &review.warnings,
@@ -1987,11 +2107,12 @@ impl Orchestrator {
         self.session.messages.push(assistant_msg);
         send_reasoning_delta(event_tx, &stream_result.reasoning_content);
         for tc in &stream_result.tool_calls {
-            self.record_event(
+            self.emit_event(
+                event_tx,
                 Some(turn_id),
-                SessionEventKind::ToolCallStarted {
+                AgentEvent::ToolStarted {
                     tool_call_id: tc.id.clone(),
-                    name: tc.function.name.clone(),
+                    tool_name: tc.function.name.clone(),
                     arguments: tc.function.arguments.clone(),
                 },
             );
@@ -1999,6 +2120,11 @@ impl Orchestrator {
         if let Some(last_msg) = self.session.messages.last() {
             ReasoningManager::begin_tool_turn(&mut self.session.reasoning_state, last_msg);
         }
+
+        let runtime_config =
+            crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
+        let policy_config = runtime_config.policy.clone();
+        let hooks_config = runtime_config.hooks.clone();
 
         // Separate subagent calls from regular tool calls
         let mut subagent_calls = Vec::new();
@@ -2021,6 +2147,88 @@ impl Orchestrator {
                 0, // top-level: depth 0
             );
             for tc in subagent_calls {
+                let decision = policy::evaluate_tool(
+                    &tc.function.name,
+                    &tc.function.arguments,
+                    &self.project_root,
+                    &policy_config,
+                );
+                let approved = match decision.action {
+                    policy::PolicyAction::Allow => true,
+                    policy::PolicyAction::Deny => {
+                        let result_text = format!("Blocked: {}", decision.reason);
+                        let record = ToolResultRecord {
+                            tool_call_id: tc.id.clone(),
+                            name: tc.function.name.clone(),
+                            result: result_text.clone(),
+                            is_error: true,
+                        };
+                        self.session
+                            .tool_call_history
+                            .push(crate::deepseek::ToolCallRecord {
+                                id: tc.id.clone(),
+                                name: tc.function.name.clone(),
+                                arguments: tc.function.arguments.clone(),
+                                result_summary: crate::agent::utils::truncate_for_summary(
+                                    &result_text,
+                                    200,
+                                ),
+                                exit_code: Some(1),
+                                duration_ms: 0,
+                                risk_level: decision.display.risk_level.to_string(),
+                                approved: false,
+                                at: Utc::now(),
+                            });
+                        results.push((tc.clone(), record));
+                        continue;
+                    }
+                    policy::PolicyAction::AskOnce | policy::PolicyAction::AskSession => {
+                        if self.yolo_mode {
+                            true
+                        } else {
+                            let (tx, rx) = tokio::sync::oneshot::channel();
+                            send_event(
+                                event_tx,
+                                AgentEvent::ToolApprovalNeeded {
+                                    tool_name: tc.function.name.clone(),
+                                    display: decision.display.clone(),
+                                    respond: tx,
+                                },
+                            );
+                            matches!(
+                                tokio::time::timeout(std::time::Duration::from_mins(1), rx).await,
+                                Ok(Ok(true))
+                            )
+                        }
+                    }
+                };
+
+                if !approved {
+                    let result_text = "Denied by user or timeout".to_string();
+                    let record = ToolResultRecord {
+                        tool_call_id: tc.id.clone(),
+                        name: tc.function.name.clone(),
+                        result: result_text.clone(),
+                        is_error: true,
+                    };
+                    self.session
+                        .tool_call_history
+                        .push(crate::deepseek::ToolCallRecord {
+                            id: tc.id.clone(),
+                            name: tc.function.name.clone(),
+                            arguments: tc.function.arguments.clone(),
+                            result_summary: result_text.clone(),
+                            exit_code: Some(1),
+                            duration_ms: 0,
+                            risk_level: decision.display.risk_level.to_string(),
+                            approved: false,
+                            at: Utc::now(),
+                        });
+                    results.push((tc.clone(), record));
+                    continue;
+                }
+
+                let start = std::time::Instant::now();
                 let args: Result<SubagentToolArgs, _> =
                     serde_json::from_str(&tc.function.arguments);
                 let (result_text, is_error) = match args {
@@ -2032,12 +2240,29 @@ impl Orchestrator {
                     }
                     Err(e) => (format!("Invalid run_subagent arguments: {e}"), true),
                 };
+                let duration_ms = start.elapsed().as_millis() as u64;
                 let record = ToolResultRecord {
                     tool_call_id: tc.id.clone(),
                     name: tc.function.name.clone(),
                     result: result_text,
                     is_error,
                 };
+                self.session
+                    .tool_call_history
+                    .push(crate::deepseek::ToolCallRecord {
+                        id: tc.id.clone(),
+                        name: tc.function.name.clone(),
+                        arguments: tc.function.arguments.clone(),
+                        result_summary: crate::agent::utils::truncate_for_summary(
+                            &record.result,
+                            200,
+                        ),
+                        exit_code: if is_error { Some(1) } else { Some(0) },
+                        duration_ms,
+                        risk_level: decision.display.risk_level.to_string(),
+                        approved: true,
+                        at: Utc::now(),
+                    });
                 results.push((tc.clone(), record));
             }
         }
@@ -2046,7 +2271,11 @@ impl Orchestrator {
         let mut mcp_calls = Vec::new();
         let mut standard_calls = Vec::new();
         for tc in regular_calls {
-            if tc.function.name.contains('.') {
+            if self
+                .mcp_registry
+                .as_ref()
+                .is_some_and(|registry| registry.is_mcp_tool_name(&tc.function.name))
+            {
                 mcp_calls.push(tc);
             } else {
                 standard_calls.push(tc);
@@ -2081,9 +2310,6 @@ impl Orchestrator {
         }
 
         // Execute standard tools
-        let policy_config = crate::storage::Config::load(Some(&self.project_root))
-            .map(|c| c.policy)
-            .unwrap_or_default();
         if !deduped.is_empty() {
             let regular_results = ToolLoop::execute_tools_with_approval(
                 &deduped,
@@ -2094,6 +2320,8 @@ impl Orchestrator {
                 event_tx,
                 self.yolo_mode,
                 &policy_config,
+                &hooks_config,
+                self.event_log_store.clone(),
             )
             .await;
             results.extend(regular_results);
@@ -2101,15 +2329,25 @@ impl Orchestrator {
 
         // Execute MCP tools
         if !mcp_calls.is_empty() {
+            let event_log_store = self.event_log_store.clone();
+            let project_root = self.project_root.clone();
+            let session_id = self.session.id;
             if let Some(ref mut registry) = self.mcp_registry {
                 for tc in mcp_calls {
                     // Policy check
-                    let decision = policy::evaluate_tool(
-                        &tc.function.name,
-                        &tc.function.arguments,
-                        &self.project_root,
-                        &policy_config,
-                    );
+                    let decision = if let Some(metadata) =
+                        registry.tool_approval_metadata(&tc.function.name)
+                    {
+                        policy::evaluate_mcp_tool(&metadata, &tc.function.arguments, &policy_config)
+                    } else {
+                        policy::PolicyDecision::deny(
+                            format!("unknown MCP tool: {}", tc.function.name),
+                            format!("Blocked MCP: {}", tc.function.name),
+                            "MCP tool is not registered",
+                            policy::RiskLevel::Blocked,
+                            format!("Source: mcp:{}", tc.function.name),
+                        )
+                    };
                     let approved = match decision.action {
                         policy::PolicyAction::Allow => true,
                         policy::PolicyAction::Deny => {
@@ -2169,6 +2407,53 @@ impl Orchestrator {
                             }
                         }
                     };
+                    let mut hook_payload = HookPayload::new(
+                        HookEvent::PreToolUse,
+                        session_id.to_string(),
+                        project_root.clone(),
+                    );
+                    hook_payload.turn_id = Some(turn_id.to_string());
+                    hook_payload.tool_call_id = Some(tc.id.clone());
+                    hook_payload.tool_name = Some(tc.function.name.clone());
+                    hook_payload.arguments = Some(tc.function.arguments.clone());
+                    if let Some(pre_hooks) = crate::hooks::run_configured_hooks(
+                        HookEvent::PreToolUse,
+                        &hooks_config,
+                        &hook_payload,
+                        &project_root,
+                        policy_config.command_timeout_seconds,
+                    )
+                    .await
+                    {
+                        emit_hook_summary_event(
+                            event_tx,
+                            &event_log_store,
+                            &project_root,
+                            session_id,
+                            Some(turn_id),
+                            &pre_hooks,
+                        );
+                        if !pre_hooks.success() {
+                            let summary =
+                                format!("Blocked by pre_tool hook: {}", pre_hooks.brief());
+                            send_event(
+                                event_tx,
+                                AgentEvent::ToolExecuted {
+                                    tool_name: tc.function.name.clone(),
+                                    success: false,
+                                    summary: summary.clone(),
+                                },
+                            );
+                            let record = ToolResultRecord {
+                                tool_call_id: tc.id.clone(),
+                                name: tc.function.name.clone(),
+                                result: summary,
+                                is_error: true,
+                            };
+                            results.push((tc.clone(), record));
+                            continue;
+                        }
+                    }
 
                     // Execute MCP tool
                     let args = match crate::mcp::registry::parse_mcp_tool_arguments(
@@ -2202,6 +2487,47 @@ impl Orchestrator {
                             Err(e) => (e.to_string(), true),
                         };
                     let duration_ms = start.elapsed().as_millis() as u64;
+                    let mut post_payload = HookPayload::new(
+                        HookEvent::PostToolUse,
+                        session_id.to_string(),
+                        project_root.clone(),
+                    );
+                    post_payload.turn_id = Some(turn_id.to_string());
+                    post_payload.tool_call_id = Some(tc.id.clone());
+                    post_payload.tool_name = Some(tc.function.name.clone());
+                    post_payload.arguments = Some(tc.function.arguments.clone());
+                    post_payload.success = Some(!is_error);
+                    post_payload.summary =
+                        Some(crate::agent::utils::truncate_for_summary(&result_text, 200));
+                    post_payload.duration_ms = Some(duration_ms);
+                    if let Some(post_hooks) = crate::hooks::run_configured_hooks(
+                        HookEvent::PostToolUse,
+                        &hooks_config,
+                        &post_payload,
+                        &project_root,
+                        policy_config.command_timeout_seconds,
+                    )
+                    .await
+                    {
+                        emit_hook_summary_event(
+                            event_tx,
+                            &event_log_store,
+                            &project_root,
+                            session_id,
+                            Some(turn_id),
+                            &post_hooks,
+                        );
+                        if !post_hooks.success() {
+                            send_event(
+                                event_tx,
+                                AgentEvent::ToolExecuted {
+                                    tool_name: "hook.post_tool".to_string(),
+                                    success: false,
+                                    summary: post_hooks.brief(),
+                                },
+                            );
+                        }
+                    }
 
                     // Record in session history
                     let record = crate::deepseek::ToolCallRecord {
@@ -2504,6 +2830,41 @@ fn send_event(tx: &mpsc::UnboundedSender<AgentEvent>, event: AgentEvent) {
     if tx.send(event).is_err() {
         tracing::warn!("Agent event channel closed; event dropped");
     }
+}
+
+fn hook_summary_event(summary: &HookRunSummary) -> AgentEvent {
+    AgentEvent::HookExecuted {
+        event: summary.event,
+        success: summary.success(),
+        summary: summary.brief(),
+        command_count: summary.outcomes.len(),
+    }
+}
+
+fn emit_hook_summary_event(
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+    store: &Option<EventLogStore>,
+    project_root: &Path,
+    session_id: SessionId,
+    turn_id: Option<TurnId>,
+    summary: &HookRunSummary,
+) {
+    if let Some(store) = store {
+        let event = SessionEvent::new(
+            session_id,
+            turn_id,
+            SessionEventKind::HookExecuted {
+                event: summary.event.as_str().to_string(),
+                success: summary.success(),
+                summary: summary.brief(),
+                command_count: summary.outcomes.len(),
+            },
+        );
+        if let Err(err) = store.append(project_root, &event) {
+            tracing::warn!("failed to append hook event: {err}");
+        }
+    }
+    send_event(tx, hook_summary_event(summary));
 }
 
 fn send_reasoning_delta(tx: &mpsc::UnboundedSender<AgentEvent>, reasoning: &str) {
@@ -2860,6 +3221,224 @@ fn contains_any(value: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| value.contains(needle))
 }
 
+#[derive(Debug, Clone)]
+struct ContextualTurnInput {
+    routing_input: String,
+    task_description: String,
+    transient_context: Vec<String>,
+}
+
+impl ContextualTurnInput {
+    fn from_session(session: &Session, user_input: &str) -> Self {
+        let user_input = user_input.trim();
+        let standalone = || Self {
+            routing_input: user_input.to_string(),
+            task_description: user_input.to_string(),
+            transient_context: Vec::new(),
+        };
+
+        if !is_contextual_followup_request(user_input) {
+            return standalone();
+        }
+
+        let anchors = recent_user_context_anchors(session, user_input, 3);
+        let Some(latest_anchor) = anchors.last().cloned() else {
+            return standalone();
+        };
+
+        let use_chinese =
+            contains_cjk(user_input) || anchors.iter().any(|anchor| contains_cjk(anchor));
+        let anchor_lines = anchors
+            .iter()
+            .map(|anchor| format!("- {anchor}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parent_context = summarize_parent_context(session);
+        let context_note = if use_chinese {
+            format!(
+                "上下文续接说明：\n当前用户输入：{user_input}\n这个输入依赖最近对话。不要把它当成孤立的新任务；请延续最近用户目标。\n\n最近用户目标：\n{anchor_lines}\n\n{parent_context}"
+            )
+        } else {
+            format!(
+                "Context carry-over:\nCurrent user input: {user_input}\nThis input depends on the recent conversation. Do not treat it as a standalone task; continue the recent user goal.\n\nRecent user goals:\n{anchor_lines}\n\n{parent_context}"
+            )
+        };
+        let routing_input = format!("{user_input}\n\n{context_note}");
+
+        Self {
+            routing_input,
+            task_description: latest_anchor,
+            transient_context: vec![context_note],
+        }
+    }
+
+    fn routing_input(&self) -> &str {
+        &self.routing_input
+    }
+
+    fn task_description(&self) -> &str {
+        &self.task_description
+    }
+
+    fn transient_context(&self) -> &[String] {
+        &self.transient_context
+    }
+}
+
+fn recent_user_context_anchors(
+    session: &Session,
+    current_input: &str,
+    limit: usize,
+) -> Vec<String> {
+    let current_compact = compact_context_text(current_input);
+    let mut anchors = Vec::new();
+    for msg in session.messages.iter().rev() {
+        if msg.role != Role::User || msg.visibility != MessageVisibility::UserVisible {
+            continue;
+        }
+        let text = compact_context_text(&msg.content.to_string_lossy());
+        if text.is_empty()
+            || text == current_compact
+            || is_low_information_reply(&text)
+            || is_contextual_followup_request(&text)
+        {
+            continue;
+        }
+        anchors.push(truncate_context_anchor(&text, 360));
+        if anchors.len() >= limit {
+            break;
+        }
+    }
+    anchors.reverse();
+    anchors
+}
+
+fn compact_context_text(value: &str) -> String {
+    value
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn truncate_context_anchor(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let prefix = value.chars().take(max_chars).collect::<String>();
+    format!("{prefix}...")
+}
+
+fn is_contextual_followup_request(input: &str) -> bool {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let compact_len = trimmed.chars().filter(|ch| !ch.is_whitespace()).count();
+    if compact_len > 80 {
+        return false;
+    }
+
+    let lower = trimmed.to_lowercase();
+    let has_followup_phrase = contains_any(
+        &lower,
+        &[
+            "继续",
+            "接着",
+            "下一步",
+            "按上面",
+            "按照上面",
+            "按这个",
+            "按刚才",
+            "按之前",
+            "就这个",
+            "就按",
+            "开始干活",
+            "开干",
+            "去做",
+            "执行吧",
+            "开始执行",
+            "同意",
+            "可以",
+            "确认",
+            "批准",
+            "开启多智能体",
+            "打开多智能体",
+            "开多智能体",
+            "用多智能体",
+            "让多智能体",
+            "多智能体干活",
+            "跑多智能体",
+            "开蜂群",
+            "用蜂群",
+            "并行干活",
+            "continue",
+            "go ahead",
+            "do it",
+            "proceed",
+            "next step",
+            "use agents",
+            "run agents",
+            "start agents",
+            "run swarm",
+            "start swarm",
+            "approve",
+            "approved",
+        ],
+    );
+    if !has_followup_phrase {
+        return false;
+    }
+
+    let references_context = contains_any(
+        &lower,
+        &[
+            "上面", "这个", "刚才", "之前", "前面", "继续", "it", "that", "above", "previous",
+        ],
+    );
+    let has_explicit_path =
+        lower.contains("src/") || lower.contains(".rs") || lower.contains(".md");
+    !has_explicit_path || references_context
+}
+
+fn is_low_information_reply(input: &str) -> bool {
+    let normalized = input
+        .trim()
+        .trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '。' | '！' | '？' | '，' | ',' | '.' | '!' | '?' | ';' | '；'
+            )
+        })
+        .trim()
+        .to_lowercase();
+    matches!(
+        normalized.as_str(),
+        "同意"
+            | "继续"
+            | "好"
+            | "好的"
+            | "可以"
+            | "确认"
+            | "批准"
+            | "行"
+            | "嗯"
+            | "yes"
+            | "ok"
+            | "okay"
+            | "approve"
+            | "approved"
+            | "continue"
+            | "go ahead"
+            | "do it"
+            | "a"
+            | "s"
+            | "d"
+    )
+}
+
 fn is_unavailable_self_verification(output: &str) -> bool {
     output
         .to_ascii_lowercase()
@@ -2909,13 +3488,17 @@ fn summarize_parent_context(session: &Session) -> String {
 mod tests {
     use super::{
         changed_files_for_tool_call, emit_stream_chunk_deltas,
-        emit_stream_chunk_deltas_with_options, generate_plan_options, plan_execution_context,
-        plan_execution_prompt, plan_or_input_uses_chinese, plan_uses_chinese,
-        swarm_patch_approval_details, validate_swarm_patch_for_auto_apply, AgentEvent,
-        PlanExecutionState, PlanStepStatus,
+        emit_stream_chunk_deltas_with_options, generate_plan_options,
+        is_contextual_followup_request, plan_execution_context, plan_execution_prompt,
+        plan_or_input_uses_chinese, plan_uses_chinese, swarm_patch_approval_details,
+        validate_swarm_patch_for_auto_apply, AgentEvent, ContextualTurnInput, PlanExecutionState,
+        PlanStepStatus,
     };
     use crate::agent::swarm::{SwarmAgentRole, SwarmPendingPatch, SwarmResult};
-    use crate::deepseek::models::{StreamChunk, ToolCall, ToolCallFunction};
+    use crate::deepseek::models::{
+        MessageContent, MessageId, MessageVisibility, ProtocolMessage, ReasoningState, Role,
+        Session, SessionId, SessionMetadata, StreamChunk, ToolCall, ToolCallFunction, TurnId,
+    };
     use crate::plan::executor::PlanStep;
     use crate::plan::schema::{Plan, Risk, RiskLevel};
 
@@ -2946,6 +3529,91 @@ mod tests {
             recommended_model: None,
             thinking: None,
         }
+    }
+
+    fn session_with_user_messages(messages: &[&str]) -> Session {
+        Session {
+            id: SessionId::new_v4(),
+            name: None,
+            project_root: ".".into(),
+            messages: messages
+                .iter()
+                .map(|message| user_message(message))
+                .collect(),
+            reasoning_state: ReasoningState::default(),
+            tool_call_history: Vec::new(),
+            checkpoints: Vec::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            metadata: SessionMetadata::default(),
+        }
+    }
+
+    fn user_message(content: &str) -> ProtocolMessage {
+        ProtocolMessage {
+            id: MessageId::new_v4(),
+            role: Role::User,
+            content: MessageContent::from(content),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            tool_results: Vec::new(),
+            turn_id: TurnId::new_v4(),
+            sub_turn_id: None,
+            visibility: MessageVisibility::UserVisible,
+        }
+    }
+
+    #[test]
+    fn continuation_swarm_input_inherits_recent_user_context() {
+        let session = session_with_user_messages(&[
+            "请逐文件审查 review_report_v2.md，并对整个代码库做全量对抗审查。",
+        ]);
+
+        let turn_input = ContextualTurnInput::from_session(&session, "开启多智能体干活");
+
+        assert!(is_contextual_followup_request("开启多智能体干活"));
+        assert!(turn_input.routing_input().contains("全量对抗审查"));
+        assert!(turn_input
+            .routing_input()
+            .contains("不要把它当成孤立的新任务"));
+        assert_eq!(
+            turn_input.task_description(),
+            "请逐文件审查 review_report_v2.md，并对整个代码库做全量对抗审查。"
+        );
+        assert_eq!(turn_input.transient_context().len(), 1);
+    }
+
+    #[test]
+    fn continuation_context_skips_prior_low_information_turns() {
+        let session = session_with_user_messages(&[
+            "审核整个 CLI，重点检查 agent orchestrator 和 swarm 规划链路。",
+            "同意",
+            "继续",
+        ]);
+
+        let turn_input = ContextualTurnInput::from_session(&session, "开始干活");
+
+        assert!(turn_input.routing_input().contains("swarm 规划链路"));
+        assert!(!turn_input.task_description().contains("同意"));
+        assert!(!turn_input.task_description().contains("继续"));
+    }
+
+    #[test]
+    fn concrete_task_inputs_remain_standalone() {
+        let session = session_with_user_messages(&["审核整个 CLI。"]);
+
+        let turn_input =
+            ContextualTurnInput::from_session(&session, "修复 src/tui/app.rs 的审批弹窗位置");
+
+        assert_eq!(
+            turn_input.routing_input(),
+            "修复 src/tui/app.rs 的审批弹窗位置"
+        );
+        assert_eq!(
+            turn_input.task_description(),
+            "修复 src/tui/app.rs 的审批弹窗位置"
+        );
+        assert!(turn_input.transient_context().is_empty());
     }
 
     #[test]

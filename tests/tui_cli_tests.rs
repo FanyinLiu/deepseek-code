@@ -28,8 +28,8 @@ fn preview_tui_works_with_dumb_non_tty_stdio() {
 
     assert!(output.status.success(), "stderr={}", stderr(&output));
     let stdout = stdout(&output);
-    assert!(stdout.contains("DS-CODE"));
-    assert!(stdout.contains("Droid-style local workbench"));
+    assert!(stdout.contains("DSCODE"));
+    assert!(stdout.contains("DeepSeek V4 Flash"));
 }
 
 #[test]

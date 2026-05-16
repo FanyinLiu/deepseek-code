@@ -43,12 +43,20 @@ enum Commands {
         /// Resume a specific session by ID
         #[arg(long)]
         session: Option<String>,
+
+        /// Output format: text, json, stream-json
+        #[arg(long, value_enum, default_value_t = OutputFormatArg::Text)]
+        output_format: OutputFormatArg,
     },
 
     /// Ask a question with search context (read-only, no edits)
     Ask {
         /// The question to ask
         question: String,
+
+        /// Output format: text, json, stream-json
+        #[arg(long, value_enum, default_value_t = OutputFormatArg::Text)]
+        output_format: OutputFormatArg,
     },
 
     /// Search the project codebase
@@ -79,6 +87,10 @@ enum Commands {
         /// Enable thinking mode
         #[arg(short, long)]
         thinking: bool,
+
+        /// Output format: text, json, stream-json
+        #[arg(long, value_enum, default_value_t = OutputFormatArg::Text)]
+        output_format: OutputFormatArg,
     },
 
     /// List, resume, or export saved sessions
@@ -128,6 +140,37 @@ enum Commands {
     Agent {
         #[command(subcommand)]
         command: AgentCommands,
+    },
+
+    /// Manage MCP server configuration and status
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommands,
+    },
+
+    /// List built-in and custom slash commands
+    #[command(name = "commands")]
+    Catalog {
+        #[command(subcommand)]
+        command: CommandsCatalogCommands,
+    },
+
+    /// Explain resolved configuration and source precedence
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
+
+    /// Read or update local editable settings
+    Settings {
+        #[command(subcommand)]
+        command: SettingsCommands,
+    },
+
+    /// List, replay, or export saved sessions
+    Session {
+        #[command(subcommand)]
+        command: SessionCommands,
     },
 
     /// Record and inspect long-running mission dry-runs
@@ -204,6 +247,40 @@ enum PreviewTheme {
     Light,
     Dark,
     HighContrast,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum OutputFormatArg {
+    Text,
+    Json,
+    StreamJson,
+}
+
+impl OutputFormatArg {
+    fn turn_output_format(self) -> crate::cli::TurnOutputFormat {
+        match self {
+            Self::Text => crate::cli::TurnOutputFormat::Text,
+            Self::Json => crate::cli::TurnOutputFormat::Json,
+            Self::StreamJson => crate::cli::TurnOutputFormat::StreamJson,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum McpTransportArg {
+    Stdio,
+    Http,
+    Sse,
+}
+
+impl From<McpTransportArg> for crate::mcp::client::McpTransport {
+    fn from(value: McpTransportArg) -> Self {
+        match value {
+            McpTransportArg::Stdio => Self::Stdio,
+            McpTransportArg::Http => Self::Http,
+            McpTransportArg::Sse => Self::Sse,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -320,6 +397,144 @@ enum AgentTemplateArg {
 }
 
 #[derive(Subcommand)]
+enum McpCommands {
+    /// List configured MCP servers
+    List {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one configured MCP server
+    Get {
+        /// Server name
+        name: String,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show MCP status; add --connect for a live server check
+    Status {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+        /// Connect to configured servers and discover tools
+        #[arg(long)]
+        connect: bool,
+    },
+    /// Add or replace a project-local MCP server
+    Add {
+        /// Server name
+        name: String,
+        /// Transport kind
+        #[arg(long, value_enum, default_value_t = McpTransportArg::Stdio)]
+        transport: McpTransportArg,
+        /// Stdio command
+        #[arg(long)]
+        command: Option<String>,
+        /// Stdio command argument; repeat for multiple args
+        #[arg(long = "arg")]
+        args: Vec<String>,
+        /// HTTP/SSE endpoint URL
+        #[arg(long)]
+        url: Option<String>,
+        /// Environment entry KEY=VALUE; repeat for multiple env vars
+        #[arg(long = "env")]
+        env: Vec<String>,
+        /// Header entry KEY=VALUE; repeat for multiple headers
+        #[arg(long = "header")]
+        headers: Vec<String>,
+        /// Request timeout in milliseconds
+        #[arg(long)]
+        timeout_ms: Option<u64>,
+        /// Mark this server as trusted
+        #[arg(long)]
+        trust: bool,
+    },
+    /// Remove a project-local MCP server
+    Remove {
+        /// Server name
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum CommandsCatalogCommands {
+    /// List built-in slash commands and discovered custom command files
+    List {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+        /// Filter by name, alias, or description
+        #[arg(short, long)]
+        filter: Option<String>,
+    },
+    /// Show command search locations
+    Locations {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// Explain source precedence and effective config values
+    Explain {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SettingsCommands {
+    /// List editable settings
+    List {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read one setting
+    Get {
+        /// Setting key, such as ui.theme
+        key: String,
+    },
+    /// Write one project-local setting
+    Set {
+        /// Setting key, such as ui.theme
+        key: String,
+        /// Setting value
+        value: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionCommands {
+    /// List saved sessions for this project
+    List {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Replay stored session events without executing tools
+    Replay {
+        /// Session id, id prefix, name, or latest when omitted
+        session: Option<String>,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export a saved session transcript
+    Export {
+        /// Session id, id prefix, name, or latest when omitted
+        session: Option<String>,
+        /// Output format: markdown, json, text
+        #[arg(short, long, default_value = "markdown")]
+        format: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum MissionCommands {
     /// Create a new dry-run mission record
     New {
@@ -386,15 +601,48 @@ pub async fn run() -> Result<(), anyhow::Error> {
             thinking,
             model,
             session,
-        }) => cli::chat(prompt, thinking, model, cli.project_root, session).await,
-        Some(Commands::Ask { question }) => cli::ask(question, cli.project_root).await,
+            output_format,
+        }) => {
+            cli::chat(
+                prompt,
+                thinking,
+                model,
+                cli.project_root,
+                session,
+                output_format.turn_output_format(),
+            )
+            .await
+        }
+        Some(Commands::Ask {
+            question,
+            output_format,
+        }) => {
+            cli::ask(
+                question,
+                cli.project_root,
+                output_format.turn_output_format(),
+            )
+            .await
+        }
         Some(Commands::Search {
             query,
             code_only,
             limit,
         }) => cli::search(query, code_only, limit, cli.project_root).await,
         Some(Commands::Plan { task }) => cli::plan(task, cli.project_root).await,
-        Some(Commands::Run { task, thinking }) => cli::run(task, thinking, cli.project_root).await,
+        Some(Commands::Run {
+            task,
+            thinking,
+            output_format,
+        }) => {
+            cli::run(
+                task,
+                thinking,
+                cli.project_root,
+                output_format.turn_output_format(),
+            )
+            .await
+        }
         Some(Commands::Resume { session }) => cli::resume(session, cli.project_root).await,
         Some(Commands::Export { session_id, format }) => {
             cli::export(session_id, Some(format), cli.project_root).await
@@ -412,9 +660,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
             theme,
             elapsed_ms,
         }) => {
-            let root = cli.project_root.unwrap_or_else(|| {
-                crate::storage::find_project_root().unwrap_or_else(|| ".".into())
-            });
+            let root = crate::cli::resolve_project_root_or_cwd(cli.project_root);
             let scenario = match scenario {
                 PreviewScenario::Welcome => tui::app::PreviewSnapshotScenario::Welcome,
                 PreviewScenario::Workbench => tui::app::PreviewSnapshotScenario::Workbench,
@@ -506,6 +752,79 @@ pub async fn run() -> Result<(), anyhow::Error> {
                 }
             };
             cli::agent(command, cli.project_root).await
+        }
+        Some(Commands::Mcp { command }) => {
+            let command = match command {
+                McpCommands::List { json } => cli::mcp::McpCommand::List { json },
+                McpCommands::Get { name, json } => cli::mcp::McpCommand::Get { name, json },
+                McpCommands::Status { json, connect } => {
+                    cli::mcp::McpCommand::Status { json, connect }
+                }
+                McpCommands::Add {
+                    name,
+                    transport,
+                    command,
+                    args,
+                    url,
+                    env,
+                    headers,
+                    timeout_ms,
+                    trust,
+                } => cli::mcp::McpCommand::Add(cli::mcp::McpAddArgs {
+                    name,
+                    transport: transport.into(),
+                    command,
+                    args,
+                    url,
+                    env,
+                    headers,
+                    timeout_ms,
+                    trust,
+                }),
+                McpCommands::Remove { name } => cli::mcp::McpCommand::Remove { name },
+            };
+            cli::mcp(command, cli.project_root).await
+        }
+        Some(Commands::Catalog { command }) => {
+            let command = match command {
+                CommandsCatalogCommands::List { json, filter } => {
+                    cli::command_catalog::CommandCatalogCommand::List { json, filter }
+                }
+                CommandsCatalogCommands::Locations { json } => {
+                    cli::command_catalog::CommandCatalogCommand::Locations { json }
+                }
+            };
+            cli::command_catalog(command, cli.project_root).await
+        }
+        Some(Commands::Config { command }) => {
+            let command = match command {
+                ConfigCommands::Explain { json } => {
+                    cli::config_cmd::ConfigCommand::Explain { json }
+                }
+            };
+            cli::config_cmd(command, cli.project_root).await
+        }
+        Some(Commands::Settings { command }) => {
+            let command = match command {
+                SettingsCommands::List { json } => cli::settings::SettingsCommand::List { json },
+                SettingsCommands::Get { key } => cli::settings::SettingsCommand::Get { key },
+                SettingsCommands::Set { key, value } => {
+                    cli::settings::SettingsCommand::Set { key, value }
+                }
+            };
+            cli::settings(command, cli.project_root).await
+        }
+        Some(Commands::Session { command }) => {
+            let command = match command {
+                SessionCommands::List { json } => cli::session::SessionCommand::List { json },
+                SessionCommands::Replay { session, json } => {
+                    cli::session::SessionCommand::Replay { session, json }
+                }
+                SessionCommands::Export { session, format } => {
+                    cli::session::SessionCommand::Export { session, format }
+                }
+            };
+            cli::session(command, cli.project_root).await
         }
         Some(Commands::Mission { command }) => {
             let command = match command {

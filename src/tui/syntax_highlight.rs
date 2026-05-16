@@ -3,9 +3,11 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 use std::sync::OnceLock;
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{Style as SyntectStyle, ThemeSet};
+use syntect::highlighting::{Style as SyntectStyle, Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
+
+use crate::tui::theme;
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
@@ -16,6 +18,37 @@ fn syntax_set() -> &'static SyntaxSet {
 
 fn theme_set() -> &'static ThemeSet {
     THEME_SET.get_or_init(ThemeSet::load_defaults)
+}
+
+fn syntect_theme(ts: &ThemeSet) -> &Theme {
+    let candidates = syntect_theme_candidates(theme::active_theme());
+    candidates
+        .iter()
+        .find_map(|name| ts.themes.get(*name))
+        .or_else(|| ts.themes.get("base16-ocean.dark"))
+        .or_else(|| ts.themes.values().next())
+        .expect("syntect default theme set should not be empty")
+}
+
+fn syntect_theme_candidates(mode: theme::ThemeMode) -> &'static [&'static str] {
+    match mode {
+        theme::ThemeMode::Light => &[
+            "base16-ocean.light",
+            "InspiredGitHub",
+            "Solarized (light)",
+            "base16-ocean.dark",
+        ],
+        theme::ThemeMode::Auto | theme::ThemeMode::Dark => &[
+            "base16-ocean.dark",
+            "Solarized (dark)",
+            "base16-eighties.dark",
+        ],
+        theme::ThemeMode::HighContrast => &[
+            "base16-eighties.dark",
+            "base16-ocean.dark",
+            "Solarized (dark)",
+        ],
+    }
 }
 
 /// Convert a syntect color to ratatui Color.
@@ -55,8 +88,8 @@ pub fn highlight_code_block(code: &str, language: Option<&str>) -> Vec<Vec<Span<
         .or_else(|| ss.find_syntax_by_first_line(code))
         .unwrap_or_else(|| ss.find_syntax_plain_text());
 
-    let theme = &ts.themes["base16-ocean.dark"];
-    let mut highlighter = HighlightLines::new(syntax, theme);
+    let selected_theme = syntect_theme(ts);
+    let mut highlighter = HighlightLines::new(syntax, selected_theme);
 
     let mut lines: Vec<Vec<Span<'static>>> = Vec::new();
     for line in LinesWithEndings::from(code) {
@@ -114,6 +147,11 @@ pub enum MarkdownBlock {
     },
     Heading(u8, String),
     BlockQuote(String),
+    ListItem {
+        marker: String,
+        text: String,
+        indent: usize,
+    },
 }
 
 /// Parse markdown-like text into blocks for rendering.
@@ -121,6 +159,7 @@ pub enum MarkdownBlock {
 /// - ``` fenced code blocks
 /// - # headings
 /// - > blockquotes
+/// - ordered and unordered list items
 /// - plain text
 pub fn parse_markdown(text: &str) -> Vec<MarkdownBlock> {
     let mut blocks = Vec::new();
@@ -198,6 +237,18 @@ pub fn parse_markdown(text: &str) -> Vec<MarkdownBlock> {
             blocks.push(MarkdownBlock::BlockQuote(quote.to_string()));
             continue;
         }
+        if let Some((indent, marker, text)) = parse_list_item(line) {
+            if !current_text.is_empty() {
+                blocks.push(MarkdownBlock::Text(current_text.trim().to_string()));
+                current_text.clear();
+            }
+            blocks.push(MarkdownBlock::ListItem {
+                marker,
+                text,
+                indent,
+            });
+            continue;
+        }
 
         current_text.push_str(line);
         current_text.push('\n');
@@ -213,6 +264,32 @@ pub fn parse_markdown(text: &str) -> Vec<MarkdownBlock> {
     }
 
     blocks
+}
+
+fn parse_list_item(line: &str) -> Option<(usize, String, String)> {
+    let indent = line.chars().take_while(|ch| *ch == ' ').count();
+    let trimmed = line.get(indent..)?;
+    for marker in ["- ", "* ", "+ "] {
+        if let Some(text) = trimmed.strip_prefix(marker) {
+            return Some((indent, marker.trim().to_string(), text.trim().to_string()));
+        }
+    }
+
+    let marker_len = trimmed
+        .char_indices()
+        .take_while(|(_, ch)| ch.is_ascii_digit())
+        .last()
+        .map(|(idx, ch)| idx + ch.len_utf8())?;
+    let rest = trimmed.get(marker_len..)?;
+    let separator = rest.chars().next()?;
+    if !matches!(separator, '.' | ')') {
+        return None;
+    }
+    let text = rest.get(separator.len_utf8()..)?.trim_start();
+    if text.is_empty() {
+        return None;
+    }
+    Some((indent, trimmed[..=marker_len].to_string(), text.to_string()))
 }
 
 #[cfg(test)]
@@ -246,5 +323,30 @@ mod tests {
         assert_eq!(lines.len(), 3);
         // Each line should have at least one span
         assert!(!lines[0].is_empty());
+    }
+
+    #[test]
+    fn test_parse_markdown_lists() {
+        let text = "- first\n  1. nested";
+        let blocks = parse_markdown(text);
+        assert_eq!(blocks.len(), 2);
+        assert!(
+            matches!(&blocks[0], MarkdownBlock::ListItem { marker, text, indent } if marker == "-" && text == "first" && *indent == 0)
+        );
+        assert!(
+            matches!(&blocks[1], MarkdownBlock::ListItem { marker, text, indent } if marker == "1." && text == "nested" && *indent == 2)
+        );
+    }
+
+    #[test]
+    fn light_theme_uses_light_syntect_candidates() {
+        assert_eq!(
+            syntect_theme_candidates(theme::ThemeMode::Light)[0],
+            "base16-ocean.light"
+        );
+        assert_ne!(
+            syntect_theme_candidates(theme::ThemeMode::Light)[0],
+            "base16-ocean.dark"
+        );
     }
 }

@@ -193,7 +193,7 @@ fn run_command_def() -> ToolDefinition {
         tool_type: "function".into(),
         function: super::models::FunctionDef {
             name: "run_command".into(),
-            description: "Run a shell command in the project workspace. Requires approval.".into(),
+            description: "Run a shell command in the project workspace. Requires approval. Do not use this for file reading, directory listing, or code search commands such as cat, ls, find, grep, rg, sed, head, or tail; use read_file, list_dir, search_files, or search_code instead.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -455,5 +455,17 @@ mod tests {
         assert!(list.function.description.contains("absolute directories"));
         assert!(list.function.description.contains("user approval"));
         assert!(list.function.description.contains("forward slashes"));
+
+        let run = tools
+            .iter()
+            .find(|tool| tool.function.name == "run_command")
+            .expect("run_command tool");
+        assert!(run.function.description.contains("Requires approval"));
+        assert!(run
+            .function
+            .description
+            .contains("Do not use this for file reading"));
+        assert!(run.function.description.contains("cat, ls, find, grep, rg"));
+        assert!(run.function.description.contains("use read_file, list_dir"));
     }
 }

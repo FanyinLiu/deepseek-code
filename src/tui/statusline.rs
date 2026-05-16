@@ -6,13 +6,14 @@ use ratatui::{
     Frame,
 };
 
-use crate::deepseek::CacheUsage;
-use crate::tui::{status_bar::AppMode, theme};
+use crate::deepseek::{CacheUsage, DeepSeekModel};
+use crate::tui::{model_hint, status_bar::AppMode, theme};
 
 const CONTEXT_LIMIT_TOKENS: u64 = 1_000_000;
 
 pub struct StatuslineProps<'a> {
     pub mode: AppMode,
+    pub model: &'a DeepSeekModel,
     pub status: &'a str,
     pub tokens: u64,
     pub input_tokens: u64,
@@ -21,6 +22,7 @@ pub struct StatuslineProps<'a> {
     pub cost: f64,
     pub cache: Option<&'a CacheUsage>,
     pub permissions: &'a str,
+    pub context_limit: Option<u64>,
 }
 
 pub fn render_statusline(f: &mut Frame, area: Rect, props: StatuslineProps<'_>) {
@@ -45,10 +47,11 @@ pub fn render_statusline(f: &mut Frame, area: Rect, props: StatuslineProps<'_>) 
 }
 
 fn statusline_row(props: &StatuslineProps<'_>, canvas: Color, width: u16) -> Vec<Span<'static>> {
-    let colors = statusline_colors();
+    let colors = statusline_colors(theme::palette());
     let compact = width < 112;
     let narrow = width < 88;
     let mut spans = vec![Span::styled("  ", Style::default().bg(canvas))];
+    let context_limit = props.context_limit.unwrap_or(CONTEXT_LIMIT_TOKENS);
     push_chip(
         &mut spans,
         " ds-code ".to_string(),
@@ -60,7 +63,28 @@ fn statusline_row(props: &StatuslineProps<'_>, canvas: Color, width: u16) -> Vec
         &mut spans,
         format!(" {} ", props.mode.label()),
         colors.mode_bg,
-        colors.dark_fg,
+        colors.mode_fg,
+    );
+    push_gap(&mut spans, canvas);
+    push_chip(
+        &mut spans,
+        format!(" {} ", model_hint::model_display_name(props.model)),
+        colors.model_bg,
+        colors.model_fg,
+    );
+    push_gap(&mut spans, canvas);
+    push_chip(
+        &mut spans,
+        format!(" {} ", props.status),
+        colors.ctx_bg,
+        colors.ctx_fg,
+    );
+    push_gap(&mut spans, canvas);
+    push_chip(
+        &mut spans,
+        format!(" {} ", compact_permissions(props.permissions)),
+        colors.permissions_bg,
+        colors.permissions_fg,
     );
     if !narrow {
         push_gap(&mut spans, canvas);
@@ -68,7 +92,7 @@ fn statusline_row(props: &StatuslineProps<'_>, canvas: Color, width: u16) -> Vec
             &mut spans,
             " web:on ".to_string(),
             colors.web_bg,
-            colors.dark_fg,
+            colors.web_fg,
         );
     }
     if props.input_tokens > 0 || props.output_tokens > 0 {
@@ -78,7 +102,7 @@ fn statusline_row(props: &StatuslineProps<'_>, canvas: Color, width: u16) -> Vec
                 &mut spans,
                 format!(" ↑ {} ", token_count_label(props.input_tokens)),
                 colors.input_bg,
-                colors.dark_fg,
+                colors.input_fg,
             );
         }
         if props.output_tokens > 0 {
@@ -87,7 +111,7 @@ fn statusline_row(props: &StatuslineProps<'_>, canvas: Color, width: u16) -> Vec
                 &mut spans,
                 format!(" ↓ {} ", token_count_label(props.output_tokens)),
                 colors.tokens_bg,
-                colors.dark_fg,
+                colors.tokens_fg,
             );
         }
     }
@@ -97,87 +121,85 @@ fn statusline_row(props: &StatuslineProps<'_>, canvas: Color, width: u16) -> Vec
             &mut spans,
             format!(" agent {} ", token_count_label(props.agent_tokens)),
             colors.agent_bg,
-            colors.dark_fg,
+            colors.agent_fg,
         );
     }
-    push_gap(&mut spans, canvas);
-    push_chip(
-        &mut spans,
-        format!(" ¥{:.3} ", props.cost),
-        colors.cost_bg,
-        colors.dark_fg,
-    );
+    if !compact {
+        push_gap(&mut spans, canvas);
+        push_chip(
+            &mut spans,
+            format!(" ¥{:.3} ", props.cost),
+            colors.cost_bg,
+            colors.cost_fg,
+        );
+    }
     if let Some(cache) = props.cache.filter(|_| !compact) {
         push_gap(&mut spans, canvas);
         push_chip(
             &mut spans,
             format!(" cache {:.0}% ", cache.hit_rate() * 100.0),
             colors.cache_bg,
-            colors.dark_fg,
+            colors.cache_fg,
         );
     }
-    if !narrow {
+    if width >= 130 {
         push_gap(&mut spans, canvas);
         push_chip(
             &mut spans,
             " tools ✓ ".to_string(),
             colors.tools_bg,
-            colors.dark_fg,
+            colors.tools_fg,
         );
     }
     push_gap(&mut spans, canvas);
     push_chip(
         &mut spans,
-        format!(" {} ", compact_permissions(props.permissions)),
-        colors.permissions_bg,
-        colors.light_fg,
-    );
-    push_gap(&mut spans, canvas);
-    push_chip(
-        &mut spans,
-        context_segment_for_width(props.tokens, width),
+        context_segment_for_width(props.tokens, width, context_limit),
         colors.ctx_bg,
-        colors.dark_fg,
+        colors.ctx_fg,
     );
     spans
 }
 
-fn context_segment_for_width(tokens: u64, width: u16) -> String {
+fn context_segment_for_width(tokens: u64, width: u16, context_limit: u64) -> String {
     if width >= 112 {
-        context_segment(tokens)
+        context_segment(tokens, context_limit)
     } else if width >= 88 {
-        compact_context_segment(tokens)
+        compact_context_segment(tokens, context_limit)
     } else {
-        tiny_context_segment(tokens)
+        tiny_context_segment(tokens, context_limit)
     }
 }
 
-fn context_segment(tokens: u64) -> String {
-    let ratio = (tokens as f64 / CONTEXT_LIMIT_TOKENS as f64).clamp(0.0, 1.0);
+fn context_segment(tokens: u64, context_limit: u64) -> String {
+    let limit = context_limit.max(1);
+    let ratio = (tokens as f64 / limit as f64).clamp(0.0, 1.0);
     format!(
         " {}/{} ({:.1}%) ",
         compact_number(tokens),
-        context_limit_label(),
+        context_limit_label(context_limit),
         ratio * 100.0,
     )
 }
 
-fn compact_context_segment(tokens: u64) -> String {
-    let ratio = (tokens as f64 / CONTEXT_LIMIT_TOKENS as f64).clamp(0.0, 1.0);
+fn compact_context_segment(tokens: u64, context_limit: u64) -> String {
+    let limit = context_limit.max(1);
+    let ratio = (tokens as f64 / limit as f64).clamp(0.0, 1.0);
     format!(
         " {}/{} ({:.1}%) ",
         compact_number(tokens),
-        context_limit_label(),
+        context_limit_label(context_limit),
         ratio * 100.0,
     )
 }
 
-fn tiny_context_segment(tokens: u64) -> String {
-    let ratio = (tokens as f64 / CONTEXT_LIMIT_TOKENS as f64).clamp(0.0, 1.0);
+fn tiny_context_segment(tokens: u64, context_limit: u64) -> String {
+    let limit = context_limit.max(1);
+    let ratio = (tokens as f64 / limit as f64).clamp(0.0, 1.0);
     format!(
         " {}/{} {:.0}% ",
         compact_number(tokens),
-        context_limit_label(),
+        context_limit_label(context_limit),
         ratio * 100.0
     )
 }
@@ -197,8 +219,14 @@ fn token_count_label(value: u64) -> String {
     format!("{} {unit}", compact_number(value))
 }
 
-fn context_limit_label() -> &'static str {
-    "1M"
+fn context_limit_label(context_limit: u64) -> &'static str {
+    if context_limit >= 1_000_000 {
+        "1M"
+    } else if context_limit >= 1_000 {
+        "1K"
+    } else {
+        "tok"
+    }
 }
 
 fn compact_permissions(permissions: &str) -> &'static str {
@@ -225,35 +253,55 @@ struct StatuslineColors {
     project_bg: Color,
     project_fg: Color,
     ctx_bg: Color,
+    ctx_fg: Color,
     input_bg: Color,
+    input_fg: Color,
+    model_bg: Color,
+    model_fg: Color,
     mode_bg: Color,
+    mode_fg: Color,
     web_bg: Color,
+    web_fg: Color,
     tokens_bg: Color,
+    tokens_fg: Color,
     agent_bg: Color,
+    agent_fg: Color,
     cost_bg: Color,
+    cost_fg: Color,
     cache_bg: Color,
+    cache_fg: Color,
     tools_bg: Color,
+    tools_fg: Color,
     permissions_bg: Color,
-    dark_fg: Color,
-    light_fg: Color,
+    permissions_fg: Color,
 }
 
-fn statusline_colors() -> StatuslineColors {
+fn statusline_colors(p: theme::ThemePalette) -> StatuslineColors {
     StatuslineColors {
-        project_bg: Color::Rgb(36, 38, 42),
-        project_fg: Color::Rgb(230, 230, 220),
-        ctx_bg: Color::Rgb(244, 206, 22),
-        input_bg: Color::Rgb(255, 184, 77),
-        mode_bg: Color::Rgb(87, 142, 214),
-        web_bg: Color::Rgb(118, 184, 124),
-        tokens_bg: Color::Rgb(102, 204, 204),
-        agent_bg: Color::Rgb(158, 206, 106),
-        cost_bg: Color::Rgb(188, 139, 216),
-        cache_bg: Color::Rgb(144, 184, 104),
-        tools_bg: Color::Rgb(111, 191, 113),
-        permissions_bg: Color::Rgb(198, 72, 82),
-        dark_fg: Color::Rgb(20, 20, 18),
-        light_fg: Color::Rgb(255, 244, 230),
+        project_bg: p.accent,
+        project_fg: p.inverse_text,
+        ctx_bg: p.surface_alt,
+        ctx_fg: p.text,
+        input_bg: p.warning,
+        input_fg: p.inverse_text,
+        model_bg: p.info,
+        model_fg: p.inverse_text,
+        mode_bg: p.surface_alt,
+        mode_fg: p.text,
+        web_bg: p.success,
+        web_fg: p.inverse_text,
+        tokens_bg: p.info,
+        tokens_fg: p.inverse_text,
+        agent_bg: p.success,
+        agent_fg: p.inverse_text,
+        cost_bg: p.surface_alt,
+        cost_fg: p.text,
+        cache_bg: p.surface_alt,
+        cache_fg: p.secondary,
+        tools_bg: p.warning,
+        tools_fg: p.inverse_text,
+        permissions_bg: p.danger,
+        permissions_fg: p.inverse_text,
     }
 }
 
@@ -272,6 +320,7 @@ mod tests {
                     f.area(),
                     StatuslineProps {
                         mode: AppMode::Chat,
+                        model: &DeepSeekModel::Pro,
                         status: "ready",
                         tokens: 128,
                         input_tokens: 0,
@@ -280,6 +329,7 @@ mod tests {
                         cost: 0.001,
                         cache: None,
                         permissions: "permissions ask",
+                        context_limit: None,
                     },
                 );
             })
@@ -295,6 +345,7 @@ mod tests {
         assert!(!rendered.contains("Model:"));
         assert!(rendered.contains("ds-code"));
         assert!(rendered.contains("chat"));
+        assert!(rendered.contains("DeepSeek V4 Pro"));
         assert!(rendered.contains("128/1M (0.0%)"));
         assert!(!rendered.contains("tok "));
         assert!(!rendered.contains("↑"));
@@ -306,7 +357,7 @@ mod tests {
 
     #[test]
     fn context_segment_has_progress_and_compact_limit() {
-        let segment = context_segment(126_300);
+        let segment = context_segment(126_300, 1_000_000);
 
         assert_eq!(segment.trim(), "126.3k/1M (12.6%)");
     }
@@ -321,6 +372,7 @@ mod tests {
                     f.area(),
                     StatuslineProps {
                         mode: AppMode::Chat,
+                        model: &DeepSeekModel::Flash,
                         status: "ready",
                         tokens: 128,
                         input_tokens: 0,
@@ -329,6 +381,7 @@ mod tests {
                         cost: 0.001,
                         cache: None,
                         permissions: "permissions ask",
+                        context_limit: None,
                     },
                 );
             })
@@ -342,6 +395,7 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(rendered.contains("ask"));
+        assert!(rendered.contains("DeepSeek V4 Flash"));
         assert!(rendered.contains("128/1M (0.0%)"));
     }
 
@@ -355,6 +409,7 @@ mod tests {
                     f.area(),
                     StatuslineProps {
                         mode: AppMode::Run,
+                        model: &DeepSeekModel::Flash,
                         status: "working",
                         tokens: 5_700,
                         input_tokens: 742,
@@ -363,6 +418,7 @@ mod tests {
                         cost: 0.001,
                         cache: None,
                         permissions: "permissions ask",
+                        context_limit: None,
                     },
                 );
             })
@@ -390,6 +446,7 @@ mod tests {
                     f.area(),
                     StatuslineProps {
                         mode: AppMode::Run,
+                        model: &DeepSeekModel::Flash,
                         status: "working",
                         tokens: 5_700,
                         input_tokens: 54,
@@ -398,6 +455,7 @@ mod tests {
                         cost: 0.001,
                         cache: None,
                         permissions: "permissions ask",
+                        context_limit: None,
                     },
                 );
             })
@@ -425,6 +483,7 @@ mod tests {
                     f.area(),
                     StatuslineProps {
                         mode: AppMode::Chat,
+                        model: &DeepSeekModel::Flash,
                         status: "ready",
                         tokens: 0,
                         input_tokens: 0,
@@ -433,6 +492,7 @@ mod tests {
                         cost: 0.0,
                         cache: None,
                         permissions: "permissions ask",
+                        context_limit: None,
                     },
                 );
             })
@@ -461,6 +521,7 @@ mod tests {
                     f.area(),
                     StatuslineProps {
                         mode: AppMode::Run,
+                        model: &DeepSeekModel::Flash,
                         status: "working",
                         tokens: 16_160,
                         input_tokens: 0,
@@ -469,6 +530,7 @@ mod tests {
                         cost: 0.0,
                         cache: None,
                         permissions: "permissions ask",
+                        context_limit: None,
                     },
                 );
             })

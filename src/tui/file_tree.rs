@@ -28,6 +28,7 @@ pub struct FileTreeNode {
 pub struct FileTree {
     pub root: PathBuf,
     pub nodes: Vec<FileTreeNode>,
+    pub mention_paths: Vec<String>,
     pub selected: usize,
     pub scroll_offset: usize,
 }
@@ -38,6 +39,7 @@ impl FileTree {
         let mut tree = Self {
             root: root.clone(),
             nodes: Vec::new(),
+            mention_paths: Vec::new(),
             selected: 0,
             scroll_offset: 0,
         };
@@ -52,6 +54,7 @@ impl FileTree {
         if let Ok(entries) = scan_directory(&self.root) {
             self.nodes = entries;
         }
+        self.mention_paths = scan_mention_paths(&self.root).unwrap_or_default();
     }
 
     pub fn navigate_down(&mut self) {
@@ -116,6 +119,8 @@ impl FileTree {
     }
 }
 
+const MENTION_INDEX_LIMIT: usize = 20_000;
+
 fn scan_directory(dir: &Path) -> Result<Vec<FileTreeNode>, anyhow::Error> {
     let mut nodes = Vec::new();
     let walker = WalkBuilder::new(dir)
@@ -155,17 +160,66 @@ fn scan_directory(dir: &Path) -> Result<Vec<FileTreeNode>, anyhow::Error> {
     Ok(nodes)
 }
 
+fn scan_mention_paths(root: &Path) -> Result<Vec<String>, anyhow::Error> {
+    let root_path = root.to_path_buf();
+    let walker = WalkBuilder::new(root)
+        .hidden(true)
+        .git_ignore(true)
+        .filter_entry(move |entry| !should_skip_mention_entry(entry.path(), &root_path))
+        .build();
+
+    let mut paths = Vec::new();
+    for entry in walker {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let path = entry.path();
+        if path == root || !path.is_file() {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if rel.chars().any(char::is_whitespace) {
+            continue;
+        }
+        paths.push(rel);
+        if paths.len() >= MENTION_INDEX_LIMIT {
+            break;
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn should_skip_mention_entry(path: &Path, root: &Path) -> bool {
+    if path == root {
+        return false;
+    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            matches!(
+                name,
+                ".git" | "target" | "node_modules" | ".deepseek-code" | ".cache"
+            )
+        })
+}
+
 /// Render the file tree sidebar with clean card styling.
 pub fn render_file_tree(f: &mut Frame, area: Rect, tree: &FileTree) {
     if area.width < 4 || area.height < 4 {
         return;
     }
 
+    let palette = theme::palette();
     let block = Block::default()
         .title(Span::styled(
             " Files ",
             Style::default()
-                .fg(theme::ACCENT_AMBER)
+                .fg(palette.warning)
                 .add_modifier(Modifier::BOLD),
         ))
         .borders(Borders::ALL)
@@ -184,24 +238,24 @@ pub fn render_file_tree(f: &mut Frame, area: Rect, tree: &FileTree) {
         let indent = "  ".repeat(*depth);
         let (icon, icon_color) = if node.is_dir {
             if node.is_expanded {
-                ("▾ ", theme::ACCENT_AMBER)
+                ("▾ ", palette.warning)
             } else {
-                ("▸ ", theme::ACCENT_AMBER)
+                ("▸ ", palette.warning)
             }
         } else {
-            ("  ", theme::FG_SECONDARY)
+            ("  ", palette.secondary)
         };
 
         let _text = format!("{}{}{}", indent, icon, node.name);
         let style = if is_selected {
             Style::default()
-                .fg(theme::FG_PRIMARY)
-                .bg(theme::BG_CARD_HOVER)
+                .fg(palette.text)
+                .bg(palette.surface_alt)
                 .add_modifier(Modifier::BOLD)
         } else if node.is_dir {
-            Style::default().fg(theme::ACCENT_AMBER).bg(theme::BG_CARD)
+            Style::default().fg(palette.warning).bg(palette.surface)
         } else {
-            Style::default().fg(theme::FG_SECONDARY).bg(theme::BG_CARD)
+            Style::default().fg(palette.secondary).bg(palette.surface)
         };
 
         lines.push(Line::from(vec![
@@ -210,7 +264,7 @@ pub fn render_file_tree(f: &mut Frame, area: Rect, tree: &FileTree) {
                 icon,
                 Style::default()
                     .fg(icon_color)
-                    .bg(style.bg.unwrap_or(theme::BG_CARD)),
+                    .bg(style.bg.unwrap_or(palette.surface)),
             ),
             Span::styled(node.name.clone(), style),
         ]));

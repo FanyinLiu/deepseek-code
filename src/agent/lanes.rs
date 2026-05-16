@@ -63,8 +63,11 @@ fn has_local_context_intent(input: &str) -> bool {
         "open file",
         "local file",
         "computer file",
+        "computer folder",
         "my computer",
         "absolute path",
+        "local folder",
+        "folder",
         "show file",
         "show ",
         "list files",
@@ -84,11 +87,17 @@ fn has_local_context_intent(input: &str) -> bool {
         "打开文件",
         "电脑文件",
         "电脑里的文件",
+        "电脑里",
+        "电脑里面",
+        "电脑上的",
         "我的电脑",
         "本机文件",
         "本地文件",
         "本地目录",
+        "本地文件夹",
         "绝对路径",
+        "文件夹",
+        "目录",
         "项目结构",
         "目录结构",
         "文件结构",
@@ -139,6 +148,10 @@ mod tests {
     fn local_file_requests_use_tool_lane() {
         assert_eq!(classify_task("你能读取电脑里的文件吗"), TaskClass::Search);
         assert_eq!(classify_task("能读取我的电脑文件吗"), TaskClass::Search);
+        assert_eq!(
+            classify_task("检测一下电脑里面 ds文件夹的 deekseep code 文件夹"),
+            TaskClass::Search
+        );
         assert_eq!(classify_task("read my computer file"), TaskClass::Search);
         assert_eq!(classify_task("看一下项目结构"), TaskClass::Search);
         assert_eq!(classify_task("search code for ToolLoop"), TaskClass::Search);

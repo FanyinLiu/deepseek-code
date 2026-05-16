@@ -5,6 +5,7 @@ use anyhow::Context;
 use serde::Serialize;
 
 use crate::agent::subagent::SubagentRegistry;
+use crate::cli::resolve_project_root;
 use crate::storage;
 
 const MATRIX_RELATIVE_PATH: &str = "docs/cli_parity_matrix.md";
@@ -29,7 +30,7 @@ pub async fn features(
     command: FeaturesCommand,
     project_root: Option<PathBuf>,
 ) -> Result<(), anyhow::Error> {
-    let root = resolve_root(project_root);
+    let root = resolve_project_root(project_root, "features")?;
     match command {
         FeaturesCommand::Matrix { json } => {
             let matrix = matrix_payload(&root)?;
@@ -395,12 +396,6 @@ fn print_recommendation(recommendation: &FeatureRecommendation) {
 fn print_json<T: Serialize>(value: &T) -> Result<(), anyhow::Error> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
-}
-
-fn resolve_root(project_root: Option<PathBuf>) -> PathBuf {
-    project_root
-        .or_else(storage::find_project_root)
-        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn config_paths(project_root: &Path) -> ConfigPaths {

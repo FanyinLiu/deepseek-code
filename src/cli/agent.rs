@@ -11,6 +11,7 @@ use crate::agent::subagent::{
     PermissionMode, SubagentConfig, SubagentExecutor, SubagentRegistry, SubagentResult,
     SubagentTask,
 };
+use crate::cli::resolve_project_root;
 use crate::provider::{build_provider, Provider};
 use crate::storage;
 
@@ -69,7 +70,7 @@ pub async fn agent(
     command: AgentCommand,
     project_root: Option<PathBuf>,
 ) -> Result<(), anyhow::Error> {
-    let root = resolve_root(project_root);
+    let root = resolve_project_root(project_root, "agent")?;
     match command {
         AgentCommand::List { json } => {
             let payload = list_payload(&root);
@@ -252,7 +253,8 @@ fn validate_all(project_root: &Path) -> Result<Vec<AgentValidationReport>, anyho
             .flatten()
         {
             let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("md") {
+            let extension = path.extension().and_then(|value| value.to_str());
+            if !matches!(extension, Some("md" | "toml")) {
                 continue;
             }
             let Some(name) = path.file_stem().and_then(|value| value.to_str()) else {
@@ -266,9 +268,10 @@ fn validate_all(project_root: &Path) -> Result<Vec<AgentValidationReport>, anyho
 }
 
 fn validate_one(project_root: &Path, name: &str) -> Result<AgentValidationReport, anyhow::Error> {
-    let path = agent_file_for_name(project_root, name);
-    if path.exists() {
-        return Ok(validate_agent_file(name, &path));
+    for path in agent_files_for_name(project_root, name) {
+        if path.exists() {
+            return Ok(validate_agent_file(name, &path));
+        }
     }
 
     if BUILT_IN_AGENTS.contains(&name) {
@@ -303,13 +306,28 @@ fn validate_agent_file(name: &str, path: &Path) -> AgentValidationReport {
         }
     };
 
-    let prompt_body = markdown_body(&content);
+    let is_toml = path.extension().and_then(|value| value.to_str()) == Some("toml");
+    let prompt_body = if is_toml {
+        toml_prompt_body(&content)
+    } else {
+        markdown_body(&content).to_string()
+    };
     if prompt_body.trim().is_empty() {
         errors.push(issue("empty_prompt", "agent prompt body is empty"));
     }
-    warnings.extend(dangerous_instruction_warnings(prompt_body));
+    warnings.extend(dangerous_instruction_warnings(&prompt_body));
 
-    match SubagentRegistry::parse_markdown_agent(&content) {
+    let parsed = if is_toml {
+        toml::from_str::<SubagentConfig>(&content).map_err(|error| {
+            crate::agent::subagent::registry::AgentParseError {
+                message: format!("invalid toml agent: {error}"),
+            }
+        })
+    } else {
+        SubagentRegistry::parse_markdown_agent(&content)
+    };
+
+    match parsed {
         Ok(config) => {
             let known_tools = known_tool_names();
             for tool in &config.allowed_tools {
@@ -683,6 +701,13 @@ fn markdown_body(content: &str) -> &str {
     trimmed[end + 6..].trim()
 }
 
+fn toml_prompt_body(content: &str) -> String {
+    toml::from_str::<SubagentConfig>(content)
+        .ok()
+        .and_then(|config| config.system_prompt)
+        .unwrap_or_default()
+}
+
 fn dangerous_instruction_warnings(body: &str) -> Vec<AgentValidationIssue> {
     let lower = body.to_lowercase();
     let mut warnings = Vec::new();
@@ -744,14 +769,11 @@ fn validate_agent_name(name: &str) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-fn agent_file_for_name(project_root: &Path, name: &str) -> PathBuf {
-    SubagentRegistry::agents_dir(project_root).join(format!("{name}.md"))
-}
-
-fn resolve_root(project_root: Option<PathBuf>) -> PathBuf {
-    project_root
-        .or_else(storage::find_project_root)
-        .unwrap_or_else(|| PathBuf::from("."))
+fn agent_files_for_name(project_root: &Path, name: &str) -> [PathBuf; 2] {
+    [
+        SubagentRegistry::agents_dir(project_root).join(format!("{name}.md")),
+        SubagentRegistry::agents_dir(project_root).join(format!("{name}.toml")),
+    ]
 }
 
 #[cfg(test)]

@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use crate::agent::orchestrator::AgentEvent;
 use crate::agent::subagent::{SubagentConfig, SubagentTask, SubagentType};
 use crate::agent::supervisor::Supervisor;
+use crate::cli::resolve_project_root;
 use crate::provider::{build_provider, Provider};
 use crate::storage;
 
@@ -26,8 +27,7 @@ pub async fn review(
         anyhow::bail!("--parallel must be at least 1");
     }
 
-    let root = project_root
-        .unwrap_or_else(|| storage::find_project_root().unwrap_or_else(|| PathBuf::from(".")));
+    let root = resolve_project_root(project_root, "review")?;
     let config = storage::Config::load(Some(&root))?;
     let api_key = super::login::resolve_or_prompt_api_key(Some(&root))?;
     let provider = build_provider(&config.provider, api_key);

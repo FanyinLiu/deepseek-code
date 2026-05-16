@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::deepseek::{DeepSeekModel, ReasoningEffort, ThinkingMode};
-use crate::provider::{ProviderConfig, ProviderKind};
+use crate::policy::sandbox::{CommandSandboxConfig, CommandSandboxMode};
+use crate::provider::{ProviderConfig, ProviderEndpointConfig, ProviderKind};
 
 /// Full application configuration, resolved from layered sources.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -109,6 +110,8 @@ pub struct PolicyConfig {
     pub auto_mode: bool,
     #[serde(default)]
     pub autonomy_level: AutonomyLevel,
+    #[serde(default)]
+    pub command_sandbox: CommandSandboxConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -166,6 +169,17 @@ struct PartialCacheConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 struct PartialProviderConfig {
     default: Option<ProviderKind>,
+    deepseek: Option<PartialProviderEndpointConfig>,
+    openrouter: Option<PartialProviderEndpointConfig>,
+    #[serde(rename = "openai-compatible")]
+    openai_compatible: Option<PartialProviderEndpointConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialProviderEndpointConfig {
+    base_url: Option<String>,
+    pro_model: Option<String>,
+    flash_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -198,8 +212,11 @@ struct PartialSubagentConfig {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct PartialHooksConfig {
+    user_prompt_submit: Option<Vec<String>>,
     pre_tool: Option<Vec<String>>,
     post_tool: Option<Vec<String>>,
+    session_start: Option<Vec<String>>,
+    session_end: Option<Vec<String>>,
     stop: Option<Vec<String>>,
 }
 
@@ -211,9 +228,12 @@ struct PartialMcpConfig {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct PartialMcpServerEntryConfig {
+    transport: Option<crate::mcp::client::McpTransport>,
     command: Option<String>,
     args: Option<Vec<String>>,
     env: Option<std::collections::HashMap<String, String>>,
+    url: Option<String>,
+    headers: Option<std::collections::HashMap<String, String>>,
     include_tools: Option<Vec<String>>,
     exclude_tools: Option<Vec<String>>,
     trust: Option<bool>,
@@ -231,6 +251,15 @@ struct PartialPolicyConfig {
     normalize_unicode_commands: Option<bool>,
     auto_mode: Option<bool>,
     autonomy_level: Option<AutonomyLevel>,
+    command_sandbox: Option<PartialCommandSandboxConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PartialCommandSandboxConfig {
+    mode: Option<CommandSandboxMode>,
+    network_access: Option<bool>,
+    readable_roots: Option<Vec<PathBuf>>,
+    writable_roots: Option<Vec<PathBuf>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -279,9 +308,15 @@ impl AutonomyLevel {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HooksConfig {
     #[serde(default)]
+    pub user_prompt_submit: Vec<String>,
+    #[serde(default)]
     pub pre_tool: Vec<String>,
     #[serde(default)]
     pub post_tool: Vec<String>,
+    #[serde(default)]
+    pub session_start: Vec<String>,
+    #[serde(default)]
+    pub session_end: Vec<String>,
     #[serde(default)]
     pub stop: Vec<String>,
 }
@@ -435,6 +470,7 @@ impl Default for PolicyConfig {
             normalize_unicode_commands: true,
             auto_mode: false,
             autonomy_level: AutonomyLevel::Off,
+            command_sandbox: CommandSandboxConfig::default(),
         }
     }
 }
@@ -580,6 +616,106 @@ impl Config {
         Ok(config)
     }
 
+    /// Persist the interactive settings surface to project-local config.
+    ///
+    /// This writes only non-secret UI/runtime knobs that can be changed from
+    /// the TUI settings panel. It intentionally avoids serializing the resolved
+    /// full config because the resolved config may include a user-global API key.
+    pub fn save_project_local_settings(
+        &self,
+        project_root: &std::path::Path,
+    ) -> Result<PathBuf, anyhow::Error> {
+        let root = normalize_project_root(project_root);
+        let config_dir = root.join(".deepseek-code");
+        std::fs::create_dir_all(&config_dir)?;
+        let path = config_dir.join("local.toml");
+
+        let mut value = if path.exists() {
+            std::fs::read_to_string(&path)?
+                .parse::<toml::Value>()
+                .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()))
+        } else {
+            toml::Value::Table(toml::map::Map::new())
+        };
+        if !value.is_table() {
+            value = toml::Value::Table(toml::map::Map::new());
+        }
+
+        set_toml_string(
+            &mut value,
+            "model",
+            "default",
+            self.model.default.to_string(),
+        );
+        set_toml_string(&mut value, "model", "heavy", self.model.heavy.to_string());
+        set_toml_string(
+            &mut value,
+            "model",
+            "thinking_mode",
+            self.model.thinking_mode.to_string(),
+        );
+        set_toml_string(
+            &mut value,
+            "model",
+            "reasoning_effort",
+            self.model.reasoning_effort.to_string(),
+        );
+        set_toml_string(
+            &mut value,
+            "provider",
+            "default",
+            self.provider.default.as_str().to_string(),
+        );
+        set_toml_string(&mut value, "ui", "theme", self.ui.theme.clone());
+        set_toml_bool(
+            &mut value,
+            "ui",
+            "show_reasoning_summary",
+            self.ui.show_reasoning_summary,
+        );
+        set_toml_bool(
+            &mut value,
+            "ui",
+            "show_raw_reasoning",
+            self.ui.show_raw_reasoning,
+        );
+        set_toml_bool(&mut value, "ui", "show_cache_hud", self.ui.show_cache_hud);
+        set_toml_string(
+            &mut value,
+            "policy",
+            "autonomy_level",
+            self.policy.autonomy_level.as_str().to_string(),
+        );
+        set_toml_bool(
+            &mut value,
+            "policy",
+            "require_approval_for_write",
+            self.policy.require_approval_for_write,
+        );
+        set_toml_bool(
+            &mut value,
+            "policy",
+            "require_approval_for_command",
+            self.policy.require_approval_for_command,
+        );
+        set_toml_bool(
+            &mut value,
+            "policy",
+            "network_access",
+            self.policy.network_access,
+        );
+        set_toml_bool(&mut value, "mcp", "enabled", self.mcp.enabled);
+        set_toml_integer(
+            &mut value,
+            "subagent",
+            "max_parallel",
+            self.subagent.max_parallel as i64,
+        );
+
+        std::fs::write(&path, toml::to_string_pretty(&value)?)?;
+        Ok(path)
+    }
+
     fn merge_with_config_patch(self, patch: PartialConfig) -> Self {
         let Self {
             api_key,
@@ -643,6 +779,37 @@ impl Config {
             hooks: hooks.merge_hooks(patch.hooks),
         }
     }
+}
+
+fn toml_table_mut<'a>(
+    root: &'a mut toml::Value,
+    table: &str,
+) -> &'a mut toml::map::Map<String, toml::Value> {
+    let root_table = root
+        .as_table_mut()
+        .expect("root config value is normalized to a table");
+    root_table
+        .entry(table.to_string())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    if !root_table.get(table).is_some_and(toml::Value::is_table) {
+        root_table.insert(table.to_string(), toml::Value::Table(toml::map::Map::new()));
+    }
+    root_table
+        .get_mut(table)
+        .and_then(toml::Value::as_table_mut)
+        .expect("table entry was just created")
+}
+
+fn set_toml_string(root: &mut toml::Value, table: &str, key: &str, value: String) {
+    toml_table_mut(root, table).insert(key.to_string(), toml::Value::String(value));
+}
+
+fn set_toml_bool(root: &mut toml::Value, table: &str, key: &str, value: bool) {
+    toml_table_mut(root, table).insert(key.to_string(), toml::Value::Boolean(value));
+}
+
+fn set_toml_integer(root: &mut toml::Value, table: &str, key: &str, value: i64) {
+    toml_table_mut(root, table).insert(key.to_string(), toml::Value::Integer(value));
 }
 
 fn merge_profiles(
@@ -742,6 +909,24 @@ impl ProviderConfig {
         };
         Self {
             default: patch.default.unwrap_or(self.default),
+            deepseek: self.deepseek.merge_provider_endpoint(patch.deepseek),
+            openrouter: self.openrouter.merge_provider_endpoint(patch.openrouter),
+            openai_compatible: self
+                .openai_compatible
+                .merge_provider_endpoint(patch.openai_compatible),
+        }
+    }
+}
+
+impl ProviderEndpointConfig {
+    fn merge_provider_endpoint(self, patch: Option<PartialProviderEndpointConfig>) -> Self {
+        let Some(patch) = patch else {
+            return self;
+        };
+        Self {
+            base_url: patch.base_url.or(self.base_url),
+            pro_model: patch.pro_model.or(self.pro_model),
+            flash_model: patch.flash_model.or(self.flash_model),
         }
     }
 }
@@ -772,6 +957,23 @@ impl PolicyConfig {
                 .unwrap_or(self.normalize_unicode_commands),
             auto_mode: patch.auto_mode.unwrap_or(self.auto_mode),
             autonomy_level: patch.autonomy_level.unwrap_or(self.autonomy_level),
+            command_sandbox: self
+                .command_sandbox
+                .merge_command_sandbox(patch.command_sandbox),
+        }
+    }
+}
+
+impl CommandSandboxConfig {
+    fn merge_command_sandbox(self, patch: Option<PartialCommandSandboxConfig>) -> Self {
+        let Some(patch) = patch else {
+            return self;
+        };
+        Self {
+            mode: patch.mode.unwrap_or(self.mode),
+            network_access: patch.network_access.unwrap_or(self.network_access),
+            readable_roots: patch.readable_roots.unwrap_or(self.readable_roots),
+            writable_roots: patch.writable_roots.unwrap_or(self.writable_roots),
         }
     }
 }
@@ -882,8 +1084,11 @@ impl HooksConfig {
             return self;
         };
         Self {
+            user_prompt_submit: patch.user_prompt_submit.unwrap_or(self.user_prompt_submit),
             pre_tool: patch.pre_tool.unwrap_or(self.pre_tool),
             post_tool: patch.post_tool.unwrap_or(self.post_tool),
+            session_start: patch.session_start.unwrap_or(self.session_start),
+            session_end: patch.session_end.unwrap_or(self.session_end),
             stop: patch.stop.unwrap_or(self.stop),
         }
     }
@@ -919,9 +1124,12 @@ impl McpConfig {
 impl McpServerEntryConfig {
     fn merge_mcp_server(self, patch: PartialMcpServerEntryConfig) -> Self {
         Self {
-            command: patch.command.unwrap_or(self.command),
+            transport: patch.transport.unwrap_or(self.transport),
+            command: patch.command.or(self.command),
             args: patch.args.unwrap_or(self.args),
             env: patch.env.or(self.env),
+            url: patch.url.or(self.url),
+            headers: patch.headers.or(self.headers),
             include_tools: patch.include_tools.unwrap_or(self.include_tools),
             exclude_tools: patch.exclude_tools.unwrap_or(self.exclude_tools),
             trust: patch.trust.unwrap_or(self.trust),
@@ -932,10 +1140,20 @@ impl McpServerEntryConfig {
 
 impl PartialMcpServerEntryConfig {
     fn into_mcp_server(self) -> Option<McpServerEntryConfig> {
+        let transport = self.transport.unwrap_or_default();
+        if transport == crate::mcp::client::McpTransport::Stdio && self.command.is_none() {
+            return None;
+        }
+        if transport != crate::mcp::client::McpTransport::Stdio && self.url.is_none() {
+            return None;
+        }
         Some(McpServerEntryConfig {
-            command: self.command?,
+            transport,
+            command: self.command,
             args: self.args.unwrap_or_default(),
             env: self.env,
+            url: self.url,
+            headers: self.headers,
             include_tools: self.include_tools.unwrap_or_default(),
             exclude_tools: self.exclude_tools.unwrap_or_default(),
             trust: self.trust.unwrap_or(false),
@@ -980,11 +1198,18 @@ pub struct McpConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerEntryConfig {
-    pub command: String,
+    #[serde(default)]
+    pub transport: crate::mcp::client::McpTransport,
+    #[serde(default)]
+    pub command: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
     pub env: Option<std::collections::HashMap<String, String>>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub headers: Option<std::collections::HashMap<String, String>>,
     #[serde(default)]
     pub include_tools: Vec<String>,
     #[serde(default)]
@@ -1004,6 +1229,23 @@ fn default_mcp_timeout_ms() -> u64 {
 pub fn find_project_root() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
     Some(find_project_root_from(&cwd))
+}
+
+/// Find the project root by looking for a .deepseek-code directory or .git directory.
+/// Returns `None` if no root markers can be found.
+#[must_use]
+pub fn find_project_root_strict() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    find_project_root_strict_from(&cwd)
+}
+
+fn find_project_root_strict_from(cwd: &Path) -> Option<PathBuf> {
+    for ancestor in cwd.ancestors() {
+        if ancestor.join(".deepseek-code").is_dir() || ancestor.join(".git").exists() {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
 }
 
 fn find_project_root_from(cwd: &Path) -> PathBuf {
@@ -1064,6 +1306,76 @@ default = "deepseek"
         assert_eq!(
             loaded.provider.default,
             crate::provider::ProviderKind::DeepSeek
+        );
+    }
+
+    #[test]
+    fn save_project_local_settings_preserves_secrets_out_of_local_file() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut config = Config {
+            api_key: Some("sk-global-secret".to_string()),
+            ..Config::default()
+        };
+        config.provider.default = ProviderKind::OpenRouter;
+        config.ui.theme = "dark".to_string();
+        config.policy.require_approval_for_command = false;
+        config.mcp.enabled = true;
+        config.subagent.max_parallel = 6;
+
+        let path = config
+            .save_project_local_settings(root.path())
+            .expect("settings save should succeed");
+        let content = std::fs::read_to_string(path).expect("read saved config");
+
+        assert!(!content.contains("sk-global-secret"));
+        assert!(content.contains("[provider]"));
+        assert!(content.contains("default = \"openrouter\""));
+        assert!(content.contains("[ui]"));
+        assert!(content.contains("theme = \"dark\""));
+        assert!(content.contains("[mcp]"));
+        assert!(content.contains("enabled = true"));
+        assert!(content.contains("[subagent]"));
+        assert!(content.contains("max_parallel = 6"));
+    }
+
+    #[test]
+    fn provider_layer_merges_endpoint_overrides() {
+        let base = Config {
+            provider: ProviderConfig {
+                openrouter: ProviderEndpointConfig {
+                    base_url: Some("https://old.example/v1".to_string()),
+                    pro_model: Some("old-pro".to_string()),
+                    flash_model: None,
+                },
+                ..ProviderConfig::default()
+            },
+            ..Config::default()
+        };
+        let patch = parse_config_patch(
+            r#"
+[provider]
+default = "openrouter"
+
+[provider.openrouter]
+flash_model = "deepseek/deepseek-v4-flash"
+"#,
+        )
+        .expect("parse patch");
+
+        let merged = base.merge_with_config_patch(patch);
+
+        assert_eq!(merged.provider.default, ProviderKind::OpenRouter);
+        assert_eq!(
+            merged.provider.openrouter.base_url.as_deref(),
+            Some("https://old.example/v1")
+        );
+        assert_eq!(
+            merged.provider.openrouter.pro_model.as_deref(),
+            Some("old-pro")
+        );
+        assert_eq!(
+            merged.provider.openrouter.flash_model.as_deref(),
+            Some("deepseek/deepseek-v4-flash")
         );
     }
 
@@ -1233,8 +1545,11 @@ model = "deepseek-v4-pro"
     fn hooks_layer_partial_override_preserves_unspecified_lists() {
         let base = Config {
             hooks: HooksConfig {
+                user_prompt_submit: Vec::new(),
                 pre_tool: vec!["pre".to_string()],
                 post_tool: vec!["post".to_string()],
+                session_start: Vec::new(),
+                session_end: Vec::new(),
                 stop: Vec::new(),
             },
             ..Config::default()
@@ -1243,6 +1558,7 @@ model = "deepseek-v4-pro"
             r#"
 [hooks]
 stop = ["stop"]
+session_end = ["end"]
 "#,
         )
         .expect("parse patch");
@@ -1251,6 +1567,7 @@ stop = ["stop"]
 
         assert_eq!(merged.hooks.pre_tool, ["pre"]);
         assert_eq!(merged.hooks.post_tool, ["post"]);
+        assert_eq!(merged.hooks.session_end, ["end"]);
         assert_eq!(merged.hooks.stop, ["stop"]);
     }
 
@@ -1260,9 +1577,12 @@ stop = ["stop"]
         servers.insert(
             "filesystem".to_string(),
             McpServerEntryConfig {
-                command: "mcp-filesystem".to_string(),
+                transport: crate::mcp::client::McpTransport::Stdio,
+                command: Some("mcp-filesystem".to_string()),
                 args: vec!["--root".to_string(), ".".to_string()],
                 env: None,
+                url: None,
+                headers: None,
                 include_tools: vec!["read".to_string()],
                 exclude_tools: Vec::new(),
                 trust: false,
@@ -1287,10 +1607,44 @@ timeout_ms = 2000
         let merged = base.merge_with_config_patch(patch);
         let server = merged.mcp.servers.get("filesystem").expect("server");
 
-        assert_eq!(server.command, "mcp-filesystem");
+        assert_eq!(server.transport, crate::mcp::client::McpTransport::Stdio);
+        assert_eq!(server.command.as_deref(), Some("mcp-filesystem"));
         assert_eq!(server.args, ["--root", "."]);
         assert_eq!(server.include_tools, ["read"]);
         assert_eq!(server.timeout_ms, 2_000);
+    }
+
+    #[test]
+    fn mcp_layer_adds_http_server_without_command() {
+        let patch = parse_config_patch(
+            r#"
+[mcp]
+enabled = true
+
+[mcp.servers.remote]
+transport = "http"
+url = "https://mcp.example.com/rpc"
+headers = { Authorization = "Bearer token" }
+timeout_ms = 1500
+"#,
+        )
+        .expect("parse patch");
+
+        let merged = Config::default().merge_with_config_patch(patch);
+        let server = merged.mcp.servers.get("remote").expect("server");
+
+        assert_eq!(server.transport, crate::mcp::client::McpTransport::Http);
+        assert_eq!(server.command, None);
+        assert_eq!(server.url.as_deref(), Some("https://mcp.example.com/rpc"));
+        assert_eq!(
+            server
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("Authorization"))
+                .map(String::as_str),
+            Some("Bearer token")
+        );
+        assert_eq!(server.timeout_ms, 1_500);
     }
 
     #[test]
@@ -1305,6 +1659,22 @@ timeout_ms = 2000
         .expect("write git file");
 
         assert_eq!(find_project_root_from(&child), root.path());
+    }
+
+    #[test]
+    fn find_project_root_strict_requires_marker() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let child = root.path().join("child");
+        std::fs::create_dir_all(&child).expect("create child");
+
+        assert_eq!(find_project_root_strict_from(&child), None);
+
+        std::fs::write(child.join(".deepseek-code"), "").expect("create marker file");
+        assert_eq!(find_project_root_strict_from(&child), None);
+
+        std::fs::remove_file(child.join(".deepseek-code")).expect("remove marker file");
+        std::fs::create_dir(child.join(".deepseek-code")).expect("create marker directory");
+        assert_eq!(find_project_root_strict_from(&child), Some(child.clone()));
     }
 
     #[test]
@@ -1390,6 +1760,8 @@ timeout_ms = 2500
             .get("filesystem")
             .expect("filesystem server should exist");
 
+        assert_eq!(server.transport, crate::mcp::client::McpTransport::Stdio);
+        assert_eq!(server.command.as_deref(), Some("npx"));
         assert_eq!(server.include_tools, vec!["read_file", "list_directory"]);
         assert_eq!(server.exclude_tools, vec!["write_file"]);
         assert!(server.trust);
@@ -1413,12 +1785,88 @@ command = "npx"
             .get("filesystem")
             .expect("filesystem server should exist");
 
+        assert_eq!(server.transport, crate::mcp::client::McpTransport::Stdio);
+        assert_eq!(server.command.as_deref(), Some("npx"));
         assert!(server.include_tools.is_empty());
         assert!(server.exclude_tools.is_empty());
         assert!(!server.trust);
         assert_eq!(
             server.timeout_ms,
             crate::mcp::client::DEFAULT_MCP_TIMEOUT_MS
+        );
+    }
+
+    #[test]
+    fn mcp_server_config_parses_http_and_sse_transports() {
+        let config: McpConfig = toml::from_str(
+            r#"
+enabled = true
+
+[servers.remote]
+transport = "http"
+url = "https://mcp.example.com/rpc"
+headers = { Authorization = "Bearer token", "X-MCP" = "1" }
+
+[servers.events]
+transport = "sse"
+url = "https://mcp.example.com/events"
+"#,
+        )
+        .expect("MCP remote config should deserialize");
+
+        let remote = config.servers.get("remote").expect("remote server");
+        let events = config.servers.get("events").expect("events server");
+
+        assert_eq!(remote.transport, crate::mcp::client::McpTransport::Http);
+        assert_eq!(remote.command, None);
+        assert_eq!(remote.url.as_deref(), Some("https://mcp.example.com/rpc"));
+        assert_eq!(
+            remote
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get("X-MCP"))
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(events.transport, crate::mcp::client::McpTransport::Sse);
+        assert_eq!(events.command, None);
+        assert_eq!(
+            events.url.as_deref(),
+            Some("https://mcp.example.com/events")
+        );
+    }
+
+    #[test]
+    fn policy_command_sandbox_merges_nested_config() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config_dir = root.path().join(".deepseek-code");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        std::fs::write(
+            config_dir.join("config.toml"),
+            r#"
+[policy.command_sandbox]
+mode = "strict"
+network_access = true
+readable_roots = ["/usr/local"]
+writable_roots = ["/tmp/ds"]
+"#,
+        )
+        .expect("write config");
+
+        let loaded = Config::load(Some(root.path())).expect("load config");
+
+        assert_eq!(
+            loaded.policy.command_sandbox.mode,
+            CommandSandboxMode::Strict
+        );
+        assert!(loaded.policy.command_sandbox.network_access);
+        assert_eq!(
+            loaded.policy.command_sandbox.readable_roots,
+            vec![PathBuf::from("/usr/local")]
+        );
+        assert_eq!(
+            loaded.policy.command_sandbox.writable_roots,
+            vec![PathBuf::from("/tmp/ds")]
         );
     }
 }

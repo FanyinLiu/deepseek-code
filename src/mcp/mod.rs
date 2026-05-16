@@ -6,5 +6,5 @@ pub mod client;
 pub mod protocol;
 pub mod registry;
 
-pub use client::{McpClient, McpServerConfig};
+pub use client::{McpClient, McpServerConfig, McpTransport};
 pub use registry::McpRegistry;

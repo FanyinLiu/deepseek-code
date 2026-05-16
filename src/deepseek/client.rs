@@ -16,6 +16,8 @@ pub struct DeepSeekClient {
     http: HttpClient,
     api_key: String,
     base_url: String,
+    pro_model_name: Option<String>,
+    flash_model_name: Option<String>,
 }
 
 impl DeepSeekClient {
@@ -29,6 +31,8 @@ impl DeepSeekClient {
                 .expect("failed to build HTTP client"),
             api_key,
             base_url: DEEPSEEK_BASE_URL.to_string(),
+            pro_model_name: None,
+            flash_model_name: None,
         }
     }
 
@@ -36,6 +40,43 @@ impl DeepSeekClient {
     pub fn with_base_url(mut self, url: &str) -> Self {
         self.base_url = url.to_string();
         self
+    }
+
+    #[must_use]
+    pub fn with_model_names(
+        mut self,
+        pro_model: Option<String>,
+        flash_model: Option<String>,
+    ) -> Self {
+        self.pro_model_name = pro_model;
+        self.flash_model_name = flash_model;
+        self
+    }
+
+    fn map_chat_request_model(&self, req: &ChatRequest) -> ChatRequest {
+        let mut mapped = req.clone();
+        mapped.model = self.provider_model_name(&req.model);
+        mapped
+    }
+
+    fn map_fim_request_model(&self, req: &super::fim::FimRequest) -> super::fim::FimRequest {
+        let mut mapped = req.clone();
+        mapped.model = self.provider_model_name(&req.model);
+        mapped
+    }
+
+    fn provider_model_name(&self, model: &str) -> String {
+        match model {
+            "deepseek-v4-pro" | "deepseek-reasoner" => self
+                .pro_model_name
+                .clone()
+                .unwrap_or_else(|| model.to_string()),
+            "deepseek-v4-flash" | "deepseek-chat" => self
+                .flash_model_name
+                .clone()
+                .unwrap_or_else(|| model.to_string()),
+            other => other.to_string(),
+        }
     }
 
     async fn require_success(
@@ -52,11 +93,12 @@ impl DeepSeekClient {
     /// Non-streaming chat completion.
     pub async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, DeepSeekError> {
         let url = format!("{}/chat/completions", self.base_url);
+        let req = self.map_chat_request_model(req);
         let response = self
             .http
             .post(&url)
             .bearer_auth(&self.api_key)
-            .json(req)
+            .json(&req)
             .send()
             .await?;
 
@@ -100,11 +142,12 @@ impl DeepSeekClient {
     ) -> Result<impl tokio_stream::Stream<Item = Result<StreamEvent, DeepSeekError>>, DeepSeekError>
     {
         let url = format!("{}/chat/completions", self.base_url);
+        let req = self.map_chat_request_model(req);
         let response = self
             .http
             .post(&url)
             .bearer_auth(&self.api_key)
-            .json(req)
+            .json(&req)
             .send()
             .await?;
 
@@ -154,11 +197,12 @@ impl DeepSeekClient {
         req: &super::fim::FimRequest,
     ) -> Result<super::fim::FimResponse, DeepSeekError> {
         let url = format!("{}/beta/completions", self.base_url);
+        let req = self.map_fim_request_model(req);
         let response = self
             .http
             .post(&url)
             .bearer_auth(&self.api_key)
-            .json(req)
+            .json(&req)
             .send()
             .await?;
 

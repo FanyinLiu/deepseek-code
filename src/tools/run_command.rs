@@ -4,12 +4,32 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
 
+use crate::policy::sandbox::{command_invocation, CommandSandboxConfig};
+
 /// Execute a `RunCommand` tool call. Requires policy approval before calling.
 pub async fn run_command(
     project_root: &Path,
     command: &str,
     cwd: Option<&str>,
     timeout_seconds: u64,
+) -> Result<CommandResult, anyhow::Error> {
+    run_command_with_sandbox(
+        project_root,
+        command,
+        cwd,
+        timeout_seconds,
+        &CommandSandboxConfig::default(),
+    )
+    .await
+}
+
+/// Execute a `RunCommand` tool call with an optional native OS sandbox.
+pub async fn run_command_with_sandbox(
+    project_root: &Path,
+    command: &str,
+    cwd: Option<&str>,
+    timeout_seconds: u64,
+    sandbox: &CommandSandboxConfig,
 ) -> Result<CommandResult, anyhow::Error> {
     let working_dir = match cwd {
         Some(dir) => crate::workspace::paths::resolve_workspace_path(project_root, dir)
@@ -48,10 +68,20 @@ pub async fn run_command(
         ("sh", "-c")
     };
 
-    let mut command_builder = Command::new(shell);
+    let sandbox_invocation = command_invocation(shell, shell_arg, command, &working_dir, sandbox)?;
+    let mut command_builder = match sandbox_invocation {
+        Some(invocation) => {
+            let mut builder = Command::new(invocation.program);
+            builder.args(invocation.args);
+            builder
+        }
+        None => {
+            let mut builder = Command::new(shell);
+            builder.arg(shell_arg).arg(command);
+            builder
+        }
+    };
     command_builder
-        .arg(shell_arg)
-        .arg(command)
         .current_dir(&working_dir)
         .env_clear()
         .envs(sanitized_command_env())
@@ -331,5 +361,32 @@ mod tests {
         assert!(env.iter().any(|(key, _)| key == "HTTPS_PROXY"));
         assert!(!env.iter().any(|(key, _)| key.contains("TOKEN")));
         assert!(!env.iter().any(|(key, _)| key.contains("API_KEY")));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn strict_sandbox_reports_missing_native_sandbox_without_running_command() {
+        use crate::policy::sandbox::{CommandSandboxConfig, CommandSandboxMode};
+
+        let mut config = CommandSandboxConfig {
+            mode: CommandSandboxMode::Strict,
+            ..CommandSandboxConfig::default()
+        };
+        if cfg!(target_os = "macos") && std::path::Path::new("/usr/bin/sandbox-exec").exists() {
+            config.mode = CommandSandboxMode::Off;
+        }
+        if cfg!(target_os = "linux") && std::env::var_os("PATH").is_some() {
+            config.mode = CommandSandboxMode::Off;
+        }
+
+        let result =
+            run_command_with_sandbox(std::path::Path::new("."), "echo hello", None, 120, &config)
+                .await;
+
+        if config.mode == CommandSandboxMode::Strict {
+            assert!(result.is_err());
+        } else {
+            assert!(result.expect("command should run").is_success());
+        }
     }
 }

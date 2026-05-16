@@ -183,6 +183,7 @@ fn local_file_read_requests_are_direct_high_confidence() {
     for input in [
         "你能读取电脑里的文件吗",
         "能读取我的电脑文件吗",
+        "检测一下电脑里面 ds文件夹的 deekseep code 文件夹",
         "读取 C:/Users/name/Desktop/a.txt",
         "read my computer file",
     ] {

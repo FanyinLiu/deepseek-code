@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::cli::resolve_project_root;
 use crate::storage::{self, EventLogStore, SessionStore, TranscriptFormat};
 
 /// Run the resume command: list and restore saved sessions.
@@ -7,8 +8,7 @@ pub async fn resume(
     session_name: Option<String>,
     project_root: Option<PathBuf>,
 ) -> Result<(), anyhow::Error> {
-    let root = project_root
-        .unwrap_or_else(|| storage::find_project_root().unwrap_or_else(|| PathBuf::from(".")));
+    let root = resolve_project_root(project_root, "resume")?;
 
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?;
 
@@ -101,8 +101,7 @@ pub async fn export(
     format: Option<String>,
     project_root: Option<PathBuf>,
 ) -> Result<(), anyhow::Error> {
-    let root = project_root
-        .unwrap_or_else(|| storage::find_project_root().unwrap_or_else(|| PathBuf::from(".")));
+    let root = resolve_project_root(project_root, "export")?;
 
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?;
 

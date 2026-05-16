@@ -8,6 +8,7 @@ pub mod layout;
 pub mod model_hint;
 pub mod motion;
 pub mod plan_tracker;
+pub mod render_core;
 pub mod settings_panel;
 pub mod status_bar;
 pub mod statusline;
