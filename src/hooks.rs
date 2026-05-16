@@ -264,9 +264,9 @@ mod tests {
         )
         .expect("write hook script");
         #[cfg(windows)]
-        let command = format!("python \"{}\"", script.display());
+        let command = "python hook_payload.py".to_string();
         #[cfg(not(windows))]
-        let command = format!("python3 \"{}\"", script.display());
+        let command = "python3 hook_payload.py".to_string();
 
         let summary =
             run_hook_commands(HookEvent::PreToolUse, &[command], &payload, temp.path(), 5).await;
