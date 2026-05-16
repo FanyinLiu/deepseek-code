@@ -24,9 +24,127 @@ jobs:
       - run: cargo run --bin ds -- --help
       - run: cargo run --bin dscode -- preview-tui --api ready --scenario welcome --width 80 --height 24
 
+  windows-parity:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build Windows binaries
+        run: cargo build --bins --all-features
+      - name: Verify Windows CLI and TUI parity contracts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $Ds = Join-Path $env:GITHUB_WORKSPACE "target\debug\ds.exe"
+          $Dscode = Join-Path $env:GITHUB_WORKSPACE "target\debug\dscode.exe"
+          $DeepseekCode = Join-Path $env:GITHUB_WORKSPACE "target\debug\deepseek-code.exe"
+          foreach ($Binary in @($Ds, $Dscode, $DeepseekCode)) {
+            if (-not (Test-Path $Binary)) {
+              throw "missing Windows binary: $Binary"
+            }
+
+            & $Binary --version
+            if ($LASTEXITCODE -ne 0) {
+              throw "version smoke failed: $Binary"
+            }
+          }
+
+          $commandsText = & $Ds -C $env:GITHUB_WORKSPACE commands list --json
+          if ($LASTEXITCODE -ne 0) {
+            throw "commands list failed"
+          }
+
+          $commands = ($commandsText -join "`n") | ConvertFrom-Json
+          foreach ($Field in @("builtins", "custom", "skills", "mcp_prompts", "conflicts", "locations")) {
+            if (-not ($commands.PSObject.Properties.Name -contains $Field)) {
+              throw "commands list missing field: $Field"
+            }
+          }
+          if (-not ($commands.builtins | Where-Object { $_.name -eq "/help" })) {
+            throw "commands list missing /help"
+          }
+
+          $mcpText = & $Ds -C $env:GITHUB_WORKSPACE commands list --json --filter mcp
+          if ($LASTEXITCODE -ne 0) {
+            throw "commands list --filter mcp failed"
+          }
+
+          $mcpCommands = ($mcpText -join "`n") | ConvertFrom-Json
+          if (-not ($mcpCommands.builtins | Where-Object { $_.name -eq "/mcp" })) {
+            throw "commands list --filter mcp missing /mcp"
+          }
+
+          $rootless = Join-Path $env:RUNNER_TEMP "ds-rootless"
+          New-Item -ItemType Directory -Force $rootless | Out-Null
+          $errPath = Join-Path $env:RUNNER_TEMP "ds-rootless.err"
+          Push-Location $rootless
+          try {
+            $jsonLines = & $Ds chat hello --output-format json 2>$errPath
+            $jsonExit = $LASTEXITCODE
+          } finally {
+            Pop-Location
+          }
+
+          if ($jsonExit -eq 0) {
+            throw "chat --output-format json should fail outside a project root"
+          }
+
+          $chat = ($jsonLines -join "`n") | ConvertFrom-Json
+          foreach ($Field in @("status", "session_id", "final_message", "tool_calls", "usage", "error")) {
+            if (-not ($chat.PSObject.Properties.Name -contains $Field)) {
+              throw "chat json missing field: $Field"
+            }
+          }
+          if ($chat.status -ne "error") {
+            throw "chat json status should be error"
+          }
+          if ($null -ne $chat.session_id) {
+            throw "chat json session_id should be null on preflight failure"
+          }
+          if ($chat.error -notmatch "project root") {
+            throw "chat json error should explain the project root requirement"
+          }
+
+          $previewDir = Join-Path $env:RUNNER_TEMP "ds-preview"
+          New-Item -ItemType Directory -Force $previewDir | Out-Null
+          $welcomePath = Join-Path $previewDir "welcome.txt"
+          $workbenchPath = Join-Path $previewDir "workbench.txt"
+
+          $welcome = & $Ds preview-tui --api ready --scenario welcome --width 100 --height 28 --theme high-contrast
+          if ($LASTEXITCODE -ne 0) {
+            throw "welcome preview-tui failed"
+          }
+          $welcome | Set-Content -Encoding utf8 $welcomePath
+          $welcomeText = $welcome -join "`n"
+          foreach ($Marker in @("DSCODE", "DeepSeek V4 Flash")) {
+            if ($welcomeText -notmatch [regex]::Escape($Marker)) {
+              throw "welcome preview missing marker: $Marker"
+            }
+          }
+
+          $workbench = & $Ds preview-tui --api ready --scenario workbench --width 100 --height 28 --theme high-contrast
+          if ($LASTEXITCODE -ne 0) {
+            throw "workbench preview-tui failed"
+          }
+          $workbench | Set-Content -Encoding utf8 $workbenchPath
+          $workbenchText = $workbench -join "`n"
+          foreach ($Marker in @("Thinking", "type message", "DeepSeek V4 Flash")) {
+            if ($workbenchText -notmatch [regex]::Escape($Marker)) {
+              throw "workbench preview missing marker: $Marker"
+            }
+          }
+      - name: Upload Windows preview snapshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-preview-tui
+          path: ${{ runner.temp }}\ds-preview\*.txt
+          if-no-files-found: ignore
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: test
+    needs: [test, windows-parity]
     strategy:
       matrix:
         include:
