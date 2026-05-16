@@ -1240,8 +1240,9 @@ pub fn find_project_root_strict() -> Option<PathBuf> {
 }
 
 fn find_project_root_strict_from(cwd: &Path) -> Option<PathBuf> {
+    let home_dir = dirs::home_dir();
     for ancestor in cwd.ancestors() {
-        if ancestor.join(".deepseek-code").is_dir() || ancestor.join(".git").exists() {
+        if has_project_root_marker(ancestor, home_dir.as_deref()) {
             return Some(ancestor.to_path_buf());
         }
     }
@@ -1249,12 +1250,32 @@ fn find_project_root_strict_from(cwd: &Path) -> Option<PathBuf> {
 }
 
 fn find_project_root_from(cwd: &Path) -> PathBuf {
+    let home_dir = dirs::home_dir();
     for ancestor in cwd.ancestors() {
-        if ancestor.join(".deepseek-code").is_dir() || ancestor.join(".git").exists() {
+        if has_project_root_marker(ancestor, home_dir.as_deref()) {
             return ancestor.to_path_buf();
         }
     }
     cwd.to_path_buf()
+}
+
+fn has_project_root_marker(path: &Path, home_dir: Option<&Path>) -> bool {
+    if path.join(".git").exists() {
+        return true;
+    }
+
+    path.join(".deepseek-code").is_dir() && !home_dir.is_some_and(|home| same_path(path, home))
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 pub(crate) fn normalize_project_root(project_root: &Path) -> &Path {
