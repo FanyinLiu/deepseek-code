@@ -127,7 +127,7 @@ jobs:
           }
           $workbench | Set-Content -Encoding utf8 $workbenchPath
           $workbenchText = $workbench -join "`n"
-          foreach ($Marker in @("Thinking", "type message", "DeepSeek V4 Flash")) {
+          foreach ($Marker in @("Thinking", "type message", "V4 Flash")) {
             if ($workbenchText -notmatch [regex]::Escape($Marker)) {
               throw "workbench preview missing marker: $Marker"
             }

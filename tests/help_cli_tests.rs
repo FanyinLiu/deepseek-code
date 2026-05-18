@@ -24,6 +24,14 @@ fn assert_stdout_contains(output: &std::process::Output, needle: &str) {
     );
 }
 
+fn assert_stdout_contains_any(output: &std::process::Output, needles: &[&str]) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        needles.iter().any(|needle| stdout.contains(needle)),
+        "expected stdout to contain one of {needles:?}\nstdout:\n{stdout}"
+    );
+}
+
 #[test]
 fn root_help_lists_core_discoverability_commands() {
     let output = octocode(&["--help"]);
@@ -53,7 +61,13 @@ fn agent_help_lists_agent_management_commands() {
     let output = octocode(&["agent", "--help"]);
     assert_success(&output);
 
-    assert_stdout_contains(&output, "Usage: octocode agent [OPTIONS] <COMMAND>");
+    assert_stdout_contains_any(
+        &output,
+        &[
+            "Usage: octocode agent [OPTIONS] <COMMAND>",
+            "Usage: octocode.exe agent [OPTIONS] <COMMAND>",
+        ],
+    );
     assert_stdout_contains(&output, "list      List built-in and project custom agents");
     assert_stdout_contains(
         &output,
