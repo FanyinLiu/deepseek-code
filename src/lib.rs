@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod archive;
+pub mod binary;
 pub mod cli;
 pub mod cli_entry;
 pub mod commands;
