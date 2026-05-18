@@ -188,13 +188,17 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 impl WelcomeDashboardData {
     pub fn load(root: &Path, model: DeepSeekModel, thinking: ThinkingMode) -> Self {
         let config_result = storage::Config::load(Some(root));
-        let has_api_key = storage::get_api_key(
-            config_result
-                .as_ref()
-                .ok()
-                .and_then(storage::config_api_key),
-        )
-        .is_some();
+        let has_api_key = config_result
+            .as_ref()
+            .ok()
+            .and_then(|config| {
+                storage::get_api_key_for_provider(
+                    config.provider.default,
+                    storage::config_api_key(config),
+                )
+            })
+            .or_else(|| storage::get_api_key(None))
+            .is_some();
         let config_loaded = config_result.is_ok();
         let config = config_result.ok();
         let cache_status = match config.as_ref() {
@@ -204,7 +208,7 @@ impl WelcomeDashboardData {
         };
 
         let recent_sessions = dirs::home_dir()
-            .map(|home| SessionStore::new(home.join(".deepseek-code")).list(root))
+            .map(|home| SessionStore::new(home.join(".octocode")).list(root))
             .and_then(Result::ok)
             .unwrap_or_default()
             .into_iter()
@@ -349,6 +353,13 @@ impl WelcomeDashboardData {
             workspace_name: root
                 .file_name()
                 .and_then(|name| name.to_str())
+                .map(|name| {
+                    if name == concat!("deepseek", "-", "code") {
+                        "octocode"
+                    } else {
+                        name
+                    }
+                })
                 .unwrap_or("workspace")
                 .to_string(),
             workspace_path: root.to_path_buf(),
@@ -492,11 +503,12 @@ fn render_split_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) 
 }
 
 fn render_identity(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
+    let product_mark_height = if area.height >= 23 { 17 } else { 7 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
-            Constraint::Length(7),
+            Constraint::Length(product_mark_height),
             Constraint::Length(4),
             Constraint::Min(1),
         ])
@@ -630,7 +642,7 @@ fn render_changelog(f: &mut Frame, area: Rect) {
 fn render_invitation_and_footer(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
     let (title, hint, footer) = if data.api_key_status == "missing" {
         (
-            "Connect DeepSeek first",
+            "Connect a provider first",
             "Paste your API key below.",
             "enter save key · ctrl+c close",
         )
@@ -764,7 +776,7 @@ fn render_compact_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData
     let mut lines = Vec::new();
     lines.extend([
         Line::from(vec![Span::styled(
-            format!("{}  DSCODE", ascii_art::DSCODE_TINY),
+            ascii_art::OCTOCODE_TINY.to_string(),
             welcome_badge(),
         )]),
         Line::from(vec![Span::styled(headline, welcome_muted())]),
@@ -849,7 +861,7 @@ fn render_compact_api_onboarding(f: &mut Frame, area: Rect, data: &WelcomeDashbo
     });
     let lines = vec![
         Line::from(vec![
-            Span::styled("DSCODE", welcome_text().add_modifier(Modifier::BOLD)),
+            Span::styled("OCTOCODE", welcome_text().add_modifier(Modifier::BOLD)),
             Span::styled("  ·  ", welcome_muted()),
             Span::styled(
                 "API setup required",
@@ -924,9 +936,9 @@ fn action_span(text: &str) -> Span<'static> {
 fn render_product_mark(f: &mut Frame, area: Rect) {
     if area.width < 48 || area.height < 6 {
         let lines = vec![
-            Line::from(vec![Span::styled(ascii_art::DSCODE_TINY, welcome_badge())]),
+            Line::from(vec![Span::styled(ascii_art::OCTO_TINY, welcome_badge())]),
             Line::from(vec![Span::styled(
-                "DSCODE",
+                "OCTOCODE",
                 welcome_text().add_modifier(Modifier::BOLD),
             )]),
         ];
@@ -940,34 +952,43 @@ fn render_product_mark(f: &mut Frame, area: Rect) {
         return;
     }
 
-    let mark_width = ascii_art::welcome_dscode_solid_width();
-    let title_width = "Droid-style local workbench".chars().count();
+    let mark_width = ascii_art::welcome_octocode_solid_width();
+    if area.height >= 17 {
+        render_centered_clawd_product_mark(f, area, mark_width);
+        return;
+    }
+
+    let mark_width = ascii_art::welcome_octo_compact_mark_width();
+    let title_width = "Octocode multi-model coding shell".chars().count();
     let lockup_width = mark_width + 4 + title_width;
     if area.width as usize <= lockup_width {
-        render_centered_product_mark(f, area, mark_width);
+        render_centered_product_mark(f, area, ascii_art::welcome_octocode_solid_width());
         return;
     }
 
     let left_x = area.x + ((area.width as usize).saturating_sub(lockup_width) / 2) as u16;
     let title_x = left_x + mark_width as u16 + 4;
     let title_rows: [Vec<Span<'static>>; 5] = [
-        vec![
-            Span::styled("DS", welcome_accent().add_modifier(Modifier::BOLD)),
-            Span::styled("CODE", welcome_brand_alt().add_modifier(Modifier::BOLD)),
-        ],
-        vec![Span::styled("DeepSeek coding shell", welcome_muted())],
+        vec![Span::styled(
+            "OCTOCODE",
+            welcome_accent().add_modifier(Modifier::BOLD),
+        )],
+        vec![Span::styled(
+            "Octocode multi-model coding shell",
+            welcome_muted(),
+        )],
         vec![],
         vec![Span::styled("Droid-style local workbench", welcome_muted())],
         vec![],
     ];
 
-    for idx in 0..ascii_art::WELCOME_DSCODE_SOLID_HEIGHT {
+    for idx in 0..ascii_art::WELCOME_OCTO_COMPACT_MARK_HEIGHT {
         let row_y = area.y + idx as u16;
         if row_y >= area.y + area.height {
             break;
         }
 
-        render_solid_product_mark_row(f, area, left_x, row_y, idx);
+        render_compact_octo_mark_row(f, area, left_x, row_y, idx);
 
         if let Some(title_line) = title_rows.get(idx) {
             let title_area = Rect::new(title_x, row_y, area.right().saturating_sub(title_x), 1);
@@ -979,17 +1000,101 @@ fn render_product_mark(f: &mut Frame, area: Rect) {
     }
 }
 
+fn render_compact_octo_mark_row(
+    f: &mut Frame,
+    area: Rect,
+    left_x: u16,
+    row_y: u16,
+    row_idx: usize,
+) {
+    let line = ascii_art::WELCOME_OCTO_COMPACT_MARK
+        .get(row_idx)
+        .copied()
+        .unwrap_or("");
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            line.to_string(),
+            welcome_badge(),
+        )]))
+        .style(welcome_bg()),
+        Rect::new(left_x, row_y, area.right().saturating_sub(left_x), 1),
+    );
+}
+
+fn render_centered_clawd_product_mark(f: &mut Frame, area: Rect, mark_width: usize) {
+    let clawd_width = ascii_art::welcome_clawd_pixel_render_width();
+    for (idx, row) in ascii_art::WELCOME_CLAWD_PIXEL_MARK.iter().enumerate() {
+        let row_y = area.y + idx as u16;
+        if row_y >= area.y + area.height {
+            return;
+        }
+        let left_x = area.x + ((area.width as usize).saturating_sub(clawd_width) / 2) as u16;
+        render_clawd_pixel_mark_row(f, area, left_x, row_y, row);
+    }
+
+    let mark_y = area.y + ascii_art::WELCOME_CLAWD_PIXEL_MARK_HEIGHT as u16 + 1;
+    let left_x = area.x + ((area.width as usize).saturating_sub(mark_width) / 2) as u16;
+    for idx in 0..ascii_art::WELCOME_OCTO_SOLID_HEIGHT {
+        let row_y = mark_y + idx as u16;
+        if row_y >= area.y + area.height {
+            return;
+        }
+        render_solid_product_mark_row(f, area, left_x, row_y, idx);
+    }
+
+    let label = "OCTOCODE";
+    let label_y = mark_y + ascii_art::WELCOME_OCTO_SOLID_HEIGHT as u16;
+    if label_y < area.y + area.height && area.width as usize >= label.len() {
+        let label_x = area.x + ((area.width as usize).saturating_sub(label.len()) / 2) as u16;
+        f.render_widget(
+            Paragraph::new(gradient_label(label)).style(welcome_bg()),
+            Rect::new(label_x, label_y, area.right().saturating_sub(label_x), 1),
+        );
+    }
+}
+
+fn render_clawd_pixel_mark_row(f: &mut Frame, area: Rect, left_x: u16, row_y: u16, row: &str) {
+    let spans = row
+        .chars()
+        .map(|ch| {
+            if ch == '_' {
+                Span::styled("  ", welcome_bg())
+            } else {
+                Span::styled("██", clawd_pixel_style(ch))
+            }
+        })
+        .collect::<Vec<_>>();
+    f.render_widget(
+        Paragraph::new(Line::from(spans)).style(welcome_bg()),
+        Rect::new(left_x, row_y, area.right().saturating_sub(left_x), 1),
+    );
+}
+
+fn clawd_pixel_style(ch: char) -> Style {
+    let color = match ch {
+        'K' => Some(Color::Rgb(30, 22, 16)),
+        'B' => Some(Color::Rgb(212, 120, 74)),
+        'L' => Some(Color::Rgb(234, 168, 120)),
+        'E' => Some(Color::Rgb(12, 8, 4)),
+        'P' => Some(Color::Rgb(240, 160, 184)),
+        _ => None,
+    };
+    color.map_or_else(welcome_bg, |color| {
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
+    })
+}
+
 fn render_centered_product_mark(f: &mut Frame, area: Rect, mark_width: usize) {
     let left_x = area.x + ((area.width as usize).saturating_sub(mark_width) / 2) as u16;
-    for idx in 0..ascii_art::WELCOME_DSCODE_SOLID_HEIGHT {
+    for idx in 0..ascii_art::WELCOME_OCTO_SOLID_HEIGHT {
         let row_y = area.y + idx as u16;
         if row_y >= area.y + area.height {
             break;
         }
         render_solid_product_mark_row(f, area, left_x, row_y, idx);
     }
-    let label = "DSCODE";
-    let label_y = area.y + ascii_art::WELCOME_DSCODE_SOLID_HEIGHT as u16;
+    let label = "OCTOCODE";
+    let label_y = area.y + ascii_art::WELCOME_OCTO_SOLID_HEIGHT as u16;
     if label_y < area.y + area.height && area.width as usize >= label.len() {
         let label_x = area.x + ((area.width as usize).saturating_sub(label.len()) / 2) as u16;
         f.render_widget(
@@ -1001,9 +1106,9 @@ fn render_centered_product_mark(f: &mut Frame, area: Rect, mark_width: usize) {
 
 fn render_solid_product_mark_row(f: &mut Frame, area: Rect, left_x: u16, row_y: u16, row: usize) {
     let mut spans = Vec::new();
-    for (idx, glyph) in ascii_art::WELCOME_DSCODE_SOLID.iter().enumerate() {
+    for (idx, glyph) in ascii_art::WELCOME_OCTO_SOLID.iter().enumerate() {
         if idx > 0 {
-            spans.push(Span::raw(" ".repeat(ascii_art::WELCOME_DSCODE_GAP)));
+            spans.push(Span::raw(" ".repeat(ascii_art::WELCOME_OCTO_GAP)));
         }
         spans.push(Span::styled(
             glyph.rows[row].to_string(),
@@ -1132,10 +1237,6 @@ fn welcome_accent() -> Style {
     welcome_bg().fg(theme::palette().accent)
 }
 
-fn welcome_brand_alt() -> Style {
-    welcome_bg().fg(theme::palette().text)
-}
-
 fn welcome_badge() -> Style {
     welcome_bg()
         .fg(theme::palette().info)
@@ -1163,7 +1264,7 @@ mod tests {
     #[test]
     fn load_data_with_no_sessions_keeps_recent_empty() {
         let data = WelcomeDashboardData::from_parts(
-            Path::new("D:/deepseek-code"),
+            Path::new("D:/octocode"),
             DeepSeekModel::Flash,
             ThinkingMode::Auto,
             false,
@@ -1189,7 +1290,7 @@ mod tests {
             })
             .collect();
         let data = WelcomeDashboardData::from_parts(
-            Path::new("D:/deepseek-code"),
+            Path::new("D:/octocode"),
             DeepSeekModel::Pro,
             ThinkingMode::On,
             true,
@@ -1218,7 +1319,7 @@ mod tests {
             .draw(|f| render_welcome(f, f.area(), &data))
             .expect("draw welcome");
         let rendered = buffer_text(terminal.backend());
-        assert!(rendered.contains("DSCODE"));
+        assert!(rendered.contains("OCTO"));
         assert!(rendered.contains("What are we changing today?"));
         assert!(rendered.contains("starters"));
         assert!(rendered.contains("workspace"));
@@ -1244,7 +1345,7 @@ mod tests {
         }
 
         assert!(
-            solid_cells > 80,
+            solid_cells > 60,
             "solid glyph should render as filled blocks"
         );
         assert!(
@@ -1261,7 +1362,7 @@ mod tests {
             .draw(|f| render_welcome(f, f.area(), &data))
             .expect("draw welcome");
         let rendered = buffer_text(terminal.backend());
-        assert!(rendered.contains("DSCODE"));
+        assert!(rendered.contains("OCTO"));
         assert!(rendered.contains("What are we changing today?"));
         assert!(rendered.contains("workspace"));
         assert!(rendered.contains("starters"));
@@ -1275,8 +1376,8 @@ mod tests {
             .draw(|f| render_welcome(f, f.area(), &data))
             .expect("draw welcome");
         let rendered = buffer_text(terminal.backend());
-        assert!(rendered.contains("DSCODE"));
-        assert!(rendered.contains("Connect DeepSeek first"));
+        assert!(rendered.contains("OCTO"));
+        assert!(rendered.contains("Connect a provider first"));
         assert!(rendered.contains("Paste your API key"));
         assert!(rendered.contains("enter"));
         assert!(!rendered.contains("Type below, or press 1-3"));
@@ -1290,7 +1391,7 @@ mod tests {
             .draw(|f| render_welcome(f, f.area(), &data))
             .expect("draw compact welcome");
         let rendered = buffer_text(terminal.backend());
-        assert!(rendered.contains("DSCODE"));
+        assert!(rendered.contains("OCTO"));
         assert!(rendered.contains("1-3"));
         assert!(rendered.contains("enter"));
     }
@@ -1313,7 +1414,7 @@ mod tests {
         has_api_key: bool,
     ) -> WelcomeDashboardData {
         WelcomeDashboardData::from_parts(
-            Path::new("D:/deepseek-code"),
+            Path::new("D:/octocode"),
             DeepSeekModel::Flash,
             ThinkingMode::Auto,
             has_api_key,

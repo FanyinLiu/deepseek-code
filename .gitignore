@@ -4,6 +4,16 @@
 /.deepseek-code/checkpoints/
 /.deepseek-code/live-preview/
 /.deepseek-code/missions/
+/.octocode/target/
+/.octocode/local.toml
+/.octocode/checkpoints/
+/.octocode/live-preview/
+/.octocode/missions/
+/.octocode/evolution/
+/.octocode/repair/
+/.octocode/knowledge/
+/.octocode/archive/
+/.octocode/goals.toml
 /logs/
 /TASK.md
 *.pdb

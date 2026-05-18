@@ -62,7 +62,7 @@ pub async fn chat(
             return json_error_result(output_format, anyhow::anyhow!("cannot find home directory"));
         }
     };
-    let store = storage::SessionStore::new(home.join(".deepseek-code"));
+    let store = storage::SessionStore::new(home.join(".octocode"));
 
     let mut session = if let Some(ref sid) = session_id {
         let sid = match uuid::Uuid::parse_str(sid) {
@@ -208,9 +208,7 @@ pub async fn chat(
                         matches!(display.risk_level, crate::policy::RiskLevel::SafeRead);
                     let _ = respond.send(is_safe_read);
                     if !is_safe_read {
-                        println!(
-                            "[Denied — use `deepseek-code run` for interactive tool approval]"
-                        );
+                        println!("[Denied — use `octocode run` for interactive tool approval]");
                     }
                 }
                 AgentEvent::ToolStarted { .. } => {}
@@ -291,9 +289,7 @@ pub async fn chat(
                     );
                     let _ = respond.send(is_safe_read);
                     if !is_safe_read {
-                        println!(
-                            "[Denied — use `deepseek-code run` for interactive tool approval]"
-                        );
+                        println!("[Denied — use `octocode run` for interactive tool approval]");
                     }
                 }
                 AgentEvent::PlanStepUpdate {
@@ -410,7 +406,7 @@ pub async fn chat(
         }
     } else {
         // Interactive mode
-        println!("DeepSeek-Code interactive chat (Ctrl+C to exit, /help for commands)");
+        println!("Octocode interactive chat (Ctrl+C to exit, /help for commands)");
         if let Some(ref o) = orchestrator {
             println!(
                 "Model: {} | Thinking: {thinking}",
@@ -669,7 +665,7 @@ pub async fn chat(
             if let Some(ref o) = orchestrator {
                 let home = dirs::home_dir()
                     .ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?;
-                let store = storage::SessionStore::new(home.join(".deepseek-code"));
+                let store = storage::SessionStore::new(home.join(".octocode"));
                 let _ = store.save(&o.session);
             }
             println!();

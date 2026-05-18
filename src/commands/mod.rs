@@ -232,7 +232,7 @@ fn cmd_image(args: &str, ctx: &mut CommandContext) -> CommandResult {
 
 fn cmd_commit(args: &str, ctx: &mut CommandContext) -> CommandResult {
     let message = if args.trim().is_empty() {
-        "Auto-commit by deepseek-code"
+        "Auto-commit by octocode"
     } else {
         args.trim()
     };
@@ -259,7 +259,7 @@ pub fn forwarded_agent_input(input: &str) -> Option<String> {
     match name {
         "/commit" => {
             let message = if args.is_empty() {
-                "Auto-commit by deepseek-code"
+                "Auto-commit by octocode"
             } else {
                 args
             };
@@ -455,11 +455,15 @@ fn cmd_cwd(args: &str, ctx: &mut CommandContext) -> CommandResult {
 
 fn cmd_mcp(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     if ctx.mcp_status.is_empty() || ctx.mcp_status == "MCP: not initialized" {
-        Ok(Some([
-            manager_header("mcp", "empty"),
-            "status    no servers configured".to_string(),
-            "next      add [mcp.servers] to ~/.deepseek-code/config.toml or ./.deepseek-code/config.toml".to_string(),
-        ].join("\n")))
+        Ok(Some(
+            [
+                manager_header("mcp", "empty"),
+                "status    no servers configured".to_string(),
+                "next      add [mcp.servers] to ~/.octocode/config.toml or ./.octocode/config.toml"
+                    .to_string(),
+            ]
+            .join("\n"),
+        ))
     } else {
         Ok(Some(format!(
             "{}\n{}",
@@ -483,25 +487,29 @@ fn cmd_usage(_args: &str, ctx: &mut CommandContext) -> CommandResult {
 
 fn cmd_doctor(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     let config = crate::storage::Config::load(Some(ctx.project_root));
+    let provider = config
+        .as_ref()
+        .map(|config| config.provider.default)
+        .unwrap_or_default();
     let api_key = crate::storage::get_effective_api_key(Some(ctx.project_root));
     let git_available = command_available("git");
     let cargo_available = command_available("cargo");
     let session_store = dirs::home_dir()
-        .map(|home| home.join(".deepseek-code").join("sessions"))
+        .map(|home| home.join(".octocode").join("sessions"))
         .filter(|path| path.exists());
+    let api_key_detail = if api_key.is_some() {
+        "configured".to_string()
+    } else {
+        format!(
+            "missing; run `octocode login --api-key <key>` or set {}",
+            crate::storage::api_key_env_hint(provider)
+        )
+    };
 
     let mut lines = vec![
-        "DeepSeek-Code Doctor".to_string(),
+        "Octocode Doctor".to_string(),
         String::new(),
-        doctor_line(
-            api_key.is_some(),
-            "API key",
-            if api_key.is_some() {
-                "configured"
-            } else {
-                "missing; run `deepseek-code login --api-key sk-...` or set DEEPSEEK_API_KEY"
-            },
-        ),
+        doctor_line(api_key.is_some(), "API key", &api_key_detail),
         doctor_line(
             config.is_ok(),
             "Config",
@@ -547,7 +555,7 @@ fn cmd_doctor(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     ));
     lines.push(String::new());
     lines.push(
-        "Doctor is local-only in the TUI; run `deepseek-code doctor` for API connectivity checks."
+        "Doctor is local-only in the TUI; run `octocode doctor` for API connectivity checks."
             .to_string(),
     );
 
@@ -677,7 +685,7 @@ fn cmd_tui(args: &str, ctx: &mut CommandContext) -> CommandResult {
     write_project_ui_string_override(ctx.project_root, "renderer", mode)?;
     ctx.app.set_renderer_config(mode);
     Ok(Some(format!(
-        "TUI renderer set to {} (resolved to {}). Restart ds to apply terminal mode.",
+        "TUI renderer set to {} (resolved to {}). Restart octocode to apply terminal mode.",
         mode,
         ctx.app.renderer_mode.label()
     )))
@@ -778,10 +786,10 @@ fn cmd_model(args: &str, ctx: &mut CommandContext) -> CommandResult {
 
 fn cmd_config(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     let config = crate::storage::Config::load(Some(ctx.project_root)).unwrap_or_default();
-    let project_config = ctx.project_root.join(".deepseek-code").join("config.toml");
+    let project_config = ctx.project_root.join(".octocode").join("config.toml");
     let user_config = dirs::home_dir()
-        .map(|home| home.join(".deepseek-code").join("config.toml"))
-        .unwrap_or_else(|| std::path::PathBuf::from("~/.deepseek-code/config.toml"));
+        .map(|home| home.join(".octocode").join("config.toml"))
+        .unwrap_or_else(|| std::path::PathBuf::from("~/.octocode/config.toml"));
     let lines = [
         "Config".to_string(),
         "".to_string(),
@@ -821,7 +829,7 @@ fn cmd_sessions(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     let Some(home) = dirs::home_dir() else {
         return Err("Cannot find home directory.".to_string());
     };
-    let store = crate::storage::SessionStore::new(home.join(".deepseek-code"));
+    let store = crate::storage::SessionStore::new(home.join(".octocode"));
     let sessions = store
         .list(ctx.project_root)
         .map_err(|e| format!("Failed to list sessions: {e}"))?;
@@ -846,7 +854,7 @@ fn cmd_sessions(_args: &str, ctx: &mut CommandContext) -> CommandResult {
         ));
     }
     lines.push(String::new());
-    lines.push("next      use `ds resume <id-prefix>` outside TUI to resume".to_string());
+    lines.push("next      use `octocode resume <id-prefix>` outside TUI to resume".to_string());
     Ok(Some(lines.join("\n")))
 }
 
@@ -916,10 +924,10 @@ fn cmd_add_dir(args: &str, ctx: &mut CommandContext) -> CommandResult {
 }
 
 fn cmd_commands(_args: &str, ctx: &mut CommandContext) -> CommandResult {
-    let project_dir = ctx.project_root.join(".deepseek-code").join("commands");
+    let project_dir = ctx.project_root.join(".octocode").join("commands");
     let user_dir = dirs::home_dir()
-        .map(|home| home.join(".deepseek-code").join("commands"))
-        .unwrap_or_else(|| std::path::PathBuf::from("~/.deepseek-code/commands"));
+        .map(|home| home.join(".octocode").join("commands"))
+        .unwrap_or_else(|| std::path::PathBuf::from("~/.octocode/commands"));
     let project_count = count_entries(&project_dir);
     let user_count = count_entries(&user_dir);
     Ok(Some(
@@ -938,10 +946,10 @@ fn cmd_commands(_args: &str, ctx: &mut CommandContext) -> CommandResult {
 }
 
 fn cmd_skills(_args: &str, ctx: &mut CommandContext) -> CommandResult {
-    let project_dir = ctx.project_root.join(".deepseek-code").join("skills");
+    let project_dir = ctx.project_root.join(".octocode").join("skills");
     let user_dir = dirs::home_dir()
-        .map(|home| home.join(".deepseek-code").join("skills"))
-        .unwrap_or_else(|| std::path::PathBuf::from("~/.deepseek-code/skills"));
+        .map(|home| home.join(".octocode").join("skills"))
+        .unwrap_or_else(|| std::path::PathBuf::from("~/.octocode/skills"));
     let project = list_entry_names(&project_dir);
     let user = list_entry_names(&user_dir);
     let mut lines = vec![
@@ -955,7 +963,7 @@ fn cmd_skills(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     if !user.is_empty() {
         lines.push(format!("user skills: {}", user.join(", ")));
     }
-    lines.push("next       .deepseek-code/skills/<name>/SKILL.md".to_string());
+    lines.push("next       .octocode/skills/<name>/SKILL.md".to_string());
     Ok(Some(lines.join("\n")))
 }
 
@@ -1156,7 +1164,7 @@ fn cmd_schedule(args: &str, ctx: &mut CommandContext) -> CommandResult {
                         lines.push(format!("log     {}", path.display()));
                     } else {
                         lines.push(
-                            "log     use `ds resume` to inspect session event logs".to_string(),
+                            "log     use `octocode resume` to inspect session event logs".to_string(),
                         );
                     }
                     Ok(Some(lines.join("\n")))
@@ -1165,7 +1173,7 @@ fn cmd_schedule(args: &str, ctx: &mut CommandContext) -> CommandResult {
                     [
                         manager_header("schedule", "manual-run"),
                         format!("id      {id}"),
-                        "next    run `ds task run <id>` from the shell".to_string(),
+                        "next    run `octocode task run <id>` from the shell".to_string(),
                         "note    TUI slash commands stay synchronous to avoid hidden side effects"
                             .to_string(),
                     ]
@@ -1269,7 +1277,7 @@ fn write_project_swarm_override(
     project_root: &std::path::Path,
     enabled: bool,
 ) -> Result<(), String> {
-    let dir = project_root.join(".deepseek-code");
+    let dir = project_root.join(".octocode");
     let path = dir.join("local.toml");
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create config dir: {e}"))?;
     let mut table = if path.exists() {
@@ -1300,7 +1308,7 @@ fn write_project_ui_string_override(
     key: &str,
     value: &str,
 ) -> Result<(), String> {
-    let dir = project_root.join(".deepseek-code");
+    let dir = project_root.join(".octocode");
     let path = dir.join("local.toml");
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create config dir: {e}"))?;
     let mut table = if path.exists() {
@@ -1914,7 +1922,7 @@ mod tests {
         let diagnostics = execute_with_test_app("/diagnostics")
             .expect("diagnostics alias should run")
             .expect("diagnostics alias should show output");
-        assert!(diagnostics.contains("DeepSeek-Code Doctor"));
+        assert!(diagnostics.contains("Octocode Doctor"));
     }
 
     #[test]
@@ -2006,7 +2014,7 @@ mod tests {
             .expect("doctor should run")
             .expect("doctor should show output");
 
-        assert!(output.contains("DeepSeek-Code Doctor"));
+        assert!(output.contains("Octocode Doctor"));
         assert!(output.contains("Doctor is local-only in the TUI"));
     }
 
@@ -2037,7 +2045,7 @@ mod tests {
 
         assert!(output.contains("dark"));
         assert_eq!(ctx.app.theme_mode, crate::tui::theme::ThemeMode::Dark);
-        let local = std::fs::read_to_string(temp.path().join(".deepseek-code/local.toml"))
+        let local = std::fs::read_to_string(temp.path().join(".octocode/local.toml"))
             .expect("local config");
         assert!(local.contains("theme = \"dark\""));
     }
@@ -2069,7 +2077,7 @@ mod tests {
 
         assert!(output.contains("auto"));
         assert_eq!(ctx.app.theme_mode, crate::tui::theme::ThemeMode::Auto);
-        let local = std::fs::read_to_string(temp.path().join(".deepseek-code/local.toml"))
+        let local = std::fs::read_to_string(temp.path().join(".octocode/local.toml"))
             .expect("local config");
         assert!(local.contains("theme = \"auto\""));
     }
@@ -2132,7 +2140,7 @@ mod tests {
             ctx.app.renderer_mode,
             crate::tui::app::RendererMode::Fullscreen
         );
-        let local = std::fs::read_to_string(temp.path().join(".deepseek-code/local.toml"))
+        let local = std::fs::read_to_string(temp.path().join(".octocode/local.toml"))
             .expect("local config");
         assert!(local.contains("renderer = \"fullscreen\""));
 
@@ -2143,7 +2151,7 @@ mod tests {
             .expect("tui should show output");
 
         assert!(output.contains("auto"));
-        let local = std::fs::read_to_string(temp.path().join(".deepseek-code/local.toml"))
+        let local = std::fs::read_to_string(temp.path().join(".octocode/local.toml"))
             .expect("local config");
         assert!(local.contains("renderer = \"auto\""));
     }
@@ -2182,13 +2190,13 @@ mod tests {
 
     #[test]
     fn test_command_forwards_to_agent_tool_flow() {
-        let output = execute_with_test_app("/test echo deepseek-code-test")
-            .expect("test command should run");
+        let output =
+            execute_with_test_app("/test echo octocode-test").expect("test command should run");
 
         assert!(output.is_none());
         assert_eq!(
-            forwarded_agent_input("/test echo deepseek-code-test").as_deref(),
-            Some("Run this test command through the normal tool approval flow: echo deepseek-code-test")
+            forwarded_agent_input("/test echo octocode-test").as_deref(),
+            Some("Run this test command through the normal tool approval flow: echo octocode-test")
         );
     }
 

@@ -38,7 +38,7 @@ pub fn save_history(history: &[String]) {
 fn history_path() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("deepseek-code")
+        .join("octocode")
         .join("input_history.txt")
 }
 

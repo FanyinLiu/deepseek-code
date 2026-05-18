@@ -13,7 +13,7 @@ impl SessionStore {
         Self { base_path }
     }
 
-    /// Path: ~/.deepseek-code/sessions/{project_hash}/{session_id}/
+    /// Path: ~/.octocode/sessions/{project_hash}/{session_id}/
     #[must_use]
     pub fn session_dir(&self, project_root: &Path, session_id: &SessionId) -> PathBuf {
         self.base_path

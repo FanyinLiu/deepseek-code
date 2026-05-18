@@ -15,6 +15,7 @@ pub fn to_chat_messages(
     reasoning_state: &ReasoningState,
 ) -> Vec<ChatMessage> {
     let mut chat_msgs: Vec<ChatMessage> = Vec::new();
+    let mut pending_tool_call_ids = std::collections::HashSet::<String>::new();
 
     for msg in protocol_messages {
         let is_active_tool_protocol = msg.visibility == MessageVisibility::InternalProtocolState
@@ -65,6 +66,9 @@ pub fn to_chat_messages(
 
         if msg.role == Role::Tool && !msg.tool_results.is_empty() {
             for tr in &msg.tool_results {
+                if !pending_tool_call_ids.remove(&tr.tool_call_id) {
+                    continue;
+                }
                 let mut tool_msg = chat_msg.clone();
                 tool_msg.role = "tool".into();
                 tool_msg.content = Some(ChatMessageContent::Text(tr.result.clone()));
@@ -87,13 +91,20 @@ pub fn to_chat_messages(
                     chat_msg.reasoning_content = msg.reasoning_content.clone();
                 }
                 if !msg.tool_calls.is_empty() {
+                    pending_tool_call_ids.extend(msg.tool_calls.iter().map(|tc| tc.id.clone()));
                     chat_msg.tool_calls = Some(msg.tool_calls.clone());
                 }
             }
             Role::Tool => {
                 // Tool result messages: role=tool, tool_call_id, content
+                if msg.tool_results.is_empty() {
+                    continue;
+                }
                 chat_msg.role = "tool".into();
                 if let Some(tr) = msg.tool_results.first() {
+                    if !pending_tool_call_ids.remove(&tr.tool_call_id) {
+                        continue;
+                    }
                     chat_msg.tool_call_id = Some(tr.tool_call_id.clone());
                     chat_msg.content = Some(ChatMessageContent::Text(tr.result.clone()));
                 }
@@ -177,8 +188,32 @@ pub fn finalize_tool_turn(reasoning_state: &mut ReasoningState, messages: &mut [
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::deepseek::models::ToolResultRecord;
+    use crate::deepseek::models::{ToolCall, ToolCallFunction, ToolResultRecord};
     use uuid::Uuid;
+
+    fn protocol_assistant_tool_message(tool_call_ids: &[&str]) -> ProtocolMessage {
+        ProtocolMessage {
+            id: Uuid::new_v4(),
+            role: Role::Assistant,
+            content: MessageContent::None,
+            reasoning_content: Some("private reasoning".into()),
+            tool_calls: tool_call_ids
+                .iter()
+                .map(|id| ToolCall {
+                    id: (*id).into(),
+                    call_type: "function".into(),
+                    function: ToolCallFunction {
+                        name: "read_file".into(),
+                        arguments: r#"{"path":"Cargo.toml"}"#.into(),
+                    },
+                })
+                .collect(),
+            tool_results: Vec::new(),
+            turn_id: Uuid::nil(),
+            sub_turn_id: None,
+            visibility: MessageVisibility::InternalProtocolState,
+        }
+    }
 
     fn protocol_tool_message(tool_results: Vec<ToolResultRecord>) -> ProtocolMessage {
         ProtocolMessage {
@@ -196,6 +231,11 @@ mod tests {
 
     #[test]
     fn converts_every_tool_result_to_api_tool_message() {
+        let assistant = protocol_assistant_tool_message(&["call_a", "call_b"]);
+        let reasoning_state = ReasoningState {
+            preserved_assistant_messages: vec![assistant.id],
+            ..ReasoningState::default()
+        };
         let protocol = protocol_tool_message(vec![
             ToolResultRecord {
                 tool_call_id: "call_a".into(),
@@ -211,17 +251,32 @@ mod tests {
             },
         ]);
 
-        let messages = to_chat_messages(&[protocol], &ReasoningState::default());
+        let messages = to_chat_messages(&[assistant, protocol], &reasoning_state);
 
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].role, "tool");
-        assert_eq!(messages[0].tool_call_id.as_deref(), Some("call_a"));
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, "assistant");
         assert_eq!(messages[1].role, "tool");
-        assert_eq!(messages[1].tool_call_id.as_deref(), Some("call_b"));
+        assert_eq!(messages[1].tool_call_id.as_deref(), Some("call_a"));
+        assert_eq!(messages[2].role, "tool");
+        assert_eq!(messages[2].tool_call_id.as_deref(), Some("call_b"));
         assert!(matches!(
-            messages[1].content.as_ref(),
+            messages[2].content.as_ref(),
             Some(ChatMessageContent::Text(text)) if text == "second"
         ));
+    }
+
+    #[test]
+    fn orphan_tool_result_is_not_sent_to_api() {
+        let protocol = protocol_tool_message(vec![ToolResultRecord {
+            tool_call_id: "call_a".into(),
+            name: "read".into(),
+            result: "first".into(),
+            is_error: false,
+        }]);
+
+        let messages = to_chat_messages(&[protocol], &ReasoningState::default());
+
+        assert!(messages.iter().all(|message| message.role != "tool"));
     }
 
     #[test]

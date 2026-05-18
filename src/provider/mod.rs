@@ -1,12 +1,11 @@
 //! Provider selection and model resolution.
 //!
-//! This first provider layer keeps DeepSeek as the only implemented backend,
-//! while giving CLI, TUI, and task paths one shared place to resolve models and
-//! construct clients.
+//! The runtime still uses the DeepSeek-compatible chat client internally, but
+//! provider presets make OpenAI-compatible Chinese model services first-class.
 
 use serde::{Deserialize, Serialize};
 
-use crate::deepseek::{client::DeepSeekClient, DeepSeekModel};
+use crate::deepseek::{client::DeepSeekClient, DeepSeekModel, ThinkingWireFormat};
 use crate::storage::config::ModelConfig;
 
 /// Supported provider families.
@@ -16,6 +15,12 @@ pub enum ProviderKind {
     #[serde(rename = "deepseek")]
     #[default]
     DeepSeek,
+    #[serde(rename = "qwen")]
+    Qwen,
+    #[serde(rename = "kimi")]
+    Kimi,
+    #[serde(rename = "zhipu")]
+    Zhipu,
     #[serde(rename = "openrouter")]
     OpenRouter,
     #[serde(rename = "openai-compatible")]
@@ -23,15 +28,137 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
+    #[must_use]
+    pub const fn all() -> &'static [Self] {
+        &[
+            Self::DeepSeek,
+            Self::Qwen,
+            Self::Kimi,
+            Self::Zhipu,
+            Self::OpenRouter,
+            Self::OpenAiCompatible,
+        ]
+    }
+
     /// Stable label for config and diagnostics.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::DeepSeek => "deepseek",
+            Self::Qwen => "qwen",
+            Self::Kimi => "kimi",
+            Self::Zhipu => "zhipu",
             Self::OpenRouter => "openrouter",
             Self::OpenAiCompatible => "openai-compatible",
         }
     }
+
+    #[must_use]
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::DeepSeek => "DeepSeek",
+            Self::Qwen => "Qwen / DashScope",
+            Self::Kimi => "Kimi / Moonshot",
+            Self::Zhipu => "GLM / Zhipu",
+            Self::OpenRouter => "OpenRouter",
+            Self::OpenAiCompatible => "OpenAI-compatible",
+        }
+    }
+
+    #[must_use]
+    pub fn capabilities(self) -> ProviderCapabilities {
+        match self {
+            Self::DeepSeek => ProviderCapabilities {
+                kind: self,
+                display_name: self.display_name(),
+                thinking: ProviderThinkingCapabilities {
+                    supports_thinking: true,
+                    supports_reasoning_content: true,
+                    supports_preserved_reasoning: true,
+                    wire_format: ThinkingWireFormat::DeepSeekNative,
+                    control_surface: "thinking.type + thinking.effort",
+                },
+                supports_tool_calls: true,
+                supports_json_output: true,
+                supports_fim: true,
+            },
+            Self::Qwen => ProviderCapabilities {
+                kind: self,
+                display_name: self.display_name(),
+                thinking: ProviderThinkingCapabilities {
+                    supports_thinking: true,
+                    supports_reasoning_content: false,
+                    supports_preserved_reasoning: false,
+                    wire_format: ThinkingWireFormat::DashScopeEnableThinking,
+                    control_surface: "enable_thinking + thinking_budget",
+                },
+                supports_tool_calls: true,
+                supports_json_output: true,
+                supports_fim: false,
+            },
+            Self::Kimi => ProviderCapabilities {
+                kind: self,
+                display_name: self.display_name(),
+                thinking: ProviderThinkingCapabilities {
+                    supports_thinking: true,
+                    supports_reasoning_content: true,
+                    supports_preserved_reasoning: true,
+                    wire_format: ThinkingWireFormat::NativeTypeOnly,
+                    control_surface: "thinking.type",
+                },
+                supports_tool_calls: true,
+                supports_json_output: true,
+                supports_fim: false,
+            },
+            Self::Zhipu => ProviderCapabilities {
+                kind: self,
+                display_name: self.display_name(),
+                thinking: ProviderThinkingCapabilities {
+                    supports_thinking: true,
+                    supports_reasoning_content: true,
+                    supports_preserved_reasoning: true,
+                    wire_format: ThinkingWireFormat::NativeTypeOnly,
+                    control_surface: "thinking.type",
+                },
+                supports_tool_calls: true,
+                supports_json_output: true,
+                supports_fim: false,
+            },
+            Self::OpenRouter | Self::OpenAiCompatible => ProviderCapabilities {
+                kind: self,
+                display_name: self.display_name(),
+                thinking: ProviderThinkingCapabilities {
+                    supports_thinking: false,
+                    supports_reasoning_content: false,
+                    supports_preserved_reasoning: false,
+                    wire_format: ThinkingWireFormat::Unsupported,
+                    control_surface: "custom provider config required",
+                },
+                supports_tool_calls: true,
+                supports_json_output: true,
+                supports_fim: false,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProviderCapabilities {
+    pub kind: ProviderKind,
+    pub display_name: &'static str,
+    pub thinking: ProviderThinkingCapabilities,
+    pub supports_tool_calls: bool,
+    pub supports_json_output: bool,
+    pub supports_fim: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProviderThinkingCapabilities {
+    pub supports_thinking: bool,
+    pub supports_reasoning_content: bool,
+    pub supports_preserved_reasoning: bool,
+    pub wire_format: ThinkingWireFormat,
+    pub control_surface: &'static str,
 }
 
 /// Provider-specific endpoint and model-name overrides.
@@ -53,6 +180,12 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub deepseek: ProviderEndpointConfig,
     #[serde(default)]
+    pub qwen: ProviderEndpointConfig,
+    #[serde(default)]
+    pub kimi: ProviderEndpointConfig,
+    #[serde(default)]
+    pub zhipu: ProviderEndpointConfig,
+    #[serde(default)]
     pub openrouter: ProviderEndpointConfig,
     #[serde(default, rename = "openai-compatible")]
     pub openai_compatible: ProviderEndpointConfig,
@@ -63,6 +196,9 @@ impl ProviderConfig {
     pub fn endpoint_for(&self, kind: ProviderKind) -> &ProviderEndpointConfig {
         match kind {
             ProviderKind::DeepSeek => &self.deepseek,
+            ProviderKind::Qwen => &self.qwen,
+            ProviderKind::Kimi => &self.kimi,
+            ProviderKind::Zhipu => &self.zhipu,
             ProviderKind::OpenRouter => &self.openrouter,
             ProviderKind::OpenAiCompatible => &self.openai_compatible,
         }
@@ -140,10 +276,12 @@ impl Provider for DeepSeekProvider {
             Some(base_url) => client.with_base_url(base_url),
             None => client,
         };
-        client.with_model_names(
-            Some(self.request_model_name(&DeepSeekModel::Pro)),
-            Some(self.request_model_name(&DeepSeekModel::Flash)),
-        )
+        client
+            .with_model_names(
+                Some(self.request_model_name(&DeepSeekModel::Pro)),
+                Some(self.request_model_name(&DeepSeekModel::Flash)),
+            )
+            .with_thinking_wire_format(self.kind.capabilities().thinking.wire_format)
     }
 
     fn request_model_name(&self, model: &DeepSeekModel) -> String {
@@ -185,6 +323,9 @@ fn normalize_base_url(value: &str) -> String {
 fn default_base_url(kind: ProviderKind) -> Option<&'static str> {
     match kind {
         ProviderKind::DeepSeek => None,
+        ProviderKind::Qwen => Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        ProviderKind::Kimi => Some("https://api.moonshot.cn/v1"),
+        ProviderKind::Zhipu => Some("https://open.bigmodel.cn/api/paas/v4"),
         ProviderKind::OpenRouter => Some("https://openrouter.ai/api/v1"),
         ProviderKind::OpenAiCompatible => Some("https://api.openai.com/v1"),
     }
@@ -194,6 +335,21 @@ fn default_request_model_name(kind: ProviderKind, model: &DeepSeekModel) -> Stri
     let canonical = model.canonical();
     match kind {
         ProviderKind::DeepSeek => canonical.to_string(),
+        ProviderKind::Qwen => match canonical {
+            DeepSeekModel::Pro => "qwen3-coder-plus".to_string(),
+            DeepSeekModel::Flash => "qwen3-coder-flash".to_string(),
+            other => other.to_string(),
+        },
+        ProviderKind::Kimi => match canonical {
+            DeepSeekModel::Pro => "kimi-k2.6".to_string(),
+            DeepSeekModel::Flash => "kimi-k2.5".to_string(),
+            other => other.to_string(),
+        },
+        ProviderKind::Zhipu => match canonical {
+            DeepSeekModel::Pro => "glm-5.1".to_string(),
+            DeepSeekModel::Flash => "glm-4.7-flashx".to_string(),
+            other => other.to_string(),
+        },
         ProviderKind::OpenRouter => match canonical {
             DeepSeekModel::Pro => "deepseek/deepseek-v4-pro".to_string(),
             DeepSeekModel::Flash => "deepseek/deepseek-v4-flash".to_string(),
@@ -248,6 +404,44 @@ mod tests {
         assert_eq!(openrouter.default, ProviderKind::OpenRouter);
         assert_eq!(compatible.default, ProviderKind::OpenAiCompatible);
         assert_eq!(ProviderKind::OpenAiCompatible.as_str(), "openai-compatible");
+    }
+
+    #[test]
+    fn provider_config_parses_chinese_provider_presets() {
+        let qwen: ProviderConfig = toml::from_str(r#"default = "qwen""#).expect("qwen parses");
+        let kimi: ProviderConfig = toml::from_str(r#"default = "kimi""#).expect("kimi parses");
+        let zhipu: ProviderConfig = toml::from_str(r#"default = "zhipu""#).expect("zhipu parses");
+
+        assert_eq!(qwen.default, ProviderKind::Qwen);
+        assert_eq!(kimi.default, ProviderKind::Kimi);
+        assert_eq!(zhipu.default, ProviderKind::Zhipu);
+        assert_eq!(ProviderKind::Qwen.as_str(), "qwen");
+        assert_eq!(ProviderKind::Kimi.as_str(), "kimi");
+        assert_eq!(ProviderKind::Zhipu.as_str(), "zhipu");
+    }
+
+    #[test]
+    fn provider_capabilities_describe_thinking_adapters() {
+        assert_eq!(
+            ProviderKind::Qwen.capabilities().thinking.wire_format,
+            ThinkingWireFormat::DashScopeEnableThinking
+        );
+        assert_eq!(
+            ProviderKind::Kimi.capabilities().thinking.wire_format,
+            ThinkingWireFormat::NativeTypeOnly
+        );
+        assert!(
+            ProviderKind::Zhipu
+                .capabilities()
+                .thinking
+                .supports_preserved_reasoning
+        );
+        assert!(
+            !ProviderKind::OpenAiCompatible
+                .capabilities()
+                .thinking
+                .supports_thinking
+        );
     }
 
     #[test]
@@ -354,6 +548,60 @@ flash_model = "chat-fast"
         assert_eq!(
             provider.request_model_name(&DeepSeekModel::Flash),
             "deepseek/deepseek-v4-flash"
+        );
+    }
+
+    #[test]
+    fn provider_factory_builds_chinese_provider_defaults() {
+        let qwen = build_provider(
+            &ProviderConfig {
+                default: ProviderKind::Qwen,
+                ..ProviderConfig::default()
+            },
+            "sk-test".to_string(),
+        );
+        assert_eq!(qwen.kind(), ProviderKind::Qwen);
+        assert_eq!(
+            qwen.base_url(),
+            Some("https://dashscope.aliyuncs.com/compatible-mode/v1")
+        );
+        assert_eq!(
+            qwen.request_model_name(&DeepSeekModel::Pro),
+            "qwen3-coder-plus"
+        );
+        assert_eq!(
+            qwen.request_model_name(&DeepSeekModel::Flash),
+            "qwen3-coder-flash"
+        );
+
+        let kimi = build_provider(
+            &ProviderConfig {
+                default: ProviderKind::Kimi,
+                ..ProviderConfig::default()
+            },
+            "sk-test".to_string(),
+        );
+        assert_eq!(kimi.kind(), ProviderKind::Kimi);
+        assert_eq!(kimi.base_url(), Some("https://api.moonshot.cn/v1"));
+        assert_eq!(kimi.request_model_name(&DeepSeekModel::Pro), "kimi-k2.6");
+        assert_eq!(kimi.request_model_name(&DeepSeekModel::Flash), "kimi-k2.5");
+
+        let zhipu = build_provider(
+            &ProviderConfig {
+                default: ProviderKind::Zhipu,
+                ..ProviderConfig::default()
+            },
+            "sk-test".to_string(),
+        );
+        assert_eq!(zhipu.kind(), ProviderKind::Zhipu);
+        assert_eq!(
+            zhipu.base_url(),
+            Some("https://open.bigmodel.cn/api/paas/v4")
+        );
+        assert_eq!(zhipu.request_model_name(&DeepSeekModel::Pro), "glm-5.1");
+        assert_eq!(
+            zhipu.request_model_name(&DeepSeekModel::Flash),
+            "glm-4.7-flashx"
         );
     }
 

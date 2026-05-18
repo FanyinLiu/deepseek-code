@@ -6,7 +6,7 @@ use crate::storage;
 
 /// Run the doctor command: check connectivity, auth, model availability.
 pub async fn doctor(project_root: Option<PathBuf>) -> Result<(), anyhow::Error> {
-    println!("DeepSeek-Code Doctor\n");
+    println!("Octocode Doctor\n");
     let root = project_root.or_else(storage::find_project_root);
     let config = storage::Config::load(root.as_deref())?;
 
@@ -22,7 +22,7 @@ pub async fn doctor(project_root: Option<PathBuf>) -> Result<(), anyhow::Error> 
     // 2. Check connectivity
     let provider = build_provider(&config.provider, api_key.clone());
     let client = provider.create_deepseek_client();
-    println!("   Testing connectivity to api.deepseek.com...");
+    println!("   Testing connectivity to {}...", provider.kind().as_str());
 
     match client.list_models().await {
         Ok(models) => {
@@ -31,7 +31,7 @@ pub async fn doctor(project_root: Option<PathBuf>) -> Result<(), anyhow::Error> 
                 let model_ids: Vec<&str> = models
                     .iter()
                     .filter_map(|m| m["id"].as_str())
-                    .filter(|id| id.starts_with("deepseek"))
+                    .take(8)
                     .collect();
                 if !model_ids.is_empty() {
                     println!("   Available models:");
@@ -124,7 +124,7 @@ pub async fn doctor(project_root: Option<PathBuf>) -> Result<(), anyhow::Error> 
 
     // 5. Check session store
     if let Some(home) = dirs::home_dir() {
-        let store_dir = home.join(".deepseek-code").join("sessions");
+        let store_dir = home.join(".octocode").join("sessions");
         if store_dir.exists() {
             let count = std::fs::read_dir(&store_dir).map_or(0, std::iter::Iterator::count);
             println!(

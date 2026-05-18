@@ -2,9 +2,9 @@
 
 Date: 2026-05-09
 
-This document compares `deepseek-code` against the current public OpenAI Codex
+This document compares `octocode` against the current public OpenAI Codex
 CLI and the community DeepSeek TUI project. The goal is not to clone either
-project, but to identify the product gaps that matter if `deepseek-code` should
+project, but to identify the product gaps that matter if `octocode` should
 feel like a polished terminal agent while borrowing the best interaction ideas
 from Codex CLI and DeepSeek TUI.
 
@@ -22,10 +22,10 @@ from Codex CLI and DeepSeek TUI.
 
 ## Current Position
 
-`deepseek-code` already has a credible core: Ratatui TUI, DeepSeek streaming,
+`octocode` already has a credible core: Ratatui TUI, DeepSeek streaming,
 tools, approval policy, plan mode, subagents, MCP stdio, sessions, memory
 listing, rollback, LSP client, syntax highlighting, and dual binaries
-(`deepseek-code` / `dscode`).
+(`octocode` / `octocode`).
 
 The gap is product completeness. Codex CLI and DeepSeek TUI are stronger at
 making every capability discoverable, resumable, configurable, and safe under
@@ -33,23 +33,23 @@ one consistent runtime model.
 
 ## Comparison Matrix
 
-| Area | OpenAI Codex CLI | DeepSeek TUI | deepseek-code now | Gap / decision |
+| Area | OpenAI Codex CLI | DeepSeek TUI | octocode now | Gap / decision |
 |---|---|---|---|---|
-| Install / launch | `npm`, Homebrew, releases; `codex` starts TUI. | `npm`, Cargo, Homebrew, direct release, Docker; dispatcher plus companion binary. | Cargo/source works; `dscode` now installable locally; README still has placeholders. | Ship real release artifacts and make `dscode` the clean user-facing command. |
-| First-run auth | ChatGPT sign-in or API key. | First launch prompts for DeepSeek key; `auth status`, `doctor`. | TUI asks for key if missing; keyring/project fallback. | Add `dscode auth status`, doctor-lite in first run, and clearer key-source precedence. |
+| Install / launch | `npm`, Homebrew, releases; `codex` starts TUI. | `npm`, Cargo, Homebrew, direct release, Docker; dispatcher plus companion binary. | Cargo/source works; `octocode` now installable locally; README still has placeholders. | Ship real release artifacts and make `octocode` the clean user-facing command. |
+| First-run auth | ChatGPT sign-in or API key. | First launch prompts for DeepSeek key; `auth status`, `doctor`. | TUI asks for key if missing; keyring/project fallback. | Add `octocode auth status`, doctor-lite in first run, and clearer key-source precedence. |
 | TUI composer | Full-screen TUI, screenshots, queued follow-ups, history search. | Keyboard-driven TUI, reasoning blocks, command-heavy workflow. | Multiline input, repeat-key fixes, `!` shell mode, basic history. | Add command palette, Ctrl-R history search, paste handling, file mention completion. |
-| Slash commands | Large built-in command surface: permissions, model, agents, status, MCP, diff, review, init, compact, resume, etc. | Commands for model auto, auth, doctor, restore, theme, MCP-related flows. | Several built-ins exist; no palette or custom command discovery. | Build `/` popup and `.deepseek-code/commands` loader. |
+| Slash commands | Large built-in command surface: permissions, model, agents, status, MCP, diff, review, init, compact, resume, etc. | Commands for model auto, auth, doctor, restore, theme, MCP-related flows. | Several built-ins exist; no palette or custom command discovery. | Build `/` popup and `.octocode/commands` loader. |
 | Permission modes | Explicit permissions/sandbox controls, approval overlays, subagent inheritance. | Plan / Agent / YOLO modes with sandbox protection. | Tool-level policy, approve once/session, auto_mode flag, yolo command. | Convert flags into first-class modes: read-only, accept-edits, default, auto, bypass. |
 | Shell mode | `!` commands can be queued and controlled inside TUI. | Shell execution through typed registry and sandbox. | `!cmd` now routes through approved `run_command`. | Add queued `!cmd` while a turn is running and better command output panes. |
 | Plan mode | Plans visible before execution; slash-driven control. | Plan is read-only explore; Agent asks; YOLO auto-approves. | Plan generation/review/options/tracker exist. | Add refine/edit plan, explicit read-only enforcement, plan history in transcript. |
 | Subagents | Parallel specialized agents, `/agent`, custom TOML agents, max thread/depth settings. | Sub-agents and durable task queue. | Built-in/custom-ish registry, isolated sessions, cards, no nested subagents by default. | Add `/agents` thread switcher, `/tasks`, permission inheritance, resumable task records. |
-| Skills / plugins | Skills are first-class, progressive-disclosure `SKILL.md`; plugins distribute skills/apps. | Skills system is listed as installable instruction packs. | No real skills loader yet. | Implement `.deepseek-code/skills/<name>/SKILL.md` and later plugin packaging. |
+| Skills / plugins | Skills are first-class, progressive-disclosure `SKILL.md`; plugins distribute skills/apps. | Skills system is listed as installable instruction packs. | No real skills loader yet. | Implement `.octocode/skills/<name>/SKILL.md` and later plugin packaging. |
 | MCP | STDIO and Streamable HTTP; bearer/OAuth; CLI management; `/mcp`. | MCP servers; HTTP/SSE runtime work is active. | Stdio MCP, filters, timeout, status. | Add HTTP/SSE transports, auth placeholders, `/mcp add/list/remove/status`. |
 | Hooks | Lifecycle hooks: prompt submit, pre/post tool, permission request, stop. | Not the main differentiator, but product has workflow integrations. | Config schema only. | Add HookRunner and wire `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`. |
-| Runtime API | App server / remote TUI / automation paths. | `deepseek serve --http` for headless workflows. | No serve mode. | Add `dscode serve --http` after MCP/permissions stabilize. |
+| Runtime API | App server / remote TUI / automation paths. | `deepseek serve --http` for headless workflows. | No serve mode. | Add `octocode serve --http` after MCP/permissions stabilize. |
 | Rollback | Review/diff/status are tightly integrated. | Side-git snapshots and `/restore` without touching repo git. | In-memory undo/restore by turn. | Make rollback durable and show checkpoints in TUI. |
 | LSP diagnostics | Codex has strong review/tooling ecosystem; exact LSP behavior varies by client. | Inline diagnostics after edits via common LSP servers. | LSP client exists but not deeply wired into post-edit loop. | Feed diagnostics into self-verification and TUI diff/workbench. |
-| Distribution | Mature releases and docs. | Prebuilt Windows/Linux/macOS, Docker, npm wrapper. | CI exists; installed `dscode` locally; release docs thin. | Add release archives, checksums, Windows install path, Scoop manifest, shell completions. |
+| Distribution | Mature releases and docs. | Prebuilt Windows/Linux/macOS, Docker, npm wrapper. | CI exists; installed `octocode` locally; release docs thin. | Add release archives, checksums, Windows install path, Scoop manifest, shell completions. |
 
 ## Priority Backlog
 
@@ -83,7 +83,7 @@ one consistent runtime model.
 2. Add hooks runner and lifecycle events.
 3. Add MCP HTTP/SSE transport and auth placeholders.
 4. Add custom slash-command files.
-5. Add `dscode serve --http` after permissions and MCP are stable.
+5. Add `octocode serve --http` after permissions and MCP are stable.
 
 ### P4: Distribution Polish
 

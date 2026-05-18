@@ -1,4 +1,4 @@
-# deepseek-code 现状自审（Phase 1 / Task #1）
+# octocode 现状自审（Phase 1 / Task #1）
 
 > 范围：Cargo workspace 根、`src/` 的全部 TUI 与关键后端模块、`docs/` 已有的 audit 文档。
 > 用途：作为后续 6 份竞品调研报告的对照基线。**结论只代表 2026-05-13 当时仓库 HEAD 的实现**——后续任何 commit 都可能让本文档过期。
@@ -8,13 +8,13 @@
 
 ## 0. TL;DR：本项目的 14 个最显著的"现状特征"
 
-1. **Rust + ratatui 0.30 + crossterm 0.29** 栈，二进制目标三个（`deepseek-code` / `dscode` / `ds`）。
+1. **Rust + ratatui 0.30 + crossterm 0.29** 栈，二进制目标三个（`octocode` / `octocode` / `octocode`）。
 2. **DeepSeek 原生**：内置 client (`src/deepseek/`) 支持 Pro/Flash/LegacyChat/LegacyReasoner、thinking mode、FIM、cache、json mode、migration、stream。
 3. **CLI 命令面已经很宽**：`chat / ask / search / plan / run / resume / export / assess / review / features / agent / mission / task / tui / preview-tui`，外加 `doctor / login`。所有命令都接受全局 `-C / --project-root`。
 4. **TUI 主布局是经典纵向 6 行栈**：`status_bar(1) / spacer(1) / 内容(min 5) / model_hint(1) / divider(1) / input(1-5h) / footer(2)`——没有侧栏，没有分屏；多面板都是把"内容"区临时换成 plan / subagent / diff / settings 视图。
 5. **三套主题**：Light（Droid-tan 配色）/ Dark（暖琥珀 accent）/ HighContrast，靠 `COLORFGBG` + macOS `AppleInterfaceStyle` 自动检测，可 `--theme` 覆盖。
 6. **TUI 默认走"安静 Droid 风"**：Light 主题用米色 canvas（235,226,196）+ 橙红 accent（224,82,0），属于明显的 Droid CLI 风格借鉴。
-7. **状态栏（statusline）有 8 个彩色 chip**：`ds-code / mode / web / ↑in / ↓out / agent / ¥cost / cache / tools / permissions / context%`——但**这些 chip 的配色 hard-code 在 `statusline.rs` 内**，**不走 `theme::palette()`**，是显著的主题断点。
+7. **状态栏（statusline）有 8 个彩色 chip**：`octocode / mode / web / ↑in / ↓out / agent / ¥cost / cache / tools / permissions / context%`——但**这些 chip 的配色 hard-code 在 `statusline.rs` 内**，**不走 `theme::palette()`**，是显著的主题断点。
 8. **状态栏底色用 CNY ¥** 显示成本——明确是为中国用户优化，但对国际用户来说是品牌信号。
 9. **审批 UX 已是 inline 模式**（`render_approval_inline`），按 `[a]` 一次 / `[s]` 本轮 / `[d]` 拒绝；中英文按内容自动切换；7 档风险（SafeRead → Blocked）有不同色。还保留了 `render_approval_popup` 兼容老的 fullscreen 模式。
 10. **斜杠命令的弹窗已经存在**（`render_slash_command_panel`），但实际 input.rs 里**没有触发它**——`/` 仅作为字符录入，没有触发补全菜单。这是 P0 缺口之一。
@@ -31,10 +31,10 @@
 
 ```
 [package]
-name = "deepseek-code"
+name = "octocode"
 version = "0.1.0"
 edition = "2021"
-default-run = "deepseek-code"
+default-run = "octocode"
 ```
 
 依赖关键栈：
@@ -53,16 +53,16 @@ default-run = "deepseek-code"
 
 | 名字 | 路径 | 当前用途 |
 |---|---|---|
-| `deepseek-code` | `src/main.rs` | 主入口，默认无参运行直接进 TUI |
-| `dscode` | `src/bin/dscode.rs` | 短名快捷入口（"用户面向的干净命令"——见 `docs/openai_codex_deepseek_tui_comparison.md`） |
-| `ds` | `src/bin/ds.rs` | 更短的 alias |
+| `octocode` | `src/main.rs` | 主入口，默认无参运行直接进 TUI |
+| `octocode` | `src/bin/octocode.rs` | 短名快捷入口（"用户面向的干净命令"——见 `docs/openai_codex_deepseek_tui_comparison.md`） |
+| `octocode` | `src/bin/octocode.rs` | 更短的 alias |
 
 **问题**：三个二进制名带来品牌分裂。Codex / Gemini / Claude Code 都是一个二进制 + 别名（或者直接一个）。
 
 ### 1.3 CLI 子命令面（`src/cli_entry.rs`）
 
 ```
-deepseek-code [-C PATH]
+octocode [-C PATH]
     doctor
     login [--api-key KEY]
     chat [PROMPT] [-t/--thinking] [-m/--model pro|flash] [--session ID]
@@ -158,8 +158,8 @@ deepseek-code [-C PATH]
 - `detected_language`：扫项目根的特征文件（Cargo.toml → Rust，package.json → JS/Node，...）
 
 **视觉元素**：
-- 中心 `ascii_art::WELCOME_WHALE` / `WELCOME_WHALE_COMPACT`（DeepSeek Code 鲸鱼品牌块）
-- 提示行 `Tip: Use /init to teach DeepSeek Code this workspace`
+- 中心 `ascii_art::WELCOME_WHALE` / `WELCOME_WHALE_COMPACT`（Octocode 鲸鱼品牌块）
+- 提示行 `Tip: Use /init to teach Octocode this workspace`
 - 快捷键行：`shift+tab 切 mode · ctrl+n 切 model / ctrl+l autonomy · tab thinking`
 - Capability 行：`skills (N) + · MCP (N) ? · AGENTS.md +/x`
 - API 缺时显示 3 步引导（粘贴 / Enter / 开始）
@@ -229,13 +229,13 @@ Token label 单方向：output 优先（`↓ 578 tokens`），否则 input（`�
 
 8-10 个彩色 chip，按宽度自动隐藏（narrow < 88、compact < 112）：
 ```
- ds-code   chat   web:on   ↑ 742 tokens   ↓ 131 tokens   agent 16.2k tokens   ¥0.003   cache 80%   tools ✓   ask   126.3k/1M (12.6%)
+ octocode   chat   web:on   ↑ 742 tokens   ↓ 131 tokens   agent 16.2k tokens   ¥0.003   cache 80%   tools ✓   ask   126.3k/1M (12.6%)
 ```
 
 每个 chip 有自己的 RGB 底色：
 | Chip | bg | 含义 |
 |---|---|---|
-| `ds-code` | `rgb(36,38,42)` | 项目品牌色 |
+| `octocode` | `rgb(36,38,42)` | 项目品牌色 |
 | mode | `rgb(87,142,214)` 蓝 | chat/plan/run/review |
 | web | `rgb(118,184,124)` 绿 | web search on/off |
 | ↑in | `rgb(255,184,77)` 橙 | input tokens |
@@ -352,7 +352,7 @@ Token label 单方向：output 优先（`↓ 578 tokens`），否则 input（`�
 - table card mode 把第二列视为 "title" 是 hardcoded 假设——不一定对
 - 列表项（`- item` / `* item` / `1. item`）**完全不识别**——会作为 plain text 行渲染（这是大短板）
 - should_hide_transcript_line 用字符串前缀匹配，fragile
-- "Brewed for N" 看起来是 GitHub Copilot 或类似产品的标志——为什么 deepseek-code 会输出这个？需查
+- "Brewed for N" 看起来是 GitHub Copilot 或类似产品的标志——为什么 octocode 会输出这个？需查
 - `render_inline_subagents` / `render_inline_diffs` / `aggregate_plan_status` 未读到，估计是中规中矩的辅助函数
 
 ### 2.10 决策面板 `src/tui/plan_tracker.rs`（包含三个 panel）
@@ -645,7 +645,7 @@ Agents
 - 私有 `classifier.rs` + `rules.rs` + `tests.rs`
 - 私有：`determine_route_from_score` / `merge_results` / `build_explanation`
 
-**功能**：按输入特征（关键词 / 文件数量 / 模式匹配）算复杂度分数，决定 fast path 还是触发完整 agent loop 还是 swarm。这是 deepseek-code 一个**明显的差异化设计**——多数 CLI 没有显式路由层。
+**功能**：按输入特征（关键词 / 文件数量 / 模式匹配）算复杂度分数，决定 fast path 还是触发完整 agent loop 还是 swarm。这是 octocode 一个**明显的差异化设计**——多数 CLI 没有显式路由层。
 
 `RouterConfig`：`router_enabled / router_conservative / router_use_model / router_simple_threshold / router_confidence_threshold`。
 
@@ -695,11 +695,11 @@ Agents
 
 ### 3.6 `defense/*` —— **5 层独立防御**（差异化设计）
 
-这是 deepseek-code 一个**罕见的设计**——多数 CLI 只有 sandbox + approval，这里多出 4 层：
+这是 octocode 一个**罕见的设计**——多数 CLI 只有 sandbox + approval，这里多出 4 层：
 
 #### 3.6.1 `defense/identity.rs` —— 身份堡垒
 ```rust
-pub const AGENT_NAME: &str = "deepseek-code";
+pub const AGENT_NAME: &str = "octocode";
 pub const CREATOR: &str = "project-defined";
 pub const CORE_MISSION: &str = "Assist with software development tasks safely";
 
@@ -726,7 +726,7 @@ pub struct IdentitySanitization { … }
 
 `PerimeterViolation { category: PerimeterCategory, reason, detail }`。
 
-**对比**：Codex 用 sandbox（Seatbelt / Landlock）做相同的事；Claude Code 用 `permissions.deny`。deepseek-code 走的是 in-process **静态扫描**路线，**更轻量但绕过容易**。
+**对比**：Codex 用 sandbox（Seatbelt / Landlock）做相同的事；Claude Code 用 `permissions.deny`。octocode 走的是 in-process **静态扫描**路线，**更轻量但绕过容易**。
 
 #### 3.6.3 `defense/input_filter.rs`、`emotional.rs`、`output.rs`
 
@@ -763,7 +763,7 @@ mod.rs 注释明确：
 - `mcp/protocol.rs`：MCP wire protocol（版本待查）
 - `mcp/registry.rs`：`McpRegistry`
 
-**对比**：Claude Code / Codex 都支持 stdio + http/sse + bearer/OAuth；deepseek-code 只有 stdio。**这是后续改造 P0 项**。
+**对比**：Claude Code / Codex 都支持 stdio + http/sse + bearer/OAuth；octocode 只有 stdio。**这是后续改造 P0 项**。
 
 ### 3.9 `storage/config.rs`（706+ 行）—— **12+ 配置节**
 
@@ -815,7 +815,7 @@ Config
 - 已有 `/copy`（复制 transcript）、`/undo`、`/restore`、`/checkpoint` —— 撤销机制完整
 
 **问题**：
-- **功能广度上 deepseek-code 已经超过 Codex CLI、接近 Claude Code**（数量上甚至更多）
+- **功能广度上 octocode 已经超过 Codex CLI、接近 Claude Code**（数量上甚至更多）
 - 但**实现深度未知**——比如 `cmd_skills` 有没有像 Claude Code 那样的 progressive disclosure SKILL.md 加载？`cmd_hooks` 是否真的钩进 lifecycle？这是后续 Phase 2 验证的关键
 - input.rs **没有触发 slash command panel**——意味着这 48 个命令对用户**不可发现**（必须记住 `/x`），UI 没拉通
 
@@ -848,7 +848,7 @@ Config
 - `summarize_task_title / summarize_cjk_task_title / summarize_cjk_keywords / summarize_latin_task_title / summarize_plan_step / summarize_agent_plan_step / trim_title_punctuation`
 - 这是给 status_bar 的"⠴ <task title>... (6s · ...)" 那行用的
 
-**Brewed for 之谜**：`append_brewed_line` 在 app.rs 中（line 3484）——说明 "Brewed for N" 是 deepseek-code 自己的 UI 信号（不是从模型输出抄来的），表示"模型刚刚 'pondered' 了 N 秒"。视觉灵感可能来自 GitHub Copilot 的 "thinking" 标记。
+**Brewed for 之谜**：`append_brewed_line` 在 app.rs 中（line 3484）——说明 "Brewed for N" 是 octocode 自己的 UI 信号（不是从模型输出抄来的），表示"模型刚刚 'pondered' 了 N 秒"。视觉灵感可能来自 GitHub Copilot 的 "thinking" 标记。
 
 **run_tui(...)（3587）—— TUI 主入口**：通过 cli_entry 调用，构造 TuiApp 后进入 event loop。
 
@@ -893,13 +893,13 @@ Config
 
 ## 5. 现状 vs 竞品（粗略印象，待后续 6 份调研报告精化）
 
-| 维度 | deepseek-code 现状 | 与竞品差距 |
+| 维度 | octocode 现状 | 与竞品差距 |
 |---|---|---|
 | **CLI 命令面** | 17 个子命令 + 48 个 slash | **比 Codex 多，约等于 Claude Code，超过 Gemini** |
 | **多 agent 协同** | swarm / team / subagent 三层并行 | 架构最复杂；但**抽象耦合多**，需要简化 |
 | **审批与策略** | 4 actions × 7 risks + autonomy 三档 + perimeter | 状态机比 Codex 完整；缺白名单 + 持久化 |
 | **defense / prompt-injection 防御** | 5 层独立 | **罕见的差异化**，竞品多数没有 |
-| **复杂度路由** | ComplexityRouter + Router config | **罕见**，Claude Code/Codex 隐式做；deepseek-code 显式且可配 |
+| **复杂度路由** | ComplexityRouter + Router config | **罕见**，Claude Code/Codex 隐式做；octocode 显式且可配 |
 | **MCP** | 只 stdio | **重大差距**：Claude Code/Codex 支持 http/sse + auth |
 | **theme 系统** | 3 套 palette + 自动检测 | 与 Codex/Gemini 持平 |
 | **subagent UI** | SubagentCard with R/W/token/duration | 与 Claude Code Task tool UI 接近，**缺 "展开 / 取消" 控制** |

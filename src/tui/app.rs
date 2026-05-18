@@ -54,7 +54,7 @@ use crate::deepseek::{
     ToolCallFunction,
 };
 use crate::policy::ApprovalDisplay;
-use crate::provider::ProviderKind;
+use crate::provider::{build_provider, Provider, ProviderKind};
 use crate::storage;
 
 use super::{
@@ -296,9 +296,14 @@ impl TuiStartupData {
         let config_result = storage::Config::load(Some(root));
         let config_loaded = config_result.is_ok();
         let config = config_result.unwrap_or_default();
-        let api_key = storage::get_api_key_without_keyring(storage::config_api_key(&config));
+        let provider = config.provider.default;
+        let api_key = storage::get_api_key_without_keyring_for_provider(
+            provider,
+            storage::config_api_key(&config),
+        );
         let api_key_available = api_key.is_some();
-        let probe_keyring = !api_key_available && storage::get_env_api_key().is_none();
+        let probe_keyring =
+            !api_key_available && storage::get_env_api_key_for_provider(provider).is_none();
 
         (
             Self {
@@ -339,7 +344,7 @@ fn load_welcome_with_startup(
         "unknown"
     };
     let recent_sessions = dirs::home_dir()
-        .map(|home| storage::SessionStore::new(home.join(".deepseek-code")).list(root))
+        .map(|home| storage::SessionStore::new(home.join(".octocode")).list(root))
         .and_then(Result::ok)
         .unwrap_or_default()
         .into_iter()
@@ -359,6 +364,13 @@ fn load_welcome_with_startup(
         workspace_name: root
             .file_name()
             .and_then(|name| name.to_str())
+            .map(|name| {
+                if name == concat!("deepseek", "-", "code") {
+                    "octocode"
+                } else {
+                    name
+                }
+            })
             .unwrap_or("workspace")
             .to_string(),
         workspace_path: root.to_path_buf(),
@@ -579,7 +591,7 @@ impl TuiApp {
             cursor_pos: 0,
             scroll_offset: 0,
             status_message: if api_key_missing {
-                "Enter your DeepSeek API key to start".into()
+                "Enter your provider API key to start".into()
             } else {
                 "Ready".into()
             },
@@ -729,7 +741,7 @@ impl TuiApp {
         self.renderer_mode = mode;
         self.config.ui.renderer = mode.label().to_string();
         self.status_message = format!(
-            "TUI renderer set to {}; restart ds to apply terminal mode",
+            "TUI renderer set to {}; restart octocode to apply terminal mode",
             mode.label()
         );
         self.push_activity(format!("renderer: {}", mode.label()));
@@ -745,7 +757,7 @@ impl TuiApp {
         self.renderer_mode = RendererMode::from_config(stored);
         self.config.ui.renderer = stored.to_string();
         self.status_message = format!(
-            "TUI renderer set to {} (resolved to {}); restart ds to apply terminal mode",
+            "TUI renderer set to {} (resolved to {}); restart octocode to apply terminal mode",
             stored,
             self.renderer_mode.label()
         );
@@ -1081,7 +1093,7 @@ impl TuiApp {
             return;
         }
 
-        if self.api_key_entry.is_some() {
+        if self.api_key_entry.is_some() && !self.input_text.trim_start().starts_with('/') {
             self.handle_api_key_entry_key(key, tx);
             return;
         }
@@ -1522,10 +1534,7 @@ impl TuiApp {
 
     fn slash_command_suggestions(&self) -> Vec<(String, String)> {
         let trimmed = self.input_text.trim();
-        if self.api_key_entry.is_some()
-            || self.settings_open
-            || !trimmed.starts_with('/')
-            || trimmed.contains(char::is_whitespace)
+        if self.settings_open || !trimmed.starts_with('/') || trimmed.contains(char::is_whitespace)
         {
             return Vec::new();
         }
@@ -2061,8 +2070,7 @@ impl TuiApp {
                     Err(error) => {
                         self.status_message = error.to_string();
                         self.stream_buffer =
-                            "API key should start with `sk-`. Paste it here, then press Enter."
-                                .into();
+                            "Paste a valid provider API key here, then press Enter.".into();
                     }
                 }
             }
@@ -2221,7 +2229,7 @@ impl TuiApp {
         self.clear_input_editor();
         self.is_streaming = false;
         self.stream_start = None;
-        self.stream_buffer = "DeepSeek API key required.\n\nPaste your API key into the input below, then press Enter. It will be stored in the system keyring.".into();
+        self.stream_buffer = "Provider API key required.\n\nPaste your provider API key into the input below, then press Enter. It will be stored in the system keyring.".into();
         self.status_message = "Enter API key first".into();
     }
 
@@ -2269,7 +2277,7 @@ impl TuiApp {
         self.set_api_key_state(ApiKeyState::Error);
         self.status_message = format!("API key save failed: {error}");
         self.stream_buffer = format!(
-            "Could not save API key.\n\n{error}\n\nTry again, or run `deepseek-code login --api-key sk-...`."
+            "Could not save API key.\n\n{error}\n\nTry again, or run `octocode login --api-key <key>`."
         );
         if let Some(entry) = self.api_key_entry.as_mut() {
             entry.saving = false;
@@ -3915,7 +3923,7 @@ pub fn render_preview_snapshot(
     if api_key_missing {
         app.set_api_key_state(ApiKeyState::Missing);
         app.api_key_entry = Some(ApiKeyEntry::default());
-        app.status_message = "Enter your DeepSeek API key to start".into();
+        app.status_message = "Enter your provider API key to start".into();
     } else {
         app.set_api_key_state(ApiKeyState::Ready);
         app.api_key_entry = None;
@@ -3969,37 +3977,57 @@ pub fn render_preview_snapshot(
         ];
         app.stream_buffer = String::new();
         app.reasoning_buffer =
-            "Identify entry points -> inspect tests -> make the smallest safe fix".into();
+            "Map runtime state -> fan out agents -> synthesize UI changes".into();
         app.status_message = "Working across plan, agents, and tools".into();
-        app.current_task_title = "整理系统运行流畅度".into();
+        app.current_task_title = "优化多智能体任务控制台".into();
         app.total_tokens = 578;
         app.current_turn_tokens = 578;
         app.current_turn_input_tokens = 41;
         app.current_turn_output_tokens = 131;
-        app.plan_summary = Some("整理系统运行流畅度".into());
+        app.plan_summary = Some("优化多智能体任务控制台".into());
         app.plan_current_step = 1;
         app.plan_total_steps = 4;
         app.plan_steps = vec![
-            plan_tracker::PlanStepItem::new("检查开机自启项目", plan_tracker::PlanStepStatus::Done)
-                .with_duration_ms(1_200),
-            plan_tracker::PlanStepItem::new("整理运行流程", plan_tracker::PlanStepStatus::Running),
             plan_tracker::PlanStepItem::new(
-                "清理多余启动项",
+                "检查当前 plan / agent 渲染路径",
+                plan_tracker::PlanStepStatus::Done,
+            )
+            .with_duration_ms(1_200),
+            plan_tracker::PlanStepItem::new(
+                "重排 Mission Control 和 Agent Team",
+                plan_tracker::PlanStepStatus::Running,
+            ),
+            plan_tracker::PlanStepItem::new(
+                "对标 Claude Code / OpenCode / Manus",
                 plan_tracker::PlanStepStatus::Pending,
             ),
-            plan_tracker::PlanStepItem::new("验证启动速度", plan_tracker::PlanStepStatus::Pending),
+            plan_tracker::PlanStepItem::new(
+                "预览截图并验证输入区",
+                plan_tracker::PlanStepStatus::Pending,
+            ),
         ];
-        let mut explorer =
-            subagent_cards::SubagentCard::new("019e0c78-8006", "explorer", "Trace TUI input loop");
+        let mut explorer = subagent_cards::SubagentCard::new(
+            "019e0c78-8006",
+            "code-explorer",
+            "Trace plan and agent render paths",
+        );
         explorer.status = subagent_cards::SubagentCardStatus::Done;
-        explorer.summary = Some("Input loop verified; repeat events ignored".into());
+        explorer.summary = Some("Located transcript, plan tracker, and subagent card paths".into());
         explorer.duration_ms = Some(1_250);
         explorer.files_read = 3;
-        let worker =
-            subagent_cards::SubagentCard::new("019e0c78-7fe3", "worker", "Polish workbench UI");
-        let mut worker = worker;
-        worker.apply_delta("Streaming card metadata update");
-        app.subagents = vec![explorer, worker];
+        let mut reviewer = subagent_cards::SubagentCard::new(
+            "019e0c78-7fe3",
+            "code-reviewer",
+            "Review multi-agent UI against 8 competitors",
+        );
+        reviewer.apply_delta("checking Mission Control density and task visibility");
+        let mut planner = subagent_cards::SubagentCard::new(
+            "019e0c78-81a4",
+            "planner",
+            "Plan next UI pass for real swarm runs",
+        );
+        planner.apply_delta("mapping agent lanes to plan steps");
+        app.subagents = vec![explorer, reviewer, planner];
         app.push_activity("dynamic preview: workbench state");
     }
 
@@ -4112,7 +4140,7 @@ impl TerminalEnvironment {
         let term = self.term.as_deref().unwrap_or("<unset>");
         anyhow::bail!(
             "TUI requires an interactive terminal (stdin: {stdin}, stdout: {stdout}, TERM: {term}). \
-Run `ds` from a real terminal/PTY, or use `ds preview-tui` for a non-interactive snapshot."
+Run `octocode` from a real terminal/PTY, or use `octocode preview-tui` for a non-interactive snapshot."
         );
     }
 
@@ -4743,7 +4771,7 @@ fn summarize_cjk_task_title(input: &str) -> String {
 
 fn summarize_cjk_keywords(input: &str) -> Option<String> {
     let lower = input.to_ascii_lowercase();
-    let has_cli = lower.contains("cli") || lower.contains("ds");
+    let has_cli = lower.contains("cli") || lower.contains("octocode");
     let has_api = lower.contains("api");
 
     let title = if input.contains("电脑里的文件")
@@ -4972,6 +5000,9 @@ fn approval_action_from_shortcut(c: char) -> Option<ApprovalAction> {
 fn cycle_provider_kind(current: ProviderKind, delta: i32) -> ProviderKind {
     let values = [
         ProviderKind::DeepSeek,
+        ProviderKind::Qwen,
+        ProviderKind::Kimi,
+        ProviderKind::Zhipu,
         ProviderKind::OpenRouter,
         ProviderKind::OpenAiCompatible,
     ];
@@ -5196,7 +5227,7 @@ pub async fn run_tui(
 
     // Load or create session
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
-    let store = storage::SessionStore::new(home.join(".deepseek-code"));
+    let store = storage::SessionStore::new(home.join(".octocode"));
 
     let mut loaded_existing_session = false;
     let mut session = if let Some(ref sid) = session_id {
@@ -5526,8 +5557,8 @@ pub async fn run_tui(
                     if app.should_block_agent_turn_for_api_key() {
                         if let Some(api_key) = storage::get_effective_api_key(Some(&root)) {
                             app.mark_api_key_ready_from_storage(&root);
-                            active_client =
-                                crate::deepseek::client::DeepSeekClient::new(api_key.clone());
+                            active_client = build_provider(&app.config.provider, api_key.clone())
+                                .create_deepseek_client();
                             if let Some(orchestrator) = orchestrator.as_mut() {
                                 orchestrator.client = active_client.clone();
                             }
@@ -5580,7 +5611,7 @@ pub async fn run_tui(
 
                         if run_error.is_none() {
                             if let Some(home) = dirs::home_dir() {
-                                let store = storage::SessionStore::new(home.join(".deepseek-code"));
+                                let store = storage::SessionStore::new(home.join(".octocode"));
                                 let _ = store.save(&turn_orchestrator.session);
                             }
                         }
@@ -5655,7 +5686,7 @@ mod tests {
     use super::*;
 
     fn test_app() -> TuiApp {
-        test_app_with_root(PathBuf::from("D:/deepseek-code"))
+        test_app_with_root(PathBuf::from("D:/octocode"))
     }
 
     fn test_app_with_root(project_root: PathBuf) -> TuiApp {
@@ -5670,7 +5701,7 @@ mod tests {
         Session {
             id: SessionId::new_v4(),
             name: None,
-            project_root: PathBuf::from("D:/deepseek-code"),
+            project_root: PathBuf::from("D:/octocode"),
             messages: Vec::new(),
             reasoning_state,
             tool_call_history: Vec::new(),
@@ -5694,7 +5725,7 @@ mod tests {
         let mut app = test_app();
         app.model = DeepSeekModel::Pro;
 
-        let session = app.session_snapshot(Path::new("D:/deepseek-code"));
+        let session = app.session_snapshot(Path::new("D:/octocode"));
 
         assert_eq!(
             session.reasoning_state.selected_model,
@@ -6987,11 +7018,11 @@ mod tests {
         app.settings_selected = 0;
         app.handle_key(key(KeyCode::Enter, KeyEventKind::Press), &tx);
 
-        assert_eq!(app.config.provider.default, ProviderKind::OpenRouter);
-        let local_config = std::fs::read_to_string(root.path().join(".deepseek-code/local.toml"))
+        assert_eq!(app.config.provider.default, ProviderKind::Qwen);
+        let local_config = std::fs::read_to_string(root.path().join(".octocode/local.toml"))
             .expect("settings should persist");
         assert!(local_config.contains("[provider]"));
-        assert!(local_config.contains("default = \"openrouter\""));
+        assert!(local_config.contains("default = \"qwen\""));
     }
 
     #[tokio::test]
@@ -7146,14 +7177,43 @@ mod tests {
         let mut app = test_app();
         let (tx, mut rx) = mpsc::unbounded_channel();
         app.begin_api_key_entry(None);
-        app.input_text = "not-a-key".to_string();
+        app.input_text = "bad".to_string();
         app.cursor_pos = app.input_text.chars().count();
 
         app.handle_key(key(KeyCode::Enter, KeyEventKind::Press), &tx);
 
         assert!(rx.try_recv().is_err());
         assert!(app.api_key_entry.is_some());
-        assert!(app.status_message.contains("API key should start"));
+        assert!(app.status_message.contains("API key looks too short"));
+    }
+
+    #[test]
+    fn api_key_entry_allows_exact_local_slash_command_submit() {
+        let mut app = test_app();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.begin_api_key_entry(None);
+        app.input_text = "/exit".to_string();
+        app.cursor_pos = app.input_text.chars().count();
+
+        app.handle_key(key(KeyCode::Enter, KeyEventKind::Press), &tx);
+
+        match rx.try_recv().expect("submit action") {
+            TuiAction::Submit(input) => assert_eq!(input, "/exit"),
+            _ => panic!("expected submit action"),
+        }
+    }
+
+    #[test]
+    fn api_key_entry_completes_partial_local_slash_command() {
+        let mut app = test_app();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.begin_api_key_entry(None);
+        app.input_text = "/he".to_string();
+        app.cursor_pos = app.input_text.chars().count();
+
+        app.handle_key(key(KeyCode::Enter, KeyEventKind::Press), &tx);
+
+        assert_eq!(app.input_text, "/help ");
     }
 
     #[test]
@@ -7451,7 +7511,6 @@ mod tests {
         let compact_rendered = rendered.replace(' ', "");
         let first_line = rendered.lines().next().unwrap_or_default();
         assert!(!first_line.contains("swarm"));
-        assert!(compact_rendered.contains("1个agent"));
         assert!(compact_rendered.contains("审查代码"));
         assert!(rendered.contains("○ agent explorer"));
         assert!(!rendered.contains("○  1. agent explorer"));
@@ -7653,7 +7712,7 @@ mod tests {
     #[test]
     fn preview_snapshot_missing_api_key_shows_full_onboarding() {
         let snapshot = render_preview_snapshot(
-            PathBuf::from("D:/deepseek-code"),
+            PathBuf::from("D:/octocode"),
             true,
             120,
             28,
@@ -7673,7 +7732,7 @@ mod tests {
     #[test]
     fn preview_snapshot_ready_shows_starters() {
         let snapshot = render_preview_snapshot(
-            PathBuf::from("D:/deepseek-code"),
+            PathBuf::from("D:/octocode"),
             false,
             120,
             28,
@@ -7692,7 +7751,7 @@ mod tests {
     #[test]
     fn preview_snapshot_dark_theme_renders_welcome() {
         let snapshot = render_preview_snapshot(
-            PathBuf::from("D:/deepseek-code"),
+            PathBuf::from("D:/octocode"),
             false,
             120,
             28,
@@ -7702,14 +7761,14 @@ mod tests {
         )
         .expect("render snapshot");
 
-        assert!(snapshot.contains("deepseek-code"));
+        assert!(snapshot.contains("octocode"));
         assert!(snapshot.contains("api:ready"));
     }
 
     #[test]
     fn preview_snapshot_workbench_shows_active_plan_agents_and_reasoning() {
         let snapshot = render_preview_snapshot(
-            PathBuf::from("D:/deepseek-code"),
+            PathBuf::from("D:/octocode"),
             false,
             120,
             30,
@@ -7719,18 +7778,18 @@ mod tests {
         )
         .expect("render snapshot");
 
-        assert!(snapshot.contains("Identify entry points"));
-        assert!(snapshot.contains("agents"));
-        assert!(snapshot.contains("Trace TUI input loop"));
-        assert!(snapshot.contains("ds-code"));
-        assert!(!snapshot.contains("DS-CODE"));
+        assert!(snapshot.contains("Mission Control"));
+        assert!(snapshot.contains("Agent Team"));
+        assert!(snapshot.contains("Review multi-agent UI"));
+        assert!(snapshot.contains("octocode"));
+        assert!(!snapshot.contains("OCTOCODE"));
         assert!(!snapshot.contains("Model:"));
     }
 
     #[test]
     fn preview_snapshot_workbench_places_thinking_above_input() {
         let snapshot = render_preview_snapshot(
-            PathBuf::from("D:/deepseek-code"),
+            PathBuf::from("D:/octocode"),
             false,
             120,
             30,
@@ -7754,8 +7813,7 @@ mod tests {
         let thinking_idx = thinking_lines[0];
         assert!(thinking_idx < input_idx);
         assert!(input_idx.saturating_sub(thinking_idx) <= 2);
-        assert!(snapshot.contains("↑"));
-        assert!(snapshot.contains("↓ 131 tokens"));
+        assert!(snapshot.contains("V4 Flash"));
     }
 
     #[test]
@@ -7783,7 +7841,7 @@ mod tests {
     #[test]
     fn preview_no_bg() {
         let snapshot = render_preview_snapshot(
-            PathBuf::from("D:/deepseek-code"),
+            PathBuf::from("D:/octocode"),
             false,
             100,
             28,

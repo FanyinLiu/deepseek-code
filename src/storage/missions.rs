@@ -5,7 +5,9 @@ use chrono::Utc;
 
 use crate::mission::events::{MissionEvent, MissionEventKind};
 use crate::mission::state::{completed_state, generate_dry_run_plan, replay_state_from_events};
-use crate::mission::types::{Mission, MissionBundle, MissionPlan, MissionState, MissionSummary};
+use crate::mission::types::{
+    Mission, MissionBundle, MissionPlan, MissionState, MissionStatus, MissionSummary,
+};
 
 #[derive(Debug, Clone)]
 pub struct MissionStore {
@@ -22,7 +24,7 @@ impl MissionStore {
     #[must_use]
     pub fn for_project(project_root: &Path) -> Self {
         Self {
-            root: project_root.join(".deepseek-code").join("missions"),
+            root: project_root.join(".octocode").join("missions"),
         }
     }
 
@@ -215,6 +217,137 @@ impl MissionStore {
         let events = self.load_events_lossy(id_or_latest)?.events;
         replay_state_from_events(&events)
             .ok_or_else(|| anyhow::anyhow!("mission has no replayable events"))
+    }
+
+    pub fn start(&self, id_or_latest: &str) -> Result<MissionBundle, anyhow::Error> {
+        self.persist_state_event(
+            id_or_latest,
+            MissionStatus::Running,
+            Some(0),
+            "mission started".to_string(),
+            |state| MissionEventKind::MissionStarted { state },
+        )
+    }
+
+    pub fn pause(&self, id_or_latest: &str) -> Result<MissionBundle, anyhow::Error> {
+        let state = self.load_state(id_or_latest)?;
+        self.persist_state_event(
+            id_or_latest,
+            MissionStatus::Paused,
+            state.current_step,
+            "mission paused".to_string(),
+            |state| MissionEventKind::MissionPaused { state },
+        )
+    }
+
+    pub fn resume(&self, id_or_latest: &str) -> Result<MissionBundle, anyhow::Error> {
+        let bundle = self.load_bundle(id_or_latest, false)?;
+        let current_step = bundle
+            .state
+            .current_step
+            .or_else(|| (!bundle.plan.steps.is_empty()).then_some(0));
+        self.persist_state_event(
+            &bundle.mission.id,
+            MissionStatus::Running,
+            current_step,
+            "mission resumed".to_string(),
+            |state| MissionEventKind::MissionResumed { state },
+        )
+    }
+
+    pub fn complete(&self, id_or_latest: &str) -> Result<MissionBundle, anyhow::Error> {
+        self.persist_state_event(
+            id_or_latest,
+            MissionStatus::Completed,
+            None,
+            "mission completed manually".to_string(),
+            |state| MissionEventKind::MissionCompleted { state },
+        )
+    }
+
+    pub fn fail(
+        &self,
+        id_or_latest: &str,
+        message: String,
+    ) -> Result<MissionBundle, anyhow::Error> {
+        self.persist_state_event(
+            id_or_latest,
+            MissionStatus::Failed,
+            None,
+            format!("mission failed: {message}"),
+            |state| MissionEventKind::MissionFailed {
+                message: message.clone(),
+                state,
+            },
+        )
+    }
+
+    pub fn cancel(
+        &self,
+        id_or_latest: &str,
+        message: String,
+    ) -> Result<MissionBundle, anyhow::Error> {
+        self.persist_state_event(
+            id_or_latest,
+            MissionStatus::Cancelled,
+            None,
+            format!("mission cancelled: {message}"),
+            |state| MissionEventKind::MissionCancelled {
+                message: message.clone(),
+                state,
+            },
+        )
+    }
+
+    pub fn add_note(
+        &self,
+        id_or_latest: &str,
+        message: String,
+    ) -> Result<MissionBundle, anyhow::Error> {
+        let id = self.resolve_id(id_or_latest)?;
+        let event = MissionEvent::new(
+            id.clone(),
+            MissionEventKind::MissionNote {
+                message: message.clone(),
+            },
+        );
+        self.append_event(&id, &event)?;
+        let bundle = self.load_bundle(&id, true)?;
+        self.update_index(&bundle.mission, &bundle.state)?;
+        Ok(bundle)
+    }
+
+    fn persist_state_event<F>(
+        &self,
+        id_or_latest: &str,
+        status: MissionStatus,
+        current_step: Option<usize>,
+        summary: String,
+        event_kind: F,
+    ) -> Result<MissionBundle, anyhow::Error>
+    where
+        F: FnOnce(MissionState) -> MissionEventKind,
+    {
+        let id = self.resolve_id(id_or_latest)?;
+        let dir = self.mission_dir(&id);
+        let mut mission: Mission = read_json(&dir.join("mission.json"))?;
+        let plan: MissionPlan = read_json(&dir.join("plan.json"))?;
+        let now = Utc::now();
+        let state = MissionState {
+            mission_id: mission.id.clone(),
+            status,
+            current_step: current_step.filter(|index| *index < plan.steps.len()),
+            total_steps: plan.steps.len(),
+            summary,
+            updated_at: now,
+        };
+        mission.updated_at = now;
+        write_pretty_json(&dir.join("mission.json"), &mission)?;
+        write_pretty_json(&dir.join("state.json"), &state)?;
+        let event = MissionEvent::new(mission.id.clone(), event_kind(state.clone()));
+        self.append_event(&mission.id, &event)?;
+        self.update_index(&mission, &state)?;
+        self.load_bundle(&mission.id, true)
     }
 
     fn update_index(&self, mission: &Mission, state: &MissionState) -> Result<(), anyhow::Error> {

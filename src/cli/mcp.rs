@@ -4,16 +4,48 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::cli::resolve_project_root;
-use crate::mcp::client::McpTransport;
+use crate::mcp::client::{McpClient, McpServerConfig, McpTransport};
+use crate::mcp::protocol::{
+    CallToolResult, McpResource, McpTool, ReadResourceResult, ResourceContent, ToolContent,
+};
 use crate::storage::{self, config::McpServerEntryConfig};
 
 #[derive(Debug, Clone)]
 pub enum McpCommand {
-    List { json: bool },
-    Get { name: String, json: bool },
-    Status { json: bool, connect: bool },
+    List {
+        json: bool,
+    },
+    Get {
+        name: String,
+        json: bool,
+    },
+    Status {
+        json: bool,
+        connect: bool,
+    },
+    ToolsList {
+        server: String,
+        json: bool,
+    },
+    ToolsCall {
+        server: String,
+        tool: String,
+        arguments: String,
+        json: bool,
+    },
+    ResourcesList {
+        server: String,
+        json: bool,
+    },
+    ResourcesRead {
+        server: String,
+        uri: String,
+        json: bool,
+    },
     Add(McpAddArgs),
-    Remove { name: String },
+    Remove {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -67,12 +99,49 @@ struct McpStatusPayload {
     servers: Vec<McpServerPayload>,
 }
 
+#[derive(Debug, Serialize)]
+struct McpToolsPayload {
+    server: String,
+    tools: Vec<McpTool>,
+}
+
+#[derive(Debug, Serialize)]
+struct McpToolCallPayload {
+    server: String,
+    tool: String,
+    result: CallToolResult,
+}
+
+#[derive(Debug, Serialize)]
+struct McpResourcesPayload {
+    server: String,
+    resources: Vec<McpResource>,
+}
+
+#[derive(Debug, Serialize)]
+struct McpResourceReadPayload {
+    server: String,
+    uri: String,
+    result: ReadResourceResult,
+}
+
 pub async fn mcp(command: McpCommand, project_root: Option<PathBuf>) -> Result<(), anyhow::Error> {
     let root = resolve_project_root(project_root, "mcp")?;
     match command {
         McpCommand::List { json } => list(&root, json),
         McpCommand::Get { name, json } => get(&root, &name, json),
         McpCommand::Status { json, connect } => status(&root, json, connect).await,
+        McpCommand::ToolsList { server, json } => list_tools(&root, &server, json).await,
+        McpCommand::ToolsCall {
+            server,
+            tool,
+            arguments,
+            json,
+        } => call_tool(&root, &server, &tool, &arguments, json).await,
+        McpCommand::ResourcesList { server, json } => list_resources(&root, &server, json).await,
+        McpCommand::ResourcesRead { server, uri, json } => {
+            read_resource(&root, &server, &uri, json).await
+        }
         McpCommand::Add(args) => add(&root, args),
         McpCommand::Remove { name } => remove(&root, &name),
     }
@@ -149,10 +218,170 @@ async fn status(root: &Path, json: bool, connect: bool) -> Result<(), anyhow::Er
                 enabled: payload.enabled,
                 servers: payload.servers,
             });
-            println!("Live check skipped. Use `ds mcp status --connect` to connect.");
+            println!("Live check skipped. Use `octocode mcp status --connect` to connect.");
         }
     }
     Ok(())
+}
+
+async fn list_tools(root: &Path, server: &str, json: bool) -> Result<(), anyhow::Error> {
+    let mut client = connect_named_client(root, server).await?;
+    let tools = client.list_tools().await?;
+    let _ = client.shutdown().await;
+    let payload = McpToolsPayload {
+        server: server.to_string(),
+        tools,
+    };
+    if json {
+        print_json(&payload)?;
+    } else {
+        println!("MCP tools: {}", payload.server);
+        if payload.tools.is_empty() {
+            println!("  none advertised");
+        }
+        for tool in &payload.tools {
+            println!(
+                "  {:24} {}",
+                tool.name,
+                tool.description.as_deref().unwrap_or("no description")
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn call_tool(
+    root: &Path,
+    server: &str,
+    tool: &str,
+    arguments: &str,
+    json: bool,
+) -> Result<(), anyhow::Error> {
+    let arguments = crate::mcp::registry::parse_mcp_tool_arguments(arguments)?;
+    let mut client = connect_named_client(root, server).await?;
+    let result = client.call_tool(tool, arguments).await?;
+    let _ = client.shutdown().await;
+    let is_error = result.is_error;
+    let payload = McpToolCallPayload {
+        server: server.to_string(),
+        tool: tool.to_string(),
+        result,
+    };
+    if json {
+        print_json(&payload)?;
+    } else {
+        print_tool_result(&payload.result);
+    }
+    if is_error {
+        anyhow::bail!("MCP tool {server}.{tool} returned an error");
+    }
+    Ok(())
+}
+
+async fn list_resources(root: &Path, server: &str, json: bool) -> Result<(), anyhow::Error> {
+    let mut client = connect_named_client(root, server).await?;
+    let resources = client.list_resources().await?;
+    let _ = client.shutdown().await;
+    let payload = McpResourcesPayload {
+        server: server.to_string(),
+        resources,
+    };
+    if json {
+        print_json(&payload)?;
+    } else {
+        println!("MCP resources: {}", payload.server);
+        if payload.resources.is_empty() {
+            println!("  none advertised");
+        }
+        for resource in &payload.resources {
+            println!(
+                "  {:32} {:18} {}",
+                resource.uri,
+                resource.mime_type.as_deref().unwrap_or("-"),
+                resource.description.as_deref().unwrap_or(&resource.name)
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn read_resource(
+    root: &Path,
+    server: &str,
+    uri: &str,
+    json: bool,
+) -> Result<(), anyhow::Error> {
+    let mut client = connect_named_client(root, server).await?;
+    let result = client.read_resource(uri).await?;
+    let _ = client.shutdown().await;
+    let payload = McpResourceReadPayload {
+        server: server.to_string(),
+        uri: uri.to_string(),
+        result,
+    };
+    if json {
+        print_json(&payload)?;
+    } else {
+        print_resource_result(&payload.result);
+    }
+    Ok(())
+}
+
+async fn connect_named_client(root: &Path, server: &str) -> Result<McpClient, anyhow::Error> {
+    let config = storage::Config::load(Some(root))?;
+    if !config.mcp.enabled {
+        anyhow::bail!("MCP is disabled; enable it with `octocode mcp add` or config mcp.enabled");
+    }
+    let Some(entry) = config.mcp.servers.get(server) else {
+        anyhow::bail!("MCP server not found: {server}");
+    };
+    let client_config = McpServerConfig {
+        name: server.to_string(),
+        transport: entry.transport,
+        command: entry.command.clone(),
+        args: entry.args.clone(),
+        env: entry.env.clone(),
+        url: entry.url.clone(),
+        headers: entry.headers.clone(),
+    };
+    McpClient::connect_with_timeout(&client_config, entry.timeout_ms).await
+}
+
+fn print_tool_result(result: &CallToolResult) {
+    for content in &result.content {
+        match content {
+            ToolContent::Text { text } => println!("{text}"),
+            ToolContent::Image { data, mime_type } => {
+                println!("[image {mime_type}, {} bytes]", data.len());
+            }
+        }
+    }
+}
+
+fn print_resource_result(result: &ReadResourceResult) {
+    for content in &result.contents {
+        match content {
+            ResourceContent::Text {
+                uri,
+                mime_type,
+                text,
+            } => {
+                println!("# {uri} ({})", mime_type.as_deref().unwrap_or("text/plain"));
+                println!("{text}");
+            }
+            ResourceContent::Blob {
+                uri,
+                mime_type,
+                blob,
+            } => {
+                println!(
+                    "# {uri} ({})",
+                    mime_type.as_deref().unwrap_or("application/octet-stream")
+                );
+                println!("[blob {} bytes base64]", blob.len());
+            }
+        }
+    }
 }
 
 fn add(root: &Path, args: McpAddArgs) -> Result<(), anyhow::Error> {
@@ -322,7 +551,7 @@ fn transport_label(transport: McpTransport) -> &'static str {
 }
 
 fn local_config_path(root: &Path) -> PathBuf {
-    root.join(".deepseek-code").join("local.toml")
+    root.join(".octocode").join("local.toml")
 }
 
 fn read_toml_value(path: &Path) -> Result<toml::Value, anyhow::Error> {

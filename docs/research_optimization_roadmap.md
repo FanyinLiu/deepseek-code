@@ -1,10 +1,10 @@
-# DeepSeek-Code 调研优化落地路线图
+# Octocode 调研优化落地路线图
 
 生成日期：2026-05-14
 
 ## 目标
 
-本文档把两份调研材料转化为 `deepseek-code` 的可执行优化路线：
+本文档把两份调研材料转化为 `octocode` 的可执行优化路线：
 
 - `CLI编程助手架构设计.md`
 - `AI终端编程助手调研报告.docx`
@@ -13,7 +13,7 @@
 
 ## 当前结论
 
-`deepseek-code` 可以按照这两份调研继续优化，而且当前代码基础已经覆盖了很多核心模块：
+`octocode` 可以按照这两份调研继续优化，而且当前代码基础已经覆盖了很多核心模块：
 
 - DeepSeek 原生 API 客户端、SSE 流式输出、reasoning/thinking 生命周期
 - ReAct/tool loop、工具调用、递归工具循环和审批事件
@@ -36,8 +36,8 @@ cargo fmt --all --check
 cargo check --all-targets --all-features
 cargo test --all-features
 git diff --check
-cargo install --path . --bin ds --force
-ds --version
+cargo install --path . --bin octocode --force
+octocode --version
 ```
 
 以上命令本轮均执行并通过。库测试数量为 475 个通过，集成测试同步通过。
@@ -186,8 +186,8 @@ ds --version
 1. MCP 增加 transport enum：`stdio`、`http`、`sse`。
 2. `/mcp` 支持 `list/status/add/remove/test`。
 3. 引入 HookRunner，先接入 `pre_tool`、`post_tool`、`stop`。
-4. 实现 `.deepseek-code/skills/<name>/SKILL.md` loader。
-5. 实现 `.deepseek-code/commands/*.md` 或 `.toml` 自定义命令。
+4. 实现 `.octocode/skills/<name>/SKILL.md` loader。
+5. 实现 `.octocode/commands/*.md` 或 `.toml` 自定义命令。
 
 建议文件：
 
@@ -263,16 +263,16 @@ cargo test --all-features
 涉及 TUI 的批次，额外运行：
 
 ```powershell
-cargo run --bin deepseek-code -- preview-tui --scenario welcome --width 80 --height 24
-cargo run --bin deepseek-code -- preview-tui --scenario workbench --width 120 --height 28
+cargo run --bin octocode -- preview-tui --scenario welcome --width 80 --height 24
+cargo run --bin octocode -- preview-tui --scenario workbench --width 120 --height 28
 ```
 
 涉及 CLI surface 的批次，额外运行：
 
 ```powershell
-cargo run --bin deepseek-code -- --help
-cargo run --bin ds -- --help
-cargo run --bin dscode -- --help
+cargo run --bin octocode -- --help
+cargo run --bin octocode -- --help
+cargo run --bin octocode -- --help
 ```
 
 ## 暂不建议立即做的内容
@@ -290,7 +290,7 @@ cargo run --bin dscode -- --help
 
 ## 风险与注意事项
 
-- 不要把 `D:\deepseek-code\.deepseek-code` 当成项目根目录；真实仓库根目录是 `D:\deepseek-code`。
+- 不要把 `D:\octocode\.octocode` 当成项目根目录；真实仓库根目录是 `D:\octocode`。
 - Windows 上预览或运行中的 exe 可能锁住构建产物；必要时使用单独 `--target-dir`。
 - 涉及 TUI 中文文本时，测试应避免过度依赖宽字符精确快照。
 - Provider 抽象第一版应保持 DeepSeek-native 能力，不要为了通用接口丢掉 reasoning、cache、FIM 等特性。

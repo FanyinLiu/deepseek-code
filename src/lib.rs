@@ -1,20 +1,27 @@
-// DeepSeek-Code library — provides all modules for both the binary and integration tests.
+// Octocode library — provides all modules for both the binary and integration tests.
 
 pub mod agent;
+pub mod archive;
 pub mod cli;
 pub mod cli_entry;
 pub mod commands;
 pub mod deepseek;
 pub mod defense;
+pub mod evolution;
+pub mod goal;
 pub mod hooks;
+pub mod knowledge;
 pub mod lsp;
 pub mod mcp;
 pub mod mission;
 pub mod plan;
 pub mod policy;
 pub mod provider;
+pub mod remote_sandbox;
+pub mod repair;
 pub mod runtime;
 pub mod search;
+pub mod skill;
 pub mod storage;
 pub mod telemetry;
 pub mod tools;

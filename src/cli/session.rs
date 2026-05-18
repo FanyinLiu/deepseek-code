@@ -24,8 +24,8 @@ pub async fn session(
 ) -> Result<(), anyhow::Error> {
     let root = resolve_project_root(project_root, "session")?;
     let home = user_home_dir().ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?;
-    let store = SessionStore::new(home.join(".deepseek-code"));
-    let events = EventLogStore::new(home.join(".deepseek-code"));
+    let store = SessionStore::new(home.join(".octocode"));
+    let events = EventLogStore::new(home.join(".octocode"));
 
     match command {
         SessionCommand::List { json } => list(&store, &root, json),

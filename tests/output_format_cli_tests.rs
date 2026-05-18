@@ -1,7 +1,7 @@
 use std::process::Command;
 
-fn ds_command() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_ds"))
+fn octocode_command() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_octocode"))
 }
 
 #[test]
@@ -12,11 +12,11 @@ fn turn_commands_emit_final_json_error_schema_for_preflight_failures() {
         ("run", vec!["run", "hello", "--output-format", "json"]),
     ] {
         let root = tempfile::tempdir().expect("tempdir");
-        let output = ds_command()
+        let output = octocode_command()
             .current_dir(root.path())
             .args(args)
             .output()
-            .unwrap_or_else(|error| panic!("run ds {command_name}: {error}"));
+            .unwrap_or_else(|error| panic!("run octocode {command_name}: {error}"));
 
         assert!(!output.status.success(), "{command_name} should fail");
         let stdout = stdout(&output);

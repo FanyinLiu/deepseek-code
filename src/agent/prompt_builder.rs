@@ -281,7 +281,7 @@ impl PromptBuilder {
 
         // Core identity — this should be stable for cache
         prompt.push_str(&format!(
-            "You are DeepSeek-Code, a programming agent powered by {}.\n",
+            "You are Octocode, a programming agent powered by {}.\n",
             self.model
         ));
         prompt.push_str("You work inside a terminal-based coding agent.\n");
@@ -443,13 +443,13 @@ pub fn load_project_rules(project_root: &Path) -> Option<String> {
 pub fn project_rule_candidates(project_root: &Path) -> Vec<std::path::PathBuf> {
     let mut candidates = Vec::new();
     if let Some(home) = dirs::home_dir() {
-        candidates.push(home.join(".deepseek-code").join("DEEPSEEK.md"));
+        candidates.push(home.join(".octocode").join("DEEPSEEK.md"));
     }
     candidates.extend([
         project_root.join("AGENTS.md"),
         project_root.join("DEEPSEEK.md"),
-        project_root.join(".deepseek-code").join("AGENTS.md"),
-        project_root.join(".deepseek-code").join("rules.md"),
+        project_root.join(".octocode").join("AGENTS.md"),
+        project_root.join(".octocode").join("rules.md"),
     ]);
     if let Ok(cwd) = std::env::current_dir() {
         let cwd_deepseek = cwd.join("DEEPSEEK.md");
@@ -493,16 +493,16 @@ mod tests {
     #[test]
     fn load_project_rules_combines_non_empty_files_in_precedence_order() {
         let temp = tempfile::tempdir().expect("create tempdir");
-        std::fs::create_dir(temp.path().join(".deepseek-code")).expect("create config dir");
+        std::fs::create_dir(temp.path().join(".octocode")).expect("create config dir");
         std::fs::write(temp.path().join("AGENTS.md"), "Project agents").expect("write AGENTS");
         std::fs::write(temp.path().join("DEEPSEEK.md"), "Project deepseek")
             .expect("write project DEEPSEEK");
         std::fs::write(
-            temp.path().join(".deepseek-code").join("AGENTS.md"),
+            temp.path().join(".octocode").join("AGENTS.md"),
             "Local agents",
         )
         .expect("write local AGENTS");
-        std::fs::write(temp.path().join(".deepseek-code").join("rules.md"), "  \n")
+        std::fs::write(temp.path().join(".octocode").join("rules.md"), "  \n")
             .expect("write empty rules");
 
         let rules = load_project_rules(temp.path()).expect("rules should load");

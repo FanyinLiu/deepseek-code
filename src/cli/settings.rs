@@ -186,7 +186,7 @@ fn parse_bool(value: &str) -> Result<bool, anyhow::Error> {
 }
 
 fn local_config_path(root: &Path) -> PathBuf {
-    root.join(".deepseek-code").join("local.toml")
+    root.join(".octocode").join("local.toml")
 }
 
 fn read_toml_value(path: &Path) -> Result<toml::Value, anyhow::Error> {

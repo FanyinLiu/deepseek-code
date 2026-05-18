@@ -1,6 +1,6 @@
-# DS Architecture Roadmap
+# Octocode Architecture Roadmap
 
-This roadmap is the authoritative plan for taking DS from its current shape to a
+This roadmap is the authoritative plan for taking Octocode from its current shape to a
 local-first team-agent workbench. It is intentionally architecture-first: every
 phase lands a boundary before any UX polish or feature growth.
 
@@ -8,7 +8,7 @@ phase lands a boundary before any UX polish or feature growth.
 
 - [`architecture_map.md`](architecture_map.md) — current module layout and the
   subsystem owner for every boundary.
-- [`competitor_parity_matrix.md`](competitor_parity_matrix.md) — what DS should
+- [`competitor_parity_matrix.md`](competitor_parity_matrix.md) — what Octocode should
   absorb (and avoid) from Codex, Gemini, Claude Code, Kimi, Droid, Qwen.
 - [`runtime_boundaries.md`](runtime_boundaries.md) — the canonical names for
   RuntimeKernel, Team Runtime, Tool Runtime, plan/mission/task, TUI workbench.
@@ -17,7 +17,7 @@ The roadmap below references these documents; do not duplicate their content.
 
 ## Product Position
 
-DS is not a generic chat CLI. The target form is a **local-first team-agent
+Octocode is not a generic chat CLI. The target form is a **local-first team-agent
 workbench**:
 
 - A clear coordinator agent plans, dispatches, and merges work.
@@ -169,5 +169,5 @@ merges only conclusions and blocking findings into the user-facing summary.
   reaches `ToolRuntime`.
 - Raw model reasoning, raw subagent errors, protocol noise stay in
   `events.jsonl`; they never reach the main TUI transcript.
-- Uncommitted runtime artifacts (`logs/`, `.deepseek-code/missions/`,
+- Uncommitted runtime artifacts (`logs/`, `.octocode/missions/`,
   `TASK.md`) are gitignored and stay local to this project.

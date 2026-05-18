@@ -1,13 +1,31 @@
 use std::path::{Path, PathBuf};
 
+use anyhow::{bail, Context};
 use serde::Serialize;
 
-use crate::cli::resolve_project_root;
+use crate::cli::{resolve_project_root, TurnOutputFormat};
 
 #[derive(Debug, Clone)]
 pub enum CommandCatalogCommand {
-    List { json: bool, filter: Option<String> },
-    Locations { json: bool },
+    List {
+        json: bool,
+        filter: Option<String>,
+    },
+    Show {
+        name: String,
+        json: bool,
+    },
+    Run {
+        name: String,
+        args: Vec<String>,
+        dry_run: bool,
+        json: bool,
+        thinking: bool,
+        output_format: TurnOutputFormat,
+    },
+    Locations {
+        json: bool,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -36,7 +54,30 @@ struct CustomCommandPayload {
     description: Option<String>,
     source: &'static str,
     path: String,
+    argument_hint: Option<String>,
     conflicts_builtin: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct CustomCommandRunPayload {
+    name: String,
+    description: Option<String>,
+    source: &'static str,
+    path: String,
+    argument_hint: Option<String>,
+    args: Vec<String>,
+    prompt: String,
+    dry_run: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CustomCommandDocument {
+    name: String,
+    description: Option<String>,
+    source: &'static str,
+    path: PathBuf,
+    argument_hint: Option<String>,
+    prompt_template: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -77,6 +118,15 @@ pub async fn command_catalog(
     let root = resolve_project_root(project_root, "commands")?;
     match command {
         CommandCatalogCommand::List { json, filter } => list(&root, json, filter.as_deref()),
+        CommandCatalogCommand::Show { name, json } => show(&root, &name, json),
+        CommandCatalogCommand::Run {
+            name,
+            args,
+            dry_run,
+            json,
+            thinking,
+            output_format,
+        } => run_custom_command(&root, &name, args, dry_run, json, thinking, output_format).await,
         CommandCatalogCommand::Locations { json } => locations(&root, json),
     }
 }
@@ -107,6 +157,93 @@ fn locations(root: &Path, json: bool) -> Result<(), anyhow::Error> {
         }
     }
     Ok(())
+}
+
+fn show(root: &Path, name: &str, json: bool) -> Result<(), anyhow::Error> {
+    let command = find_custom_command(root, name)?;
+    let payload = CustomCommandRunPayload {
+        name: command.name.clone(),
+        description: command.description.clone(),
+        source: command.source,
+        path: command.path.display().to_string(),
+        argument_hint: command.argument_hint.clone(),
+        args: Vec::new(),
+        prompt: command.prompt_template.clone(),
+        dry_run: true,
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        print_custom_command(&payload, "Custom command");
+    }
+    Ok(())
+}
+
+async fn run_custom_command(
+    root: &Path,
+    name: &str,
+    args: Vec<String>,
+    dry_run: bool,
+    json: bool,
+    thinking: bool,
+    output_format: TurnOutputFormat,
+) -> Result<(), anyhow::Error> {
+    let command = find_custom_command(root, name)?;
+    let prompt = render_custom_command_prompt(&command.prompt_template, &args);
+    let payload = CustomCommandRunPayload {
+        name: command.name,
+        description: command.description,
+        source: command.source,
+        path: command.path.display().to_string(),
+        argument_hint: command.argument_hint,
+        args,
+        prompt,
+        dry_run,
+    };
+
+    if payload.dry_run {
+        if json {
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else {
+            print_custom_command(&payload, "Custom command dry run");
+        }
+        return Ok(());
+    }
+
+    let output_format = if json {
+        TurnOutputFormat::Json
+    } else {
+        output_format
+    };
+    if !output_format.is_json() && !output_format.is_stream_json() {
+        println!(
+            "Running custom command {} from {}",
+            payload.name, payload.path
+        );
+    }
+    crate::cli::run(
+        payload.prompt,
+        thinking,
+        Some(root.to_path_buf()),
+        output_format,
+    )
+    .await
+}
+
+fn print_custom_command(payload: &CustomCommandRunPayload, title: &str) {
+    println!("{title}: {}", payload.name);
+    println!("Source: {} ({})", payload.source, payload.path);
+    if let Some(description) = &payload.description {
+        println!("Description: {description}");
+    }
+    if let Some(argument_hint) = &payload.argument_hint {
+        println!("Arguments: {argument_hint}");
+    }
+    if !payload.args.is_empty() {
+        println!("Input args: {}", payload.args.join(" "));
+    }
+    println!();
+    println!("{}", payload.prompt);
 }
 
 fn catalog_payload(
@@ -273,10 +410,10 @@ fn print_catalog(payload: &CommandCatalogPayload, filter: Option<&str>) {
 }
 
 fn command_locations(root: &Path) -> Vec<CommandLocationPayload> {
-    let project = root.join(".deepseek-code").join("commands");
+    let project = root.join(".octocode").join("commands");
     let user = dirs::home_dir()
-        .map(|home| home.join(".deepseek-code").join("commands"))
-        .unwrap_or_else(|| PathBuf::from("~/.deepseek-code/commands"));
+        .map(|home| home.join(".octocode").join("commands"))
+        .unwrap_or_else(|| PathBuf::from("~/.octocode/commands"));
     vec![location("project", project), location("user", user)]
 }
 
@@ -310,10 +447,12 @@ fn collect_custom_commands(
         };
         let name = format!("/{}", stem.trim_start_matches('/'));
         let description = read_custom_description(&path).ok().flatten();
+        let argument_hint = read_custom_argument_hint(&path).ok().flatten();
         out.push(CustomCommandPayload {
             conflicts_builtin: builtin_names.contains(&name),
             name,
             description,
+            argument_hint,
             source,
             path: path.display().to_string(),
         });
@@ -352,10 +491,10 @@ fn collect_skills(root: &Path) -> Result<Vec<SkillCommandPayload>, anyhow::Error
 }
 
 fn skill_locations(root: &Path) -> Vec<(&'static str, PathBuf)> {
-    let project = root.join(".deepseek-code").join("skills");
+    let project = root.join(".octocode").join("skills");
     let user = dirs::home_dir()
-        .map(|home| home.join(".deepseek-code").join("skills"))
-        .unwrap_or_else(|| PathBuf::from("~/.deepseek-code/skills"));
+        .map(|home| home.join(".octocode").join("skills"))
+        .unwrap_or_else(|| PathBuf::from("~/.octocode/skills"));
     vec![("project", project), ("user", user)]
 }
 
@@ -414,6 +553,160 @@ fn is_command_file(path: &Path) -> bool {
     )
 }
 
+fn find_custom_command(root: &Path, name: &str) -> Result<CustomCommandDocument, anyhow::Error> {
+    let name = normalize_command_name(name);
+    let builtin_names = crate::commands::CommandRegistry::new()
+        .list_commands()
+        .into_iter()
+        .flat_map(|cmd| {
+            std::iter::once(cmd.name.to_string()).chain(
+                cmd.aliases
+                    .iter()
+                    .map(|alias| (*alias).to_string())
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<std::collections::HashSet<_>>();
+    if builtin_names.contains(&name) {
+        bail!("custom command {name} conflicts with a built-in slash command");
+    }
+
+    let mut matches = Vec::new();
+    for location in command_locations(root) {
+        if !location.exists {
+            continue;
+        }
+        collect_matching_command_documents(
+            Path::new(&location.path),
+            location.source,
+            &name,
+            &mut matches,
+        )?;
+    }
+    match matches.len() {
+        0 => bail!("unknown custom command {name}"),
+        1 => Ok(matches.remove(0)),
+        _ => {
+            let paths = matches
+                .iter()
+                .map(|command| command.path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!("ambiguous custom command {name}; matches: {paths}")
+        }
+    }
+}
+
+fn collect_matching_command_documents(
+    dir: &Path,
+    source: &'static str,
+    name: &str,
+    out: &mut Vec<CustomCommandDocument>,
+) -> Result<(), anyhow::Error> {
+    for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_matching_command_documents(&path, source, name, out)?;
+            continue;
+        }
+        if !file_type.is_file() || !is_command_file(&path) {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if format!("/{}", stem.trim_start_matches('/')) != name {
+            continue;
+        }
+        out.push(read_custom_command_document(&path, source, name)?);
+    }
+    Ok(())
+}
+
+fn read_custom_command_document(
+    path: &Path,
+    source: &'static str,
+    name: &str,
+) -> Result<CustomCommandDocument, anyhow::Error> {
+    let content =
+        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let (description, argument_hint, prompt_template) = if matches!(
+        path.extension().and_then(|value| value.to_str()),
+        Some("toml")
+    ) {
+        custom_command_from_toml(&content)?
+    } else {
+        custom_command_from_markdown(&content)
+    };
+    if prompt_template.trim().is_empty() {
+        bail!(
+            "custom command {name} has no prompt body: {}",
+            path.display()
+        );
+    }
+
+    Ok(CustomCommandDocument {
+        name: name.to_string(),
+        description,
+        source,
+        path: path.to_path_buf(),
+        argument_hint,
+        prompt_template,
+    })
+}
+
+fn custom_command_from_toml(
+    content: &str,
+) -> Result<(Option<String>, Option<String>, String), anyhow::Error> {
+    let value: toml::Value = content.parse()?;
+    let description = value
+        .get("description")
+        .and_then(toml::Value::as_str)
+        .map(trim_description)
+        .filter(|value| !value.is_empty());
+    let argument_hint = value
+        .get("argument_hint")
+        .or_else(|| value.get("argument-hint"))
+        .and_then(toml::Value::as_str)
+        .map(trim_description)
+        .filter(|value| !value.is_empty());
+    let prompt = value
+        .get("prompt")
+        .or_else(|| value.get("template"))
+        .or_else(|| value.get("body"))
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    Ok((description, argument_hint, prompt))
+}
+
+fn custom_command_from_markdown(content: &str) -> (Option<String>, Option<String>, String) {
+    let description = description_from_markdown(content);
+    let argument_hint = argument_hint_from_markdown(content);
+    let body = markdown_body(content).trim().to_string();
+    (description, argument_hint, body)
+}
+
+fn read_custom_argument_hint(path: &Path) -> Result<Option<String>, anyhow::Error> {
+    let content = std::fs::read_to_string(path)?;
+    if matches!(
+        path.extension().and_then(|value| value.to_str()),
+        Some("toml")
+    ) {
+        let value: toml::Value = content.parse()?;
+        return Ok(value
+            .get("argument_hint")
+            .or_else(|| value.get("argument-hint"))
+            .and_then(toml::Value::as_str)
+            .map(trim_description)
+            .filter(|value| !value.is_empty()));
+    }
+    Ok(argument_hint_from_markdown(&content))
+}
+
 fn read_custom_description(path: &Path) -> Result<Option<String>, anyhow::Error> {
     let content = std::fs::read_to_string(path)?;
     if matches!(
@@ -444,6 +737,12 @@ fn description_from_markdown(content: &str) -> Option<String> {
                     return Some(description);
                 }
             }
+            if let Some(value) = line.strip_prefix("description =") {
+                let description = trim_description(value);
+                if !description.is_empty() {
+                    return Some(description);
+                }
+            }
         }
     }
     for line in content.lines() {
@@ -458,11 +757,63 @@ fn description_from_markdown(content: &str) -> Option<String> {
     None
 }
 
+fn argument_hint_from_markdown(content: &str) -> Option<String> {
+    let frontmatter = markdown_frontmatter(content)?;
+    for line in frontmatter.lines() {
+        let line = line.trim();
+        for key in [
+            "argument-hint:",
+            "argument_hint:",
+            "argument-hint =",
+            "argument_hint =",
+        ] {
+            if let Some(value) = line.strip_prefix(key) {
+                let argument_hint = trim_description(value);
+                if !argument_hint.is_empty() {
+                    return Some(argument_hint);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn markdown_frontmatter(content: &str) -> Option<&str> {
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let rest = content.strip_prefix("---\n")?;
     let end = rest.find("\n---")?;
     Some(&rest[..end])
+}
+
+fn markdown_body(content: &str) -> &str {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    let Some(rest) = content.strip_prefix("---\n") else {
+        return content;
+    };
+    let Some(end) = rest.find("\n---") else {
+        return content;
+    };
+    &rest[end + "\n---".len()..]
+}
+
+fn render_custom_command_prompt(template: &str, args: &[String]) -> String {
+    let arguments = args.join(" ");
+    let mut prompt = template.replace("$ARGUMENTS", &arguments);
+    prompt = prompt.replace("{{args}}", &arguments);
+    prompt = prompt.replace("{{arguments}}", &arguments);
+    if arguments.is_empty() || prompt.contains(&arguments) {
+        prompt.trim().to_string()
+    } else {
+        format!("{}\n\nArguments:\n{}", prompt.trim(), arguments)
+    }
+}
+
+fn normalize_command_name(name: &str) -> String {
+    let name = name.trim();
+    let name = name.strip_suffix(".md").unwrap_or(name);
+    let name = name.strip_suffix(".markdown").unwrap_or(name);
+    let name = name.strip_suffix(".toml").unwrap_or(name);
+    format!("/{}", name.trim_start_matches('/'))
 }
 
 fn trim_description(value: &str) -> String {

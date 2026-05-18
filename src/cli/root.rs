@@ -15,7 +15,7 @@ pub fn resolve_project_root(
     root.ok_or_else(|| {
         anyhow::anyhow!(
             "{command_name} requires a project root. Run inside a directory that contains \
-            .git or .deepseek-code, or pass --project-root explicitly."
+            .git or .octocode, or pass --project-root explicitly."
         )
     })
 }

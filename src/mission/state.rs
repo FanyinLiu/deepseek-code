@@ -42,10 +42,15 @@ pub fn replay_state_from_events(events: &[MissionEvent]) -> Option<MissionState>
                     updated_at: event.at,
                 });
             }
-            MissionEventKind::MissionCompleted { state: next }
-            | MissionEventKind::MissionFailed { state: next, .. } => {
+            MissionEventKind::MissionStarted { state: next }
+            | MissionEventKind::MissionPaused { state: next }
+            | MissionEventKind::MissionResumed { state: next }
+            | MissionEventKind::MissionCompleted { state: next }
+            | MissionEventKind::MissionFailed { state: next, .. }
+            | MissionEventKind::MissionCancelled { state: next, .. } => {
                 state = Some(next.clone());
             }
+            MissionEventKind::MissionNote { .. } => {}
         }
     }
     state

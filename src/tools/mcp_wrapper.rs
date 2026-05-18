@@ -7,7 +7,7 @@
 
 use crate::deepseek::ToolDefinition;
 
-/// Read MCP server configs from ~/.deepseek-code/mcp.toml or project .deepseek-code/mcp.toml.
+/// Read MCP server configs from ~/.octocode/mcp.toml or project .octocode/mcp.toml.
 pub fn load_mcp_configs(
     _user_config_path: &std::path::Path,
     _project_config_path: Option<&std::path::Path>,

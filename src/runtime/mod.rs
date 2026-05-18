@@ -1,4 +1,4 @@
-//! Runtime boundary models for the DS local-first agent workbench.
+//! Runtime boundary models for the Octocode local-first agent workbench.
 //!
 //! The runtime kernel is intentionally small in this phase: it names the shared
 //! services that CLI, TUI, mission, and task runners must converge on before

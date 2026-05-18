@@ -1,16 +1,16 @@
-# DS CLI 竞品调研、模块对齐与 P0 改造记录
+# Octocode CLI 竞品调研、模块对齐与 P0 改造记录
 
 日期：2026-05-16
-仓库：`/Users/klein/ds/deepseek-code`
-目标：提升 DS CLI 的性能、功能、UI、可用性与工程结构，并把每个主模块/子模块与 Codex CLI、Gemini CLI、Claude Code、Kimi CLI、Factory Droid、Qwen Code、OpenCode 对齐。
+仓库：`/Users/klein/octocode/octocode`
+目标：提升 Octocode CLI 的性能、功能、UI、可用性与工程结构，并把每个主模块/子模块与 Codex CLI、Gemini CLI、Claude Code、Kimi CLI、Factory Droid、Qwen Code、OpenCode 对齐。
 
 Canonical：本文件是当前 7-tool 竞品对齐报告。它取代 2026-05-15 期间仍写“6 CLI”的旧报告口径；旧报告保留为历史草稿，不作为本轮定稿依据。
 
-本轮改动边界：当前工作区已有大量并行/历史未提交改动。本文件只声明和验证本轮新落地的两个 P0 补丁：`ds commands` 命令目录入口与 `@file` mention 索引化；其他未提交改动需要单独追溯。
+本轮改动边界：当前工作区已有大量并行/历史未提交改动。本文件只声明和验证本轮新落地的两个 P0 补丁：`octocode commands` 命令目录入口与 `@file` mention 索引化；其他未提交改动需要单独追溯。
 
 ## 0. 结论
 
-DS 的问题不是“缺几个按钮”，而是能力已经散落在 `cli/tui/agent/tools/mcp/storage/policy` 里，但缺少统一入口、统一输出契约、统一权限语义和长会话性能护栏。竞品共同趋势很清楚：
+Octocode 的问题不是“缺几个按钮”，而是能力已经散落在 `cli/tui/agent/tools/mcp/storage/policy` 里，但缺少统一入口、统一输出契约、统一权限语义和长会话性能护栏。竞品共同趋势很清楚：
 
 - Codex、Gemini、Qwen、Kimi 都把 interactive/headless、命令发现、会话恢复、工具事件做成强入口。
 - Claude、Droid、OpenCode 把权限、插件、hooks、skills、MCP、后台任务做成用户能看懂和能恢复的产品面。
@@ -18,7 +18,7 @@ DS 的问题不是“缺几个按钮”，而是能力已经散落在 `cli/tui/a
 
 本轮先落地两个 P0 改动：
 
-1. 新增 `ds commands`：把 TUI slash command registry 暴露为非交互命令，支持 JSON、过滤、项目/用户自定义 command 目录扫描。
+1. 新增 `octocode commands`：把 TUI slash command registry 暴露为非交互命令，支持 JSON、过滤、项目/用户自定义 command 目录扫描。
 2. 优化 `@file` 补全性能：文件 mention 从“每次按键递归扫目录”改为 `FileTree` 维护索引并在内存中过滤。
 
 这两项直接对应竞品里的 command palette/custom commands 和 file mention 基础能力，也是后续 `/` 面板、插件命令、文档生成、命令测试同源的前置工程。
@@ -48,7 +48,7 @@ DS 的问题不是“缺几个按钮”，而是能力已经散落在 `cli/tui/a
 
 源码结构：`codex-rs/core`、`codex-rs/tui`、`codex-rs/execpolicy`、`codex-rs/thread-store`、`codex-rs/rmcp-client`、`codex-rs/mcp-server`、`codex-rs/memories`、`codex-rs/skills`。
 
-对 DS 的启发：
+对 Octocode 的启发：
 
 - 把 tool/exec policy 变成独立、可测试的 policy engine。
 - 会话使用 thread/event store，而不是散落状态。
@@ -59,7 +59,7 @@ DS 的问题不是“缺几个按钮”，而是能力已经散落在 `cli/tui/a
 
 源码结构：`packages/cli`、`packages/core`、`CommandService`、`FileCommandLoader`、`McpPromptLoader`、`SkillCommandLoader`、`scheduler`、`policy`、`memoryService`、`agents`。
 
-对 DS 的启发：
+对 Octocode 的启发：
 
 - 命令发现由多个 loader 并行加载，并处理冲突。
 - tool scheduler 负责批处理、并行 tool calls、confirmation、hooks。
@@ -70,7 +70,7 @@ DS 的问题不是“缺几个按钮”，而是能力已经散落在 `cli/tui/a
 
 源码结构：`packages/core/src/agents/runtime`、`packages/cli/src/services`、`packages/channels`、`packages/core/src/subagents`、`packages/core/src/followup`、`packages/core/src/extension`。
 
-对 DS 的启发：
+对 Octocode 的启发：
 
 - interactive/headless 共享 AgentCore。
 - queued input、cancellation level、pending approvals/live outputs/shell pids 是一等状态。
@@ -81,7 +81,7 @@ DS 的问题不是“缺几个按钮”，而是能力已经散落在 `cli/tui/a
 
 源码结构：`src/kimi_cli/cli`、`app.py`、`soul/toolset.py`、`soul/approval.py`、`session*.py`、`subagents`、`background`、`cli/mcp.py`。
 
-对 DS 的启发：
+对 Octocode 的启发：
 
 - 入口参数完整：workdir/add-dir/session/resume/model/yolo/print/acp/wire/stream-json。
 - 空 prompt 可 defer MCP loading，加快首屏。
@@ -92,7 +92,7 @@ DS 的问题不是“缺几个按钮”，而是能力已经散落在 `cli/tui/a
 
 源码结构：`packages/opencode/src/session`、`tool`、`permission`、`plugin`、`mcp`、`storage`，以及 `packages/app/src/pages/session`。
 
-对 DS 的启发：
+对 Octocode 的启发：
 
 - 不是纯 TUI，而是 CLI + workbench：composer、request tree、todo dock、permission dock、terminal panel、file tree、review tab。
 - 权限是独立模块，插件能 hook permission/tool/command/compaction。
@@ -107,7 +107,7 @@ DS 的问题不是“缺几个按钮”，而是能力已经散落在 `cli/tui/a
 - permission modes 包含 default、acceptEdits、plan、auto、dontAsk、bypassPermissions。
 - plugins 可打包 skills、agents、hooks、MCP、LSP、monitors、themes。
 
-对 DS 的启发：
+对 Octocode 的启发：
 
 - 权限模式必须产品化，不应只表现为零散审批弹窗。
 - Skills/Hooks/MCP/Plugin 要分层，让用户知道能力来自哪里。
@@ -120,15 +120,15 @@ DS 的问题不是“缺几个按钮”，而是能力已经散落在 `cli/tui/a
 - `droid exec`、session id、worktree、custom droids、missions、settings、plugins、skills、MCP、Droid Computers 是主要卖点。
 - autonomy tiers、Droid Shield、diff 审批、cloud session sync 体现“长任务 + 高自治 + 可恢复”。
 
-对 DS 的启发：
+对 Octocode 的启发：
 
 - Mission 应该是一等对象，而不是 dry-run 后直接 completed。
 - worktree 隔离和 cloud/local runtime 边界要提前设计。
 - readiness report、wiki、missions 可以成为交付检查面。
 
-## 3. DS 模块对齐表
+## 3. Octocode 模块对齐表
 
-| DS 模块 | 当前职责 | 竞品基准 | 主要差距 | 优先级 |
+| Octocode 模块 | 当前职责 | 竞品基准 | 主要差距 | 优先级 |
 |---|---|---|---|---|
 | `src/cli` | Clap 入口，chat/run/ask/agent/mission/mcp/settings/session | Codex/Gemini/Qwen/Kimi 均有稳定 headless + JSON/stream | dispatch 重复，最终 JSON 未实现，命令发现不完整 | P0 |
 | `src/tui` | Ratatui UI、输入、欢迎页、状态栏、文件树、审批、转录 | Claude/Kimi/Qwen 输入/命令/文件 mention 是基础体验 | `app.rs` 过大，转录重排、文件 mention 性能风险 | P0 |
@@ -145,7 +145,7 @@ DS 的问题不是“缺几个按钮”，而是能力已经散落在 `cli/tui/a
 
 ## 4. 本轮 P0 改动
 
-### 4.1 `ds commands`
+### 4.1 `octocode commands`
 
 新增文件：
 
@@ -159,23 +159,23 @@ DS 的问题不是“缺几个按钮”，而是能力已经散落在 `cli/tui/a
 
 能力：
 
-- `ds commands list`
-- `ds commands list --json`
-- `ds commands list --filter <query>`
-- `ds commands locations`
-- `ds commands locations --json`
+- `octocode commands list`
+- `octocode commands list --json`
+- `octocode commands list --filter <query>`
+- `octocode commands locations`
+- `octocode commands locations --json`
 
 输出包含：
 
 - built-in slash command：name、aliases、group、description、usage。
-- custom command files：扫描项目 `.deepseek-code/commands` 和用户 `~/.deepseek-code/commands`，支持 `.md`、`.markdown`、`.toml`。
+- custom command files：扫描项目 `.octocode/commands` 和用户 `~/.octocode/commands`，支持 `.md`、`.markdown`、`.toml`。
 - builtin 主命令和 alias 冲突检测，例如自定义 `/h` 会标记为与 `/help` alias 冲突。
 - locations：显示 command 搜索路径是否存在。
 
 为什么是 P0：
 
 - Gemini/Qwen/Kimi/Claude/Droid/OpenCode 都把 command discovery 当成用户入口。
-- DS 之前 `/commands` 只显示位置和数量，非交互 CLI 没有同源 command catalog。
+- Octocode 之前 `/commands` 只显示位置和数量，非交互 CLI 没有同源 command catalog。
 - 后续 `/` 面板、custom commands、MCP prompts、skills commands 都可以挂到这个 catalog 上。
 
 ### 4.2 `@file` mention 索引化
@@ -193,7 +193,7 @@ DS 的问题不是“缺几个按钮”，而是能力已经散落在 `cli/tui/a
 新行为：
 
 - `FileTree` 新增 `mention_paths: Vec<String>`。
-- `FileTree::refresh()` 用 `ignore::WalkBuilder` 建一次文件索引，遵守 `.gitignore`，跳过 `.git`、`target`、`node_modules`、`.deepseek-code`、`.cache`。
+- `FileTree::refresh()` 用 `ignore::WalkBuilder` 建一次文件索引，遵守 `.gitignore`，跳过 `.git`、`target`、`node_modules`、`.octocode`、`.cache`。
 - mention 索引默认跳过隐藏文件和带空格路径，避免把 `.env` 等敏感文件或当前 resolver 不能正确解析的路径注入上下文。
 - 输入过程中只对内存索引过滤、排序和截断。
 - 仍保留最近 mention 优先、前缀匹配、basename 匹配；Tab 补全，Enter 在精确文件路径时提交消息。
@@ -201,7 +201,7 @@ DS 的问题不是“缺几个按钮”，而是能力已经散落在 `cli/tui/a
 为什么是 P0：
 
 - 文件引用是 Claude/Kimi/Qwen/OpenCode 的基础能力。
-- DS 已经有 UI，但热路径同步递归扫描会让“功能存在”变成“实际不好用”。
+- Octocode 已经有 UI，但热路径同步递归扫描会让“功能存在”变成“实际不好用”。
 
 ### 4.3 Patch Ledger
 
@@ -209,7 +209,7 @@ DS 的问题不是“缺几个按钮”，而是能力已经散落在 `cli/tui/a
 |---|---|---|---|---|
 | `src/cli/command_catalog.rs` | 新增 built-in/custom command catalog，支持 JSON、filter、locations、builtin alias 冲突标记 | Gemini/Qwen 的 command loader，Claude/Droid/OpenCode 的 command palette | `cargo test --test command_catalog_cli_tests`，`cargo run --quiet -- commands list --json --filter mcp` | 当前只发现自定义命令文件，不执行自定义命令；冲突处理只标记不改名 |
 | `src/cli/mod.rs` | 暴露 `command_catalog` 模块 | CLI 子命令同源可发现 | `cargo check` | 与已有并行 CLI 模块改动共存，提交前需看整体 diff |
-| `src/cli_entry.rs` | 新增 `ds commands list|locations` 路由 | headless command discovery 是 Codex/Gemini/Qwen/Kimi 基础能力 | `cargo check`，命令 smoke | 当前命令名为 `commands`，与 TUI `/commands` 语义相近但不完全等价 |
+| `src/cli_entry.rs` | 新增 `octocode commands list|locations` 路由 | headless command discovery 是 Codex/Gemini/Qwen/Kimi 基础能力 | `cargo check`，命令 smoke | 当前命令名为 `commands`，与 TUI `/commands` 语义相近但不完全等价 |
 | `tests/command_catalog_cli_tests.rs` | 覆盖 JSON builtins、project custom markdown、builtin alias conflict、locations | 防止命令入口和 schema 漂移 | `cargo test --test command_catalog_cli_tests` | 未覆盖 TOML frontmatter 的全部格式 |
 | `src/tui/file_tree.rs` | `FileTree` 新增 `mention_paths`，refresh 时使用 `ignore::WalkBuilder` 建索引，并跳过隐藏/空格路径 | Qwen/OpenCode/Kimi 都避免热路径重复扫文件 | `cargo test -q file_mention` | 大仓库首次 refresh 会多一次索引成本；索引上限当前 20,000 |
 | `src/tui/app.rs` | `@file` 候选改为内存索引过滤排序；Enter 精确匹配时提交，Tab 补全 | 文件 mention 是 Claude/Kimi/Qwen/OpenCode 基础交互 | `cargo test -q file_mention` | 新建文件在 refresh 前不会立刻出现在候选中 |

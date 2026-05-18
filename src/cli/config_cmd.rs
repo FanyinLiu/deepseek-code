@@ -95,10 +95,10 @@ fn explain(root: &Path, json: bool) -> Result<(), anyhow::Error> {
 
 fn config_sources(root: &Path) -> Vec<ConfigSourcePayload> {
     let global = dirs::home_dir()
-        .map(|home| home.join(".deepseek-code").join("config.toml"))
-        .unwrap_or_else(|| PathBuf::from("~/.deepseek-code/config.toml"));
-    let project = root.join(".deepseek-code").join("config.toml");
-    let local = root.join(".deepseek-code").join("local.toml");
+        .map(|home| home.join(".octocode").join("config.toml"))
+        .unwrap_or_else(|| PathBuf::from("~/.octocode/config.toml"));
+    let project = root.join(".octocode").join("config.toml");
+    let local = root.join(".octocode").join("local.toml");
     vec![
         source("user", global),
         source("project", project),

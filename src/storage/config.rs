@@ -170,6 +170,9 @@ struct PartialCacheConfig {
 struct PartialProviderConfig {
     default: Option<ProviderKind>,
     deepseek: Option<PartialProviderEndpointConfig>,
+    qwen: Option<PartialProviderEndpointConfig>,
+    kimi: Option<PartialProviderEndpointConfig>,
+    zhipu: Option<PartialProviderEndpointConfig>,
     openrouter: Option<PartialProviderEndpointConfig>,
     #[serde(rename = "openai-compatible")]
     openai_compatible: Option<PartialProviderEndpointConfig>,
@@ -578,9 +581,9 @@ fn default_protected_paths() -> Vec<String> {
 
 impl Config {
     /// Load from the standard file paths:
-    /// 1. ~/.deepseek-code/config.toml (user-global)
-    /// 2. ./.deepseek-code/config.toml (project, checked in)
-    /// 3. ./.deepseek-code/local.toml (local override, gitignored)
+    /// 1. ~/.octocode/config.toml (user-global)
+    /// 2. ./.octocode/config.toml (project, checked in)
+    /// 3. ./.octocode/local.toml (local override, gitignored)
     ///
     /// Later files override earlier ones.
     pub fn load(project_root: Option<&std::path::Path>) -> Result<Self, anyhow::Error> {
@@ -588,7 +591,7 @@ impl Config {
 
         // 1. User global
         if let Some(user_dir) = dirs::home_dir() {
-            let global_path = user_dir.join(".deepseek-code").join("config.toml");
+            let global_path = user_dir.join(".octocode").join("config.toml");
             if global_path.exists() {
                 let content = std::fs::read_to_string(&global_path)?;
                 let patch = parse_config_patch(&content)?;
@@ -598,14 +601,14 @@ impl Config {
 
         // 2 & 3. Project-level
         if let Some(root) = project_root.map(normalize_project_root) {
-            let project_config = root.join(".deepseek-code").join("config.toml");
+            let project_config = root.join(".octocode").join("config.toml");
             if project_config.exists() {
                 let content = std::fs::read_to_string(&project_config)?;
                 let patch = parse_config_patch(&content)?;
                 config = config.merge_with_config_patch(patch);
             }
 
-            let local_config = root.join(".deepseek-code").join("local.toml");
+            let local_config = root.join(".octocode").join("local.toml");
             if local_config.exists() {
                 let content = std::fs::read_to_string(&local_config)?;
                 let patch = parse_config_patch(&content)?;
@@ -626,7 +629,7 @@ impl Config {
         project_root: &std::path::Path,
     ) -> Result<PathBuf, anyhow::Error> {
         let root = normalize_project_root(project_root);
-        let config_dir = root.join(".deepseek-code");
+        let config_dir = root.join(".octocode");
         std::fs::create_dir_all(&config_dir)?;
         let path = config_dir.join("local.toml");
 
@@ -910,6 +913,9 @@ impl ProviderConfig {
         Self {
             default: patch.default.unwrap_or(self.default),
             deepseek: self.deepseek.merge_provider_endpoint(patch.deepseek),
+            qwen: self.qwen.merge_provider_endpoint(patch.qwen),
+            kimi: self.kimi.merge_provider_endpoint(patch.kimi),
+            zhipu: self.zhipu.merge_provider_endpoint(patch.zhipu),
             openrouter: self.openrouter.merge_provider_endpoint(patch.openrouter),
             openai_compatible: self
                 .openai_compatible
@@ -1224,14 +1230,14 @@ fn default_mcp_timeout_ms() -> u64 {
     crate::mcp::client::DEFAULT_MCP_TIMEOUT_MS
 }
 
-/// Find the project root by looking for a .deepseek-code directory or .git directory.
+/// Find the project root by looking for a .octocode directory or .git directory.
 #[must_use]
 pub fn find_project_root() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
     Some(find_project_root_from(&cwd))
 }
 
-/// Find the project root by looking for a .deepseek-code directory or .git directory.
+/// Find the project root by looking for a .octocode directory or .git directory.
 /// Returns `None` if no root markers can be found.
 #[must_use]
 pub fn find_project_root_strict() -> Option<PathBuf> {
@@ -1264,7 +1270,7 @@ fn has_project_root_marker(path: &Path, home_dir: Option<&Path>) -> bool {
         return true;
     }
 
-    path.join(".deepseek-code").is_dir() && !home_dir.is_some_and(|home| same_path(path, home))
+    path.join(".octocode").is_dir() && !home_dir.is_some_and(|home| same_path(path, home))
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
@@ -1282,7 +1288,7 @@ pub(crate) fn normalize_project_root(project_root: &Path) -> &Path {
     let is_config_dir = project_root
         .file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case(".deepseek-code"));
+        .is_some_and(|name| name.eq_ignore_ascii_case(".octocode"));
 
     if is_config_dir {
         project_root.parent().unwrap_or(project_root)
@@ -1298,7 +1304,7 @@ mod tests {
     #[test]
     fn config_load_normalizes_project_config_dir_root() {
         let root = tempfile::tempdir().expect("tempdir");
-        let config_dir = root.path().join(".deepseek-code");
+        let config_dir = root.path().join(".octocode");
         std::fs::create_dir_all(&config_dir).expect("create config dir");
         std::fs::write(config_dir.join("local.toml"), "api_key = \"sk-local\"\n")
             .expect("write local config");
@@ -1311,7 +1317,7 @@ mod tests {
     #[test]
     fn provider_config_parses_from_project_config() {
         let root = tempfile::tempdir().expect("tempdir");
-        let config_dir = root.path().join(".deepseek-code");
+        let config_dir = root.path().join(".octocode");
         std::fs::create_dir_all(&config_dir).expect("create config dir");
         std::fs::write(
             config_dir.join("config.toml"),
@@ -1407,9 +1413,8 @@ flash_model = "deepseek/deepseek-v4-flash"
 
     #[test]
     fn example_config_parses_and_covers_settings_surface() {
-        let config: Config =
-            toml::from_str(include_str!("../../.deepseek-code/config.toml.example"))
-                .expect("example config parses");
+        let config: Config = toml::from_str(include_str!("../../.octocode/config.toml.example"))
+            .expect("example config parses");
 
         assert_eq!(config.provider.default.as_str(), "deepseek");
         assert_eq!(config.ui.theme, Config::default().ui.theme);
@@ -1690,11 +1695,11 @@ timeout_ms = 1500
 
         assert_eq!(find_project_root_strict_from(&child), None);
 
-        std::fs::write(child.join(".deepseek-code"), "").expect("create marker file");
+        std::fs::write(child.join(".octocode"), "").expect("create marker file");
         assert_eq!(find_project_root_strict_from(&child), None);
 
-        std::fs::remove_file(child.join(".deepseek-code")).expect("remove marker file");
-        std::fs::create_dir(child.join(".deepseek-code")).expect("create marker directory");
+        std::fs::remove_file(child.join(".octocode")).expect("remove marker file");
+        std::fs::create_dir(child.join(".octocode")).expect("create marker directory");
         assert_eq!(find_project_root_strict_from(&child), Some(child.clone()));
     }
 
@@ -1860,7 +1865,7 @@ url = "https://mcp.example.com/events"
     #[test]
     fn policy_command_sandbox_merges_nested_config() {
         let root = tempfile::tempdir().expect("tempdir");
-        let config_dir = root.path().join(".deepseek-code");
+        let config_dir = root.path().join(".octocode");
         std::fs::create_dir_all(&config_dir).expect("create config dir");
         std::fs::write(
             config_dir.join("config.toml"),
@@ -1869,7 +1874,7 @@ url = "https://mcp.example.com/events"
 mode = "strict"
 network_access = true
 readable_roots = ["/usr/local"]
-writable_roots = ["/tmp/ds"]
+writable_roots = ["/tmp/octocode"]
 "#,
         )
         .expect("write config");
@@ -1887,7 +1892,7 @@ writable_roots = ["/tmp/ds"]
         );
         assert_eq!(
             loaded.policy.command_sandbox.writable_roots,
-            vec![PathBuf::from("/tmp/ds")]
+            vec![PathBuf::from("/tmp/octocode")]
         );
     }
 }

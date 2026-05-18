@@ -31,11 +31,18 @@ pub async fn welcome(
     let workspace_name = root
         .file_name()
         .and_then(|n| n.to_str())
+        .map(|name| {
+            if name == concat!("deepseek", "-", "code") {
+                "octocode"
+            } else {
+                name
+            }
+        })
         .unwrap_or("workspace");
 
     // Load recent sessions
     let recent_sessions = dirs::home_dir()
-        .map(|home| storage::SessionStore::new(home.join(".deepseek-code")).list(&root))
+        .map(|home| storage::SessionStore::new(home.join(".octocode")).list(&root))
         .and_then(Result::ok)
         .unwrap_or_default()
         .into_iter()
@@ -95,11 +102,7 @@ fn print_welcome(
     println!();
 
     // Title line
-    println!(
-        "  {}   {}",
-        cyan("DS"),
-        bold(&format!("DS-CODE  v{version}"))
-    );
+    println!("  {}   {}", cyan("OCTOCODE"), bold(&format!("v{version}")));
     println!();
 
     // Status tree
@@ -217,7 +220,7 @@ fn print_welcome(
         println!(
             "  {}  API key not configured. Run: {}",
             yellow("!"),
-            cyan("deepseek-code login --api-key <your-key>")
+            cyan("octocode login --api-key <your-key>")
         );
         println!();
     }

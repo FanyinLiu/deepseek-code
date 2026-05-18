@@ -291,12 +291,33 @@ impl ThinkingConfig {
     }
 
     #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        self.thinking_type == "enabled"
+    }
+
+    #[must_use]
     pub fn with_effort(effort: &str) -> Self {
         Self {
             thinking_type: "enabled".into(),
             effort: Some(effort.to_string()),
         }
     }
+}
+
+/// Provider-specific wire format for thinking controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingWireFormat {
+    /// Keep DeepSeek-native `thinking.type` plus optional `thinking.effort`.
+    #[serde(rename = "deepseek_native")]
+    DeepSeekNative,
+    /// Keep `thinking.type`, but strip provider-unsupported effort knobs.
+    NativeTypeOnly,
+    /// DashScope/Qwen-compatible `enable_thinking` and optional budget fields.
+    #[serde(rename = "dashscope_enable_thinking")]
+    DashScopeEnableThinking,
+    /// Remove thinking controls from the outbound request.
+    Unsupported,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

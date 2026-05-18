@@ -1,7 +1,7 @@
 use std::process::Command;
 
-fn ds_command(project_root: &std::path::Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ds"));
+fn octocode_command(project_root: &std::path::Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_octocode"));
     command.arg("-C").arg(project_root);
     command
 }
@@ -13,10 +13,10 @@ fn search_limit_zero_returns_no_results() {
     std::fs::create_dir_all(&src).expect("create src");
     std::fs::write(src.join("needle_file.rs"), "fn main() {}\n").expect("write file");
 
-    let output = ds_command(root.path())
+    let output = octocode_command(root.path())
         .args(["search", "needle", "--limit", "0"])
         .output()
-        .expect("run ds search");
+        .expect("run octocode search");
 
     assert!(output.status.success(), "stderr={}", stderr(&output));
     assert!(stdout(&output).contains("No results found for: needle"));
@@ -30,10 +30,10 @@ fn search_limit_one_can_return_code_match_when_no_filename_matches() {
     std::fs::write(src.join("main.rs"), "fn main() { println!(\"needle\"); }\n")
         .expect("write file");
 
-    let output = ds_command(root.path())
+    let output = octocode_command(root.path())
         .args(["search", "needle", "--limit", "1"])
         .output()
-        .expect("run ds search");
+        .expect("run octocode search");
 
     assert!(output.status.success(), "stderr={}", stderr(&output));
     let stdout = stdout(&output);

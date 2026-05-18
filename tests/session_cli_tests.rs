@@ -3,8 +3,8 @@ use std::process::Command;
 use deepseek_code::deepseek::{ReasoningState, Session, SessionId, SessionMetadata};
 use deepseek_code::storage::{EventLogStore, SessionEvent, SessionEventKind, SessionStore};
 
-fn ds_command(project_root: &std::path::Path, home: &std::path::Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ds"));
+fn octocode_command(project_root: &std::path::Path, home: &std::path::Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_octocode"));
     command.arg("-C").arg(project_root);
     command.env("HOME", home);
     command.env("DEEPSEEK_CODE_HOME", home);
@@ -16,7 +16,7 @@ fn ds_command(project_root: &std::path::Path, home: &std::path::Path) -> Command
 fn session_list_replay_and_export_use_saved_data_without_rerun() {
     let root = tempfile::tempdir().expect("project tempdir");
     let home = tempfile::tempdir().expect("home tempdir");
-    let base = home.path().join(".deepseek-code");
+    let base = home.path().join(".octocode");
     let session = Session {
         id: SessionId::new_v4(),
         name: Some("test-session".to_string()),
@@ -44,7 +44,7 @@ fn session_list_replay_and_export_use_saved_data_without_rerun() {
             ),
         )
         .expect("append event");
-    EventLogStore::new(home.path().join(".deepseek-code"))
+    EventLogStore::new(home.path().join(".octocode"))
         .append(
             root.path(),
             &SessionEvent::new(
@@ -60,28 +60,28 @@ fn session_list_replay_and_export_use_saved_data_without_rerun() {
         )
         .expect("append hook event");
 
-    let output = ds_command(root.path(), home.path())
+    let output = octocode_command(root.path(), home.path())
         .args(["session", "list", "--json"])
         .output()
-        .expect("run ds session list");
+        .expect("run octocode session list");
     assert!(output.status.success(), "stderr={}", stderr(&output));
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("session list json parses");
     assert_eq!(json.as_array().expect("list").len(), 1);
 
-    let output = ds_command(root.path(), home.path())
+    let output = octocode_command(root.path(), home.path())
         .args(["session", "replay", "test-session"])
         .output()
-        .expect("run ds session replay");
+        .expect("run octocode session replay");
     assert!(output.status.success(), "stderr={}", stderr(&output));
     let replay_stdout = String::from_utf8_lossy(&output.stdout);
     assert!(replay_stdout.contains("hook pre_tool_use success=true commands=1"));
     assert!(replay_stdout.contains("No tools or commands were re-run"));
 
-    let output = ds_command(root.path(), home.path())
+    let output = octocode_command(root.path(), home.path())
         .args(["session", "export", "test-session", "--format", "json"])
         .output()
-        .expect("run ds session export");
+        .expect("run octocode session export");
     assert!(output.status.success(), "stderr={}", stderr(&output));
 }
 

@@ -1,7 +1,7 @@
 use std::process::Command;
 
-fn ds_command(project_root: &std::path::Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ds"));
+fn octocode_command(project_root: &std::path::Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_octocode"));
     command.arg("-C").arg(project_root);
     command
 }
@@ -9,10 +9,10 @@ fn ds_command(project_root: &std::path::Path) -> Command {
 #[test]
 fn agent_list_json_contains_built_ins() {
     let root = tempfile::tempdir().expect("tempdir");
-    let output = ds_command(root.path())
+    let output = octocode_command(root.path())
         .args(["agent", "list", "--json"])
         .output()
-        .expect("run ds agent list");
+        .expect("run octocode agent list");
 
     assert!(output.status.success(), "stderr={}", stderr(&output));
     let json: serde_json::Value =
@@ -31,10 +31,10 @@ fn agent_list_json_contains_built_ins() {
 #[test]
 fn agent_show_code_reviewer_json_parses() {
     let root = tempfile::tempdir().expect("tempdir");
-    let output = ds_command(root.path())
+    let output = octocode_command(root.path())
         .args(["agent", "show", "code-reviewer", "--json"])
         .output()
-        .expect("run ds agent show");
+        .expect("run octocode agent show");
 
     assert!(output.status.success(), "stderr={}", stderr(&output));
     let json: serde_json::Value =
@@ -50,10 +50,10 @@ fn agent_show_code_reviewer_json_parses() {
 #[test]
 fn agent_show_unknown_fails_cleanly() {
     let root = tempfile::tempdir().expect("tempdir");
-    let output = ds_command(root.path())
+    let output = octocode_command(root.path())
         .args(["agent", "show", "missing-agent"])
         .output()
-        .expect("run ds agent show missing");
+        .expect("run octocode agent show missing");
 
     assert!(!output.status.success());
     assert!(stderr(&output).contains("unknown agent 'missing-agent'"));
@@ -62,23 +62,23 @@ fn agent_show_unknown_fails_cleanly() {
 #[test]
 fn agent_create_template_writes_file_and_validate_json_parses() {
     let root = tempfile::tempdir().expect("tempdir");
-    let output = ds_command(root.path())
+    let output = octocode_command(root.path())
         .args(["agent", "create", "my-auditor", "--template", "auditor"])
         .output()
-        .expect("run ds agent create");
+        .expect("run octocode agent create");
 
     assert!(output.status.success(), "stderr={}", stderr(&output));
     let path = root
         .path()
-        .join(".deepseek-code")
+        .join(".octocode")
         .join("agents")
         .join("my-auditor.md");
     assert!(path.exists());
 
-    let output = ds_command(root.path())
+    let output = octocode_command(root.path())
         .args(["agent", "validate", "--all", "--json"])
         .output()
-        .expect("run ds agent validate all");
+        .expect("run octocode agent validate all");
 
     assert!(output.status.success(), "stderr={}", stderr(&output));
     let json: serde_json::Value =
@@ -95,15 +95,15 @@ fn agent_create_template_writes_file_and_validate_json_parses() {
 #[test]
 fn agent_validate_catches_malformed_agent() {
     let root = tempfile::tempdir().expect("tempdir");
-    let agents_dir = root.path().join(".deepseek-code").join("agents");
+    let agents_dir = root.path().join(".octocode").join("agents");
     std::fs::create_dir_all(&agents_dir).expect("create agents dir");
     std::fs::write(agents_dir.join("broken.md"), "---\nnot-valid =\n---\n\n")
         .expect("write broken agent");
 
-    let output = ds_command(root.path())
+    let output = octocode_command(root.path())
         .args(["agent", "validate", "--all", "--json"])
         .output()
-        .expect("run ds agent validate");
+        .expect("run octocode agent validate");
 
     assert!(
         !output.status.success(),
@@ -129,7 +129,7 @@ fn agent_validate_catches_malformed_agent() {
 #[test]
 fn agent_validate_all_includes_toml_custom_agents() {
     let root = tempfile::tempdir().expect("tempdir");
-    let agents_dir = root.path().join(".deepseek-code").join("agents");
+    let agents_dir = root.path().join(".octocode").join("agents");
     std::fs::create_dir_all(&agents_dir).expect("create agents dir");
     std::fs::write(
         agents_dir.join("toml-explorer.toml"),
@@ -144,10 +144,10 @@ system_prompt = "Read the codebase and report concise findings."
     )
     .expect("write toml agent");
 
-    let output = ds_command(root.path())
+    let output = octocode_command(root.path())
         .args(["agent", "validate", "--all", "--json"])
         .output()
-        .expect("run ds agent validate all");
+        .expect("run octocode agent validate all");
 
     assert!(output.status.success(), "stderr={}", stderr(&output));
     let json: serde_json::Value =

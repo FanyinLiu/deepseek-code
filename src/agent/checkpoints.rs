@@ -128,8 +128,8 @@ fn collect_file_snapshots(checkpoint_id: uuid::Uuid, project_root: &Path) -> Vec
         let path = entry.path();
         let relative = path.strip_prefix(project_root).unwrap_or(path);
 
-        // Skip .git and .deepseek-code directories
-        if relative.starts_with(".git") || relative.starts_with(".deepseek-code") {
+        // Skip .git and .octocode directories
+        if relative.starts_with(".git") || relative.starts_with(".octocode") {
             continue;
         }
 
@@ -167,7 +167,7 @@ fn backup_small_file(
     }
 
     let backup_dir = project_root
-        .join(".deepseek-code")
+        .join(".octocode")
         .join("checkpoints")
         .join(checkpoint_id.to_string());
     let backup_file = backup_dir.join(relative);
@@ -239,7 +239,7 @@ fn cleanup_checkpoint_backups(checkpoints: &[Checkpoint], project_root: &Path) {
             }
         }
         let checkpoint_dir = project_root
-            .join(".deepseek-code")
+            .join(".octocode")
             .join("checkpoints")
             .join(checkpoint.id.to_string());
         let _ = std::fs::remove_dir_all(&checkpoint_dir);
@@ -332,12 +332,12 @@ mod tests {
 
         let first_dir = root
             .path()
-            .join(".deepseek-code")
+            .join(".octocode")
             .join("checkpoints")
             .join(first.id.to_string());
         let second_dir = root
             .path()
-            .join(".deepseek-code")
+            .join(".octocode")
             .join("checkpoints")
             .join(second.id.to_string());
         assert!(first_dir.exists());

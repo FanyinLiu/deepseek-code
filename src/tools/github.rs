@@ -4,7 +4,7 @@ use reqwest;
 use serde_json::Value;
 
 const BASE_URL: &str = "https://api.github.com";
-const USER_AGENT: &str = "deepseek-code/0.1.0";
+const USER_AGENT: &str = "octocode/0.1.0";
 
 fn build_client() -> Result<reqwest::Client, anyhow::Error> {
     let mut headers = reqwest::header::HeaderMap::new();

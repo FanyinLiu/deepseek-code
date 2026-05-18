@@ -110,7 +110,7 @@ impl ScheduledTaskStore {
     pub fn default_user() -> Self {
         let root = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".deepseek-code")
+            .join(".octocode")
             .join("tasks");
         Self { root }
     }

@@ -1,20 +1,20 @@
 # Agent Commands
 
-`ds agent` turns the existing subagent runtime into an explicit CLI product
+`octocode agent` turns the existing subagent runtime into an explicit CLI product
 surface. It lists built-ins, shows their defaults, creates project custom
 agents, validates agent files, and can run a named agent on a task.
 
 ## Commands
 
 ```bash
-ds agent list
-ds agent list --json
-ds agent show code-reviewer
-ds agent show security-auditor --json
-ds agent run code-explorer "explain src/agent" --focus src/agent
-ds agent create my-auditor --template auditor
-ds agent validate --all
-ds agent validate my-auditor --json
+octocode agent list
+octocode agent list --json
+octocode agent show code-reviewer
+octocode agent show security-auditor --json
+octocode agent run code-explorer "explain src/agent" --focus src/agent
+octocode agent create my-auditor --template auditor
+octocode agent validate --all
+octocode agent validate my-auditor --json
 ```
 
 ## Built-In Agents
@@ -40,7 +40,7 @@ read_file, list_dir, search_files, search_code, git_status, git_diff
 Custom agents live under:
 
 ```text
-.deepseek-code/agents/<name>.md
+.octocode/agents/<name>.md
 ```
 
 Files use markdown with TOML frontmatter:
@@ -71,7 +71,7 @@ phrases are reported as warnings.
 
 ## Non-Interactive Run Behavior
 
-`ds agent run` uses the real subagent executor. If a tool requires interactive
+`octocode agent run` uses the real subagent executor. If a tool requires interactive
 approval in this plain terminal mode, the command denies the request rather than
 auto-approving it. Use read-only agents for unattended inspection and keep
 write-capable work behind normal project policy.

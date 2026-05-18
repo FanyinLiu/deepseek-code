@@ -364,14 +364,14 @@ fn configured_max_parallel_subagents(project_root: &Path) -> usize {
     let mut configured = None;
 
     if let Some(home_dir) = dirs::home_dir() {
-        let global_path = home_dir.join(".deepseek-code").join("config.toml");
+        let global_path = home_dir.join(".octocode").join("config.toml");
         configured = read_configured_subagent_max_parallel(&global_path).or(configured);
     }
 
     let root = crate::storage::config::normalize_project_root(project_root);
-    let project_config = root.join(".deepseek-code").join("config.toml");
+    let project_config = root.join(".octocode").join("config.toml");
     configured = read_configured_subagent_max_parallel(&project_config).or(configured);
-    let local_config = root.join(".deepseek-code").join("local.toml");
+    let local_config = root.join(".octocode").join("local.toml");
     configured = read_configured_subagent_max_parallel(&local_config).or(configured);
 
     configured
@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn supervisor_reads_project_parallel_limit() {
         let root = tempfile::tempdir().expect("tempdir");
-        let config_dir = root.path().join(".deepseek-code");
+        let config_dir = root.path().join(".octocode");
         std::fs::create_dir_all(&config_dir).expect("create config dir");
         std::fs::write(
             config_dir.join("local.toml"),

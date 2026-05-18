@@ -130,9 +130,16 @@ impl SubagentExecutor {
         let mut tool_calls_used: Vec<String> = Vec::new();
         let mut files_read: Vec<String> = Vec::new();
         let mut files_written: Vec<String> = Vec::new();
+        let mut recovered_tool_errors: Vec<String> = Vec::new();
         let mut token_usage: u64 = 0;
         let mut turn_count: u32 = 0;
         let mut success = true;
+        let turn_id = TurnId::new_v4();
+        ReasoningManager::begin_user_turn(
+            &mut session.reasoning_state,
+            &mut session.messages,
+            turn_id,
+        );
 
         // Main loop
         let final_output = loop {
@@ -141,13 +148,6 @@ impl SubagentExecutor {
                 break structured_subagent_limit_message(task, self.config.max_turns);
             }
             turn_count += 1;
-
-            let turn_id = TurnId::new_v4();
-            ReasoningManager::begin_user_turn(
-                &mut session.reasoning_state,
-                &mut session.messages,
-                turn_id,
-            );
 
             // Build prompt
             let builder = PromptBuilder::new(model.clone(), lane.clone(), true);
@@ -188,6 +188,10 @@ impl SubagentExecutor {
 
                     if stream_result.tool_calls.is_empty() {
                         // No tool calls — final response
+                        ReasoningManager::complete_tool_loop(
+                            &mut session.reasoning_state,
+                            &mut session.messages,
+                        );
                         let msg = ReasoningManager::new_assistant_message(
                             &stream_result.content,
                             (!stream_result.reasoning_content.is_empty())
@@ -205,6 +209,24 @@ impl SubagentExecutor {
                             tool_calls_used.push(tc.function.name.clone());
                         }
 
+                        let sub_turn_id = SubTurnId::new_v4();
+                        let assistant_msg = ReasoningManager::new_assistant_message(
+                            &stream_result.content,
+                            (!stream_result.reasoning_content.is_empty())
+                                .then_some(&stream_result.reasoning_content),
+                            &stream_result.tool_calls,
+                            turn_id,
+                            Some(sub_turn_id),
+                            true,
+                        );
+                        session.messages.push(assistant_msg);
+                        if let Some(last_msg) = session.messages.last() {
+                            ReasoningManager::begin_tool_turn(
+                                &mut session.reasoning_state,
+                                last_msg,
+                            );
+                        }
+
                         // Execute tools
                         let results = self
                             .execute_tool_calls(
@@ -215,12 +237,14 @@ impl SubagentExecutor {
                             )
                             .await;
 
-                        // Check for errors
-                        if results.iter().any(|(_, r)| r.is_error) {
-                            success = false;
-                        }
                         for (tc, record) in &results {
-                            if !record.is_error {
+                            if record.is_error {
+                                recovered_tool_errors.push(format!(
+                                    "{}: {}",
+                                    record.name,
+                                    classify_tool_result_error(&record.result)
+                                ));
+                            } else {
                                 collect_successful_file_access(
                                     tc,
                                     &mut files_read,
@@ -228,18 +252,6 @@ impl SubagentExecutor {
                                 );
                             }
                         }
-
-                        // Add assistant message
-                        let assistant_msg = ReasoningManager::new_assistant_message(
-                            &stream_result.content,
-                            (!stream_result.reasoning_content.is_empty())
-                                .then_some(&stream_result.reasoning_content),
-                            &stream_result.tool_calls,
-                            turn_id,
-                            None,
-                            true,
-                        );
-                        session.messages.push(assistant_msg);
 
                         // Add tool results
                         for (_tc, record) in &results {
@@ -249,7 +261,7 @@ impl SubagentExecutor {
                                 &record.result,
                                 record.is_error,
                                 turn_id,
-                                SubTurnId::new_v4(),
+                                sub_turn_id,
                             );
                             session.messages.push(tool_msg);
                         }
@@ -275,6 +287,17 @@ impl SubagentExecutor {
             final_output.clone()
         };
 
+        let error = if success {
+            (!recovered_tool_errors.is_empty()).then(|| {
+                format!(
+                    "Recovered tool errors: {}",
+                    dedupe_preserving_order(recovered_tool_errors).join("; ")
+                )
+            })
+        } else {
+            Some(summarize_subagent_failure_for_parent(&final_output))
+        };
+
         let result = SubagentResult {
             success,
             summary,
@@ -284,7 +307,7 @@ impl SubagentExecutor {
             files_written: dedupe_preserving_order(files_written),
             duration_ms,
             token_usage,
-            error: (!success).then(|| summarize_subagent_failure_for_parent(&final_output)),
+            error,
             started_at,
             completed_at,
         };
@@ -329,6 +352,11 @@ impl SubagentExecutor {
                 "\n\n## Focus Files\n\n{}",
                 task.focus_files.join("\n")
             );
+        }
+        if let Some(expected_output) = &task.expected_output {
+            if !expected_output.trim().is_empty() {
+                let _ = write!(user_content, "\n\n## Expected Output\n\n{expected_output}");
+            }
         }
 
         session.messages.push(ProtocolMessage {
@@ -744,6 +772,10 @@ fn sanitize_subagent_task(task: &SubagentTask) -> SubagentTask {
         .context
         .as_ref()
         .map(|context| defense.sanitize_input(context).safe);
+    sanitized.expected_output = task
+        .expected_output
+        .as_ref()
+        .map(|expected_output| defense.sanitize_input(expected_output).safe);
     sanitized
 }
 
@@ -795,25 +827,89 @@ fn structured_subagent_limit_message(task: &SubagentTask, _max_turns: u32) -> St
 }
 
 fn structured_subagent_error_message(task: &SubagentTask, error: &str) -> String {
-    let classified = if error.contains("EOF while parsing")
-        || error.contains("parse error")
-        || error.contains("expected value")
-        || error.contains("expected ident")
-    {
-        "工具调用参数解析失败"
-    } else {
-        "子任务执行失败"
-    };
+    let (classified, cause_zh, cause_en) = classify_subagent_error(error);
+    let detail = safe_subagent_error_detail(error, cause_en);
     if subagent_task_uses_chinese(task) {
         format!(
-            "{classified}。\n任务：{}\n说明：已保留完整错误到调试日志，用户界面只显示结构化摘要。",
+            "{classified}。\n任务：{}\n原因：{cause_zh}。\n细节：{detail}。",
             task.description
         )
     } else {
         format!(
-            "Subtask failed.\nTask: {}\nSummary: the detailed error was kept out of the visible transcript.",
+            "Subtask failed.\nTask: {}\nCause: {cause_en}.\nDetail: {detail}.",
             task.description
         )
+    }
+}
+
+fn classify_subagent_error(error: &str) -> (&'static str, &'static str, &'static str) {
+    let lower = error.to_lowercase();
+    if lower.contains("eof while parsing")
+        || lower.contains("parse error")
+        || lower.contains("expected value")
+        || lower.contains("expected ident")
+    {
+        (
+            "工具调用参数解析失败",
+            "工具调用参数解析失败",
+            "tool call argument parse failed",
+        )
+    } else if lower.contains("context") && lower.contains("length") {
+        (
+            "子任务上下文过长",
+            "上下文长度超限",
+            "context length exceeded",
+        )
+    } else if lower.contains("rate limit") || lower.contains("429") {
+        (
+            "模型请求限流",
+            "模型请求被限流",
+            "model request was rate limited",
+        )
+    } else if lower.contains("timeout") || lower.contains("timed out") {
+        ("模型请求超时", "模型请求超时", "model request timed out")
+    } else if lower.contains("unauthorized")
+        || lower.contains("401")
+        || lower.contains("api key")
+        || lower.contains("authentication")
+    {
+        (
+            "模型认证失败",
+            "模型认证失败",
+            "model authentication failed",
+        )
+    } else {
+        (
+            "子任务执行失败",
+            "子任务请求失败",
+            "subagent request failed",
+        )
+    }
+}
+
+fn safe_subagent_error_detail(error: &str, cause_en: &str) -> String {
+    if cause_en == "tool call argument parse failed" {
+        return cause_en.to_string();
+    }
+    let first_line = error
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .unwrap_or("unknown error");
+    let redacted = crate::policy::redact_all(first_line);
+    truncate_chars(&redacted, 220)
+}
+
+fn classify_tool_result_error(result: &str) -> &'static str {
+    let lower = result.to_lowercase();
+    if lower.contains("not allowed") || lower.contains("denied") || lower.contains("approval") {
+        "tool call was denied by policy"
+    } else if lower.contains("no such file") || lower.contains("not found") {
+        "requested path was not found"
+    } else if lower.contains("parse") || lower.contains("invalid") {
+        "tool arguments were invalid"
+    } else {
+        "tool call returned an error"
     }
 }
 
@@ -823,6 +919,15 @@ fn summarize_subagent_failure_for_parent(output: &str) -> String {
         .next()
         .unwrap_or("子任务执行失败")
         .to_string()
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut out: String = value.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 fn subagent_task_uses_chinese(task: &SubagentTask) -> bool {
@@ -961,12 +1066,12 @@ mod tests {
     use super::{
         collect_successful_file_access, dedupe_preserving_order, emit_subagent_chunk_delta,
         read_only_allows_tool, run_nested_subagent, structured_subagent_error_message,
-        structured_subagent_limit_message,
+        structured_subagent_limit_message, SubagentExecutor,
     };
     use crate::agent::orchestrator::AgentEvent;
-    use crate::agent::subagent::types::SubagentTask;
+    use crate::agent::subagent::types::{SubagentConfig, SubagentTask};
     use crate::deepseek::client::DeepSeekClient;
-    use crate::deepseek::models::StreamChunk;
+    use crate::deepseek::models::{DeepSeekModel, StreamChunk};
     use std::sync::Arc;
 
     #[test]
@@ -1002,6 +1107,100 @@ mod tests {
             rx.try_recv().expect("subagent hidden token delta"),
             AgentEvent::TokenDelta { input_tokens: 0, output_tokens } if output_tokens > 0
         ));
+    }
+
+    #[test]
+    fn subagent_task_expected_output_is_model_visible() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let executor = SubagentExecutor::new(
+            Arc::new(DeepSeekClient::new("test-key".to_string())),
+            root.path().to_path_buf(),
+            SubagentConfig::default(),
+        );
+        let task = SubagentTask {
+            description: "Explore package".into(),
+            prompt: "Read Cargo.toml".into(),
+            context: None,
+            focus_files: vec!["Cargo.toml".into()],
+            expected_output: Some("Return the package name and evidence.".into()),
+        };
+
+        let session = executor.build_session(&task);
+        let content = session.messages[0].content.to_string_lossy();
+
+        assert!(content.contains("## Focus Files"));
+        assert!(content.contains("Cargo.toml"));
+        assert!(content.contains("## Expected Output"));
+        assert!(content.contains("Return the package name and evidence."));
+    }
+
+    #[test]
+    fn subagent_tool_loop_keeps_active_tool_result_for_followup() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let executor = SubagentExecutor::new(
+            Arc::new(DeepSeekClient::new("test-key".to_string())),
+            root.path().to_path_buf(),
+            SubagentConfig::default(),
+        );
+        let mut session = executor.build_session(&SubagentTask {
+            description: "Read package".into(),
+            prompt: "Read Cargo.toml and report the package name.".into(),
+            context: None,
+            focus_files: Vec::new(),
+            expected_output: None,
+        });
+        let turn_id = crate::deepseek::TurnId::new_v4();
+        let sub_turn_id = crate::deepseek::SubTurnId::new_v4();
+        let tool_call = crate::deepseek::ToolCall {
+            id: "call-1".into(),
+            call_type: "function".into(),
+            function: crate::deepseek::ToolCallFunction {
+                name: "read_file".into(),
+                arguments: r#"{"path":"Cargo.toml"}"#.into(),
+            },
+        };
+        let assistant = crate::agent::reasoning::ReasoningManager::new_assistant_message(
+            "",
+            Some("need package name"),
+            std::slice::from_ref(&tool_call),
+            turn_id,
+            Some(sub_turn_id),
+            true,
+        );
+        session.messages.push(assistant);
+        let assistant = session.messages.last().expect("assistant tool call");
+        crate::agent::reasoning::ReasoningManager::begin_tool_turn(
+            &mut session.reasoning_state,
+            assistant,
+        );
+        let tool_result = "File: Cargo.toml\n\n     1 | [package]\n     2 | name = \"octocode\"";
+        session.messages.push(
+            crate::agent::reasoning::ReasoningManager::new_tool_result_message(
+                "call-1",
+                "read_file",
+                tool_result,
+                false,
+                turn_id,
+                sub_turn_id,
+            ),
+        );
+
+        let (_, messages) = crate::agent::prompt_builder::PromptBuilder::new(
+            DeepSeekModel::Flash,
+            crate::deepseek::ExecutionLane::ToolLoopThinking,
+            true,
+        )
+        .build(&session, None, None, &[]);
+        let joined = messages
+            .iter()
+            .filter_map(|message| match message.content.as_ref()? {
+                crate::deepseek::ChatMessageContent::Text(text) => Some(text.as_str()),
+                crate::deepseek::ChatMessageContent::Parts(_) => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(joined.contains("name = \"octocode\""));
     }
 
     #[test]

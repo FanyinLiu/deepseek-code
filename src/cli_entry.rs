@@ -5,7 +5,12 @@ use clap::{Parser, Subcommand, ValueEnum};
 use crate::{cli, tui};
 
 #[derive(Parser)]
-#[command(version, about = "DeepSeek-native coding agent", long_about = None)]
+#[command(
+    name = "octocode",
+    version,
+    about = "Multi-model, multi-agent coding CLI",
+    long_about = None
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -20,9 +25,9 @@ enum Commands {
     /// Check API connectivity, auth, and configuration
     Doctor,
 
-    /// Store `DeepSeek` API key in system keyring
+    /// Store provider API key in system keyring
     Login {
-        /// API key (starts with sk-)
+        /// Provider API key
         #[arg(short, long)]
         api_key: Option<String>,
     },
@@ -136,6 +141,48 @@ enum Commands {
         command: FeaturesCommands,
     },
 
+    /// Show provider model and thinking capabilities
+    Models {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Read, write, and run persistent Octocode goals
+    Goal {
+        #[command(subcommand)]
+        command: GoalCommands,
+    },
+
+    /// Inspect self-evolution archive candidates and lineage
+    Archive {
+        #[command(subcommand)]
+        command: ArchiveCommands,
+    },
+
+    /// Create repair proposals, validation runs, and repair reports
+    Repair {
+        #[command(subcommand)]
+        command: RepairCommands,
+    },
+
+    /// Maintain project knowledge, risk map, and failure memory
+    Knowledge {
+        #[command(subcommand)]
+        command: KnowledgeCommands,
+    },
+
+    /// Manage reusable local skills generated from successful repair/evolution runs
+    Skill {
+        #[command(subcommand)]
+        command: SkillCommands,
+    },
+
+    /// Inspect and run self-evolution proposal workflows
+    Evolve {
+        #[command(subcommand)]
+        command: EvolveCommands,
+    },
     /// Manage built-in and project custom agents
     Agent {
         #[command(subcommand)]
@@ -331,6 +378,349 @@ enum FeaturesCommands {
 }
 
 #[derive(Subcommand)]
+enum GoalCommands {
+    /// Write the default .octocode/goals.toml
+    Init {
+        /// Replace an existing goals file
+        #[arg(long)]
+        overwrite: bool,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the effective goal configuration
+    Show {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Plan a task graph from the active objective
+    Plan {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the latest recorded goal task graph
+    Graph {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set the active objective for future automatic evolution
+    SetActive {
+        /// Objective id, such as goal_binding
+        id: String,
+        /// Objective title
+        title: String,
+        /// Success criterion; repeat for multiple criteria
+        #[arg(long = "success")]
+        success: Vec<String>,
+        /// Target file for generated candidate patches; repeat for multiple targets
+        #[arg(long = "target")]
+        targets: Vec<PathBuf>,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run a self-evolution proof from the active objective
+    Run {
+        /// Override model for the model-generated candidate patch: pro or flash
+        #[arg(long)]
+        model: Option<String>,
+        /// Run full remote validation when the sandbox backend supports it
+        #[arg(long)]
+        full: bool,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ArchiveCommands {
+    /// Show archive counters
+    Status {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List archive candidates with utility scores
+    List {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one archive candidate
+    Show {
+        /// Candidate id
+        candidate_id: String,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List lineage events
+    Lineage {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RepairCommands {
+    /// Create a repair proposal without editing files
+    Propose {
+        /// Problem statement
+        problem: String,
+        /// Proposal title
+        #[arg(long)]
+        title: Option<String>,
+        /// File expected to be relevant; repeat for multiple targets
+        #[arg(long = "target")]
+        targets: Vec<PathBuf>,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run deterministic repair gates and write a report
+    Run {
+        /// Proposal id from `octocode repair propose`
+        proposal_id: String,
+        /// Run full validation, including tests when available
+        #[arg(long)]
+        full: bool,
+        /// Ask the configured model to generate a candidate unified diff
+        #[arg(long)]
+        model_patch: bool,
+        /// Override model for --model-patch: pro or flash
+        #[arg(long)]
+        model: Option<String>,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print a repair run report
+    Report {
+        /// Run id from `octocode repair run`
+        run_id: String,
+    },
+    /// Show local repair proposals, runs, and failure-memory count
+    Status {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum KnowledgeCommands {
+    /// Refresh project.md and ensure risk-map/failure-memory files exist
+    Update {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a knowledge asset
+    Show {
+        /// Asset to show: project, risk-map, or failures
+        topic: KnowledgeTopicArg,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum KnowledgeTopicArg {
+    Project,
+    RiskMap,
+    Failures,
+}
+
+#[derive(Subcommand)]
+enum SkillCommands {
+    /// List local skills
+    List {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one local skill
+    Show {
+        /// Skill id
+        skill_id: String,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a draft skill from a repair run
+    Add {
+        /// Repair run id from `octocode repair run`
+        run_id: String,
+        /// Override generated skill name
+        #[arg(long)]
+        name: Option<String>,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run structural checks for a local skill
+    Test {
+        /// Skill id
+        skill_id: String,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum EvolveCommands {
+    /// Inspect local evolution proposals, runs, applies, and rollbacks
+    Inspect {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a self-evolution proposal without editing source files
+    Propose {
+        /// Capability area this evolution should improve
+        #[arg(long)]
+        area: Option<String>,
+        /// Source files the generated patch is expected to touch
+        #[arg(long = "target")]
+        targets: Vec<PathBuf>,
+        /// Proposal title
+        #[arg(long)]
+        title: Option<String>,
+        /// Problem statement
+        #[arg(long)]
+        problem: Option<String>,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Generate a candidate patch run for an evolution proposal
+    Patch {
+        /// Proposal id from `octocode evolve propose`
+        proposal_id: String,
+        /// Use real model-backed planner/implementer/safety reviewer agents
+        #[arg(long)]
+        model_agents: bool,
+        /// Override model for model-backed agents: pro or flash
+        #[arg(long)]
+        model: Option<String>,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Convert an evolution proposal into a repair-backed validation run
+    Repair {
+        /// Proposal id from `octocode evolve propose`
+        proposal_id: String,
+        /// Ask the configured model to generate a repair candidate patch
+        #[arg(long)]
+        model_patch: bool,
+        /// Override model for --model-patch: pro or flash
+        #[arg(long)]
+        model: Option<String>,
+        /// Run full repair validation
+        #[arg(long)]
+        full: bool,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Prove a concrete self-improvement task through repair and validation
+    ProveSelf {
+        /// Concrete self-improvement task to prove through repair + remote sandbox
+        #[arg(long)]
+        task: String,
+        /// Low-risk Octocode source files the proof patch is expected to touch
+        #[arg(long = "target")]
+        targets: Vec<PathBuf>,
+        /// Override model for the model-generated candidate patch: pro or flash
+        #[arg(long)]
+        model: Option<String>,
+        /// Run full remote validation when the sandbox backend supports it
+        #[arg(long)]
+        full: bool,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run self-evolution from the active project goal
+    FromGoal {
+        /// Override model for the model-generated candidate patch: pro or flash
+        #[arg(long)]
+        model: Option<String>,
+        /// Run full remote validation when the sandbox backend supports it
+        #[arg(long)]
+        full: bool,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run repeated goal-driven self-evolution rounds
+    Benchmark {
+        /// Number of goal-driven self-evolution rounds to run
+        #[arg(long, default_value_t = 3, value_parser = parse_positive_usize)]
+        rounds: usize,
+        /// Override model for the model-generated candidate patch: pro or flash
+        #[arg(long)]
+        model: Option<String>,
+        /// Run full remote validation when the sandbox backend supports it
+        #[arg(long)]
+        full: bool,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show evolution memory and failure history
+    Memory {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run validation gates for a generated evolution patch
+    Test {
+        /// Run id from `octocode evolve patch`
+        run_id: String,
+        /// Run full validation, including the full test suite when available
+        #[arg(long)]
+        full: bool,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Apply a tested evolution patch to the current tree
+    Apply {
+        /// Run id from `octocode evolve patch`
+        run_id: String,
+        /// Allow applying a high-risk patch after manual review
+        #[arg(long)]
+        allow_high_risk: bool,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Roll back a previously applied evolution patch
+    Rollback {
+        /// Apply id from `octocode evolve apply`
+        apply_id: String,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show local self-evolution status
+    Status {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum AgentCommands {
     /// List built-in and project custom agents
     List {
@@ -421,6 +811,16 @@ enum McpCommands {
         #[arg(long)]
         connect: bool,
     },
+    /// Inspect and call tools advertised by one MCP server
+    Tools {
+        #[command(subcommand)]
+        command: McpToolsCommands,
+    },
+    /// Inspect and read resources advertised by one MCP server
+    Resources {
+        #[command(subcommand)]
+        command: McpResourcesCommands,
+    },
     /// Add or replace a project-local MCP server
     Add {
         /// Server name
@@ -458,6 +858,53 @@ enum McpCommands {
 }
 
 #[derive(Subcommand)]
+enum McpToolsCommands {
+    /// List tools advertised by a configured server
+    List {
+        /// Server name
+        server: String,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Call one tool on a configured server
+    Call {
+        /// Server name
+        server: String,
+        /// Tool name
+        tool: String,
+        /// Tool arguments as JSON
+        #[arg(long, default_value = "{}")]
+        arguments: String,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum McpResourcesCommands {
+    /// List resources advertised by a configured server
+    List {
+        /// Server name
+        server: String,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read one resource by URI
+    Read {
+        /// Server name
+        server: String,
+        /// Resource URI
+        uri: String,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum CommandsCatalogCommands {
     /// List built-in slash commands and discovered custom command files
     List {
@@ -467,6 +914,34 @@ enum CommandsCatalogCommands {
         /// Filter by name, alias, or description
         #[arg(short, long)]
         filter: Option<String>,
+    },
+    /// Show the prompt template for one custom command
+    Show {
+        /// Custom command name, such as /fix-docs
+        name: String,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run a project or user custom command prompt template
+    Run {
+        /// Custom command name, such as /fix-docs
+        name: String,
+        /// Render the command without calling the model
+        #[arg(long)]
+        dry_run: bool,
+        /// Print JSON; for real runs this is equivalent to --output-format json
+        #[arg(long)]
+        json: bool,
+        /// Enable thinking mode
+        #[arg(short, long)]
+        thinking: bool,
+        /// Output format for real runs: text, json, stream-json
+        #[arg(long, value_enum, default_value_t = OutputFormatArg::Text)]
+        output_format: OutputFormatArg,
+        /// Arguments passed to the prompt template
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Show command search locations
     Locations {
@@ -570,13 +1045,112 @@ enum MissionCommands {
     Replay {
         /// Mission id, id prefix, or latest
         target: Option<String>,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
     },
     /// List local mission records
     List {
         /// Print machine-readable JSON
         #[arg(long)]
         json: bool,
+        /// Filter by lifecycle status
+        #[arg(long, value_enum)]
+        status: Option<MissionStatusArg>,
+        /// Maximum number of missions to print
+        #[arg(long)]
+        limit: Option<usize>,
     },
+    /// Mark a mission as running
+    Start {
+        /// Mission id, id prefix, or latest
+        target: Option<String>,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Mark a mission as paused
+    Pause {
+        /// Mission id, id prefix, or latest
+        target: Option<String>,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Resume a paused mission
+    Resume {
+        /// Mission id, id prefix, or latest
+        target: Option<String>,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Mark a mission as completed
+    Complete {
+        /// Mission id, id prefix, or latest
+        target: Option<String>,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Mark a mission as failed
+    Fail {
+        /// Mission id, id prefix, or latest
+        target: Option<String>,
+        /// Failure reason
+        #[arg(long, default_value = "manual failure")]
+        message: String,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Mark a mission as cancelled
+    Cancel {
+        /// Mission id, id prefix, or latest
+        target: Option<String>,
+        /// Cancellation reason
+        #[arg(long, default_value = "manual cancellation")]
+        message: String,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Append a note to the mission replay timeline
+    Note {
+        /// Mission id, id prefix, or latest
+        target: Option<String>,
+        /// Note text
+        #[arg(long)]
+        message: String,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum MissionStatusArg {
+    Created,
+    Planned,
+    Running,
+    Paused,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl MissionStatusArg {
+    fn status(self) -> crate::mission::MissionStatus {
+        match self {
+            Self::Created => crate::mission::MissionStatus::Created,
+            Self::Planned => crate::mission::MissionStatus::Planned,
+            Self::Running => crate::mission::MissionStatus::Running,
+            Self::Paused => crate::mission::MissionStatus::Paused,
+            Self::Completed => crate::mission::MissionStatus::Completed,
+            Self::Failed => crate::mission::MissionStatus::Failed,
+            Self::Cancelled => crate::mission::MissionStatus::Cancelled,
+        }
+    }
 }
 
 pub async fn run() -> Result<(), anyhow::Error> {
@@ -703,6 +1277,200 @@ pub async fn run() -> Result<(), anyhow::Error> {
             };
             cli::features(command, cli.project_root).await
         }
+        Some(Commands::Models { json }) => cli::models(json, cli.project_root).await,
+        Some(Commands::Goal { command }) => {
+            let command = match command {
+                GoalCommands::Init { overwrite, json } => {
+                    cli::goal::GoalCommand::Init { overwrite, json }
+                }
+                GoalCommands::Show { json } => cli::goal::GoalCommand::Show { json },
+                GoalCommands::Plan { json } => cli::goal::GoalCommand::Plan { json },
+                GoalCommands::Graph { json } => cli::goal::GoalCommand::Graph { json },
+                GoalCommands::SetActive {
+                    id,
+                    title,
+                    success,
+                    targets,
+                    json,
+                } => cli::goal::GoalCommand::SetActive {
+                    id,
+                    title,
+                    success,
+                    targets,
+                    json,
+                },
+                GoalCommands::Run { model, full, json } => {
+                    cli::goal::GoalCommand::Run { model, full, json }
+                }
+            };
+            cli::goal(command, cli.project_root).await
+        }
+        Some(Commands::Archive { command }) => {
+            let command = match command {
+                ArchiveCommands::Status { json } => cli::archive::ArchiveCommand::Status { json },
+                ArchiveCommands::List { json } => cli::archive::ArchiveCommand::List { json },
+                ArchiveCommands::Show { candidate_id, json } => {
+                    cli::archive::ArchiveCommand::Show { candidate_id, json }
+                }
+                ArchiveCommands::Lineage { json } => cli::archive::ArchiveCommand::Lineage { json },
+            };
+            cli::archive(command, cli.project_root).await
+        }
+        Some(Commands::Repair { command }) => {
+            let command = match command {
+                RepairCommands::Propose {
+                    problem,
+                    title,
+                    targets,
+                    json,
+                } => cli::repair::RepairCommand::Propose {
+                    problem,
+                    title,
+                    targets,
+                    json,
+                },
+                RepairCommands::Run {
+                    proposal_id,
+                    full,
+                    model_patch,
+                    model,
+                    json,
+                } => cli::repair::RepairCommand::Run {
+                    proposal_id,
+                    full,
+                    model_patch,
+                    model,
+                    json,
+                },
+                RepairCommands::Report { run_id } => cli::repair::RepairCommand::Report { run_id },
+                RepairCommands::Status { json } => cli::repair::RepairCommand::Status { json },
+            };
+            cli::repair(command, cli.project_root).await
+        }
+        Some(Commands::Knowledge { command }) => {
+            let command = match command {
+                KnowledgeCommands::Update { json } => {
+                    cli::knowledge::KnowledgeCommand::Update { json }
+                }
+                KnowledgeCommands::Show { topic, json } => {
+                    let topic = match topic {
+                        KnowledgeTopicArg::Project => cli::knowledge::KnowledgeTopic::Project,
+                        KnowledgeTopicArg::RiskMap => cli::knowledge::KnowledgeTopic::RiskMap,
+                        KnowledgeTopicArg::Failures => cli::knowledge::KnowledgeTopic::Failures,
+                    };
+                    cli::knowledge::KnowledgeCommand::Show { topic, json }
+                }
+            };
+            cli::knowledge(command, cli.project_root).await
+        }
+        Some(Commands::Skill { command }) => {
+            let command = match command {
+                SkillCommands::List { json } => cli::skill::SkillCommand::List { json },
+                SkillCommands::Show { skill_id, json } => {
+                    cli::skill::SkillCommand::Show { skill_id, json }
+                }
+                SkillCommands::Add { run_id, name, json } => {
+                    cli::skill::SkillCommand::Add { run_id, name, json }
+                }
+                SkillCommands::Test { skill_id, json } => {
+                    cli::skill::SkillCommand::Test { skill_id, json }
+                }
+            };
+            cli::skill(command, cli.project_root).await
+        }
+        Some(Commands::Evolve { command }) => {
+            let command = match command {
+                EvolveCommands::Inspect { json } => {
+                    cli::evolution::EvolutionCommand::Inspect { json }
+                }
+                EvolveCommands::Propose {
+                    area,
+                    targets,
+                    title,
+                    problem,
+                    json,
+                } => cli::evolution::EvolutionCommand::Propose {
+                    area,
+                    targets,
+                    title,
+                    problem,
+                    json,
+                },
+                EvolveCommands::Patch {
+                    proposal_id,
+                    model_agents,
+                    model,
+                    json,
+                } => cli::evolution::EvolutionCommand::Patch {
+                    proposal_id,
+                    model_agents,
+                    model,
+                    json,
+                },
+                EvolveCommands::Repair {
+                    proposal_id,
+                    model_patch,
+                    model,
+                    full,
+                    json,
+                } => cli::evolution::EvolutionCommand::Repair {
+                    proposal_id,
+                    model_patch,
+                    model,
+                    full,
+                    json,
+                },
+                EvolveCommands::ProveSelf {
+                    task,
+                    targets,
+                    model,
+                    full,
+                    json,
+                } => cli::evolution::EvolutionCommand::ProveSelf {
+                    task,
+                    targets,
+                    model,
+                    full,
+                    json,
+                },
+                EvolveCommands::FromGoal { model, full, json } => {
+                    cli::evolution::EvolutionCommand::FromGoal { model, full, json }
+                }
+                EvolveCommands::Benchmark {
+                    rounds,
+                    model,
+                    full,
+                    json,
+                } => cli::evolution::EvolutionCommand::Benchmark {
+                    rounds,
+                    model,
+                    full,
+                    json,
+                },
+                EvolveCommands::Memory { json } => {
+                    cli::evolution::EvolutionCommand::Memory { json }
+                }
+                EvolveCommands::Test { run_id, full, json } => {
+                    cli::evolution::EvolutionCommand::Test { run_id, full, json }
+                }
+                EvolveCommands::Apply {
+                    run_id,
+                    allow_high_risk,
+                    json,
+                } => cli::evolution::EvolutionCommand::Apply {
+                    run_id,
+                    allow_high_risk,
+                    json,
+                },
+                EvolveCommands::Rollback { apply_id, json } => {
+                    cli::evolution::EvolutionCommand::Rollback { apply_id, json }
+                }
+                EvolveCommands::Status { json } => {
+                    cli::evolution::EvolutionCommand::Status { json }
+                }
+            };
+            cli::evolution(command, cli.project_root).await
+        }
         Some(Commands::Agent { command }) => {
             let command = match command {
                 AgentCommands::List { json } => cli::agent::AgentCommand::List { json },
@@ -760,6 +1528,30 @@ pub async fn run() -> Result<(), anyhow::Error> {
                 McpCommands::Status { json, connect } => {
                     cli::mcp::McpCommand::Status { json, connect }
                 }
+                McpCommands::Tools { command } => match command {
+                    McpToolsCommands::List { server, json } => {
+                        cli::mcp::McpCommand::ToolsList { server, json }
+                    }
+                    McpToolsCommands::Call {
+                        server,
+                        tool,
+                        arguments,
+                        json,
+                    } => cli::mcp::McpCommand::ToolsCall {
+                        server,
+                        tool,
+                        arguments,
+                        json,
+                    },
+                },
+                McpCommands::Resources { command } => match command {
+                    McpResourcesCommands::List { server, json } => {
+                        cli::mcp::McpCommand::ResourcesList { server, json }
+                    }
+                    McpResourcesCommands::Read { server, uri, json } => {
+                        cli::mcp::McpCommand::ResourcesRead { server, uri, json }
+                    }
+                },
                 McpCommands::Add {
                     name,
                     transport,
@@ -790,6 +1582,24 @@ pub async fn run() -> Result<(), anyhow::Error> {
                 CommandsCatalogCommands::List { json, filter } => {
                     cli::command_catalog::CommandCatalogCommand::List { json, filter }
                 }
+                CommandsCatalogCommands::Show { name, json } => {
+                    cli::command_catalog::CommandCatalogCommand::Show { name, json }
+                }
+                CommandsCatalogCommands::Run {
+                    name,
+                    args,
+                    dry_run,
+                    json,
+                    thinking,
+                    output_format,
+                } => cli::command_catalog::CommandCatalogCommand::Run {
+                    name,
+                    args,
+                    dry_run,
+                    json,
+                    thinking,
+                    output_format: output_format.turn_output_format(),
+                },
                 CommandsCatalogCommands::Locations { json } => {
                     cli::command_catalog::CommandCatalogCommand::Locations { json }
                 }
@@ -849,10 +1659,57 @@ pub async fn run() -> Result<(), anyhow::Error> {
                     json,
                     events,
                 },
-                MissionCommands::Replay { target } => {
-                    cli::mission::MissionCommand::Replay { target }
+                MissionCommands::Replay { target, json } => {
+                    cli::mission::MissionCommand::Replay { target, json }
                 }
-                MissionCommands::List { json } => cli::mission::MissionCommand::List { json },
+                MissionCommands::List {
+                    json,
+                    status,
+                    limit,
+                } => cli::mission::MissionCommand::List {
+                    json,
+                    status: status.map(MissionStatusArg::status),
+                    limit,
+                },
+                MissionCommands::Start { target, json } => {
+                    cli::mission::MissionCommand::Start { target, json }
+                }
+                MissionCommands::Pause { target, json } => {
+                    cli::mission::MissionCommand::Pause { target, json }
+                }
+                MissionCommands::Resume { target, json } => {
+                    cli::mission::MissionCommand::Resume { target, json }
+                }
+                MissionCommands::Complete { target, json } => {
+                    cli::mission::MissionCommand::Complete { target, json }
+                }
+                MissionCommands::Fail {
+                    target,
+                    message,
+                    json,
+                } => cli::mission::MissionCommand::Fail {
+                    target,
+                    message,
+                    json,
+                },
+                MissionCommands::Cancel {
+                    target,
+                    message,
+                    json,
+                } => cli::mission::MissionCommand::Cancel {
+                    target,
+                    message,
+                    json,
+                },
+                MissionCommands::Note {
+                    target,
+                    message,
+                    json,
+                } => cli::mission::MissionCommand::Note {
+                    target,
+                    message,
+                    json,
+                },
             };
             cli::mission(command, cli.project_root).await
         }

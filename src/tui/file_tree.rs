@@ -203,7 +203,7 @@ fn should_skip_mention_entry(path: &Path, root: &Path) -> bool {
         .is_some_and(|name| {
             matches!(
                 name,
-                ".git" | "target" | "node_modules" | ".deepseek-code" | ".cache"
+                ".git" | "target" | "node_modules" | ".octocode" | ".cache"
             )
         })
 }

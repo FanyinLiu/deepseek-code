@@ -1179,33 +1179,42 @@ fn render_inline_plan(
         .iter()
         .filter(|step| step.status == plan_tracker::PlanStepStatus::Failed)
         .count();
+    let running = steps
+        .iter()
+        .filter(|step| step.status == plan_tracker::PlanStepStatus::Running)
+        .count();
     let total = total_steps.max(steps.len());
-    let open = total.saturating_sub(completed + failed);
+    let queued = total.saturating_sub(completed + failed + running);
     let p = theme::palette();
     let use_chinese = plan_uses_chinese(summary, steps, warnings);
     let is_swarm = is_swarm_agent_plan(steps);
     let clean_summary = summary
         .map(clean_plan_summary)
         .filter(|value| !value.trim().is_empty());
+
+    let display_step = if total == 0 {
+        0
+    } else {
+        current_step.saturating_add(1).min(total)
+    };
     lines.push(Line::from(vec![
-        Span::styled("  ", transcript_style(p.text)),
         Span::styled(
-            if is_swarm && use_chinese {
-                format!("{total} 个 agent")
-            } else if is_swarm {
-                format!("{total} agents")
-            } else if use_chinese {
-                format!("{total} 项任务")
-            } else {
-                format!("{total} tasks")
-            },
-            transcript_style(p.dim).add_modifier(Modifier::BOLD),
+            "╭─ ",
+            transcript_style(p.divider).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             if use_chinese {
-                format!("（{completed} 完成，{open} 未完成）")
+                "任务控制台"
             } else {
-                format!(" ({completed} done, {open} open)")
+                "Mission Control"
+            },
+            transcript_style(p.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            if use_chinese {
+                format!(" · 计划 {display_step}/{total} · {running} 运行 · {completed} 完成 · {queued} 排队")
+            } else {
+                format!(" · plan {display_step}/{total} · {running} running · {completed} done · {queued} queued")
             },
             transcript_style(p.dim),
         ),
@@ -1223,7 +1232,11 @@ fn render_inline_plan(
         let summary_status = aggregate_plan_status(steps);
         let summary_color = plan_color(summary_status);
         lines.push(Line::from(vec![
-            Span::styled("  └ ", transcript_style(p.divider)),
+            Span::styled("│ ", transcript_style(p.divider)),
+            Span::styled(
+                if use_chinese { "目标  " } else { "goal   " },
+                transcript_style(p.muted),
+            ),
             Span::styled(
                 format!("{} ", plan_marker(summary_status)),
                 transcript_style(summary_color).add_modifier(Modifier::BOLD),
@@ -1234,6 +1247,7 @@ fn render_inline_plan(
 
     for warning in warnings {
         lines.push(Line::from(vec![
+            Span::styled("│ ", transcript_style(p.divider)),
             Span::styled("⚠ ", Style::default().fg(theme::palette().warning)),
             Span::styled(
                 warning.clone(),
@@ -1243,6 +1257,10 @@ fn render_inline_plan(
     }
 
     if steps.is_empty() {
+        lines.push(Line::from(vec![Span::styled(
+            "╰─",
+            transcript_style(p.divider),
+        )]));
         return;
     }
 
@@ -1255,10 +1273,43 @@ fn render_inline_plan(
                 .min(steps.len().saturating_sub(1))
         });
     let visible = visible_plan_range(steps.len(), focus_index, 6);
+    let current = &steps[focus_index];
+    let current_color = plan_color(current.status);
+    lines.push(Line::from(vec![
+        Span::styled("│ ", transcript_style(p.divider)),
+        Span::styled(
+            if use_chinese { "当前  " } else { "now    " },
+            transcript_style(p.muted),
+        ),
+        Span::styled(
+            format!("{} ", plan_marker(current.status)),
+            transcript_style(current_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            truncate(&plan_display_title(&current.description), 76),
+            transcript_style(p.text).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(plan_duration_suffix(current), transcript_style(p.dim)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("├─ ", transcript_style(p.divider)),
+        Span::styled(
+            if is_swarm && use_chinese {
+                "Agent 路线"
+            } else if is_swarm {
+                "Agent lanes"
+            } else if use_chinese {
+                "执行路线"
+            } else {
+                "Timeline"
+            },
+            transcript_style(p.secondary).add_modifier(Modifier::BOLD),
+        ),
+    ]));
 
     if visible.start > 0 {
         lines.push(Line::from(vec![
-            Span::styled("  │ ", transcript_style(p.divider)),
+            Span::styled("│   ", transcript_style(p.divider)),
             Span::styled(
                 if use_chinese {
                     format!("… 前面还有 {} 项任务", visible.start)
@@ -1281,7 +1332,7 @@ fn render_inline_plan(
             _ => transcript_style(color),
         };
         lines.push(Line::from(vec![
-            Span::styled("  │ ", transcript_style(p.divider)),
+            Span::styled("│ ", transcript_style(p.divider)),
             Span::styled(plan_marker(step.status), transcript_style(color)),
             Span::styled(" ", transcript_style(p.divider)),
             Span::styled(
@@ -1299,7 +1350,7 @@ fn render_inline_plan(
 
     if visible.end < steps.len() {
         lines.push(Line::from(vec![
-            Span::styled("  │ ", transcript_style(p.divider)),
+            Span::styled("│   ", transcript_style(p.divider)),
             Span::styled(
                 if use_chinese {
                     format!("… 后面还有 {} 项任务", steps.len() - visible.end)
@@ -1310,6 +1361,10 @@ fn render_inline_plan(
             ),
         ]));
     }
+    lines.push(Line::from(vec![Span::styled(
+        "╰─",
+        transcript_style(p.divider),
+    )]));
 }
 
 fn is_swarm_agent_plan(steps: &[plan_tracker::PlanStepItem]) -> bool {
@@ -1468,22 +1523,48 @@ fn render_inline_subagents(
     cards: &[subagent_cards::SubagentCard],
     _global_elapsed_ms: u64,
 ) {
+    let p = theme::palette();
     let running = cards
         .iter()
         .filter(|c| c.status == subagent_cards::SubagentCardStatus::Running)
         .count();
-    lines.push(view_blocks::header_line(
-        if running > 0 {
-            format!("agents {running}/{}", cards.len())
-        } else {
-            format!("agents {}", cards.len())
-        },
-        if running > 0 {
-            view_blocks::ViewStatus::Running
-        } else {
-            view_blocks::ViewStatus::Done
-        },
-    ));
+    let failed = cards
+        .iter()
+        .filter(|c| c.status == subagent_cards::SubagentCardStatus::Failed)
+        .count();
+    let done = cards
+        .iter()
+        .filter(|c| c.status == subagent_cards::SubagentCardStatus::Done)
+        .count();
+    let summaries = cards.iter().filter(|c| c.summary.is_some()).count();
+    let files_read: usize = cards.iter().map(|c| c.files_read).sum();
+    let files_written: usize = cards.iter().map(|c| c.files_written).sum();
+
+    lines.push(Line::from(vec![
+        Span::styled(
+            "╭─ ",
+            transcript_style(p.divider).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "Agent Team",
+            transcript_style(p.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                " · {} total · {running} running · {done} done · {failed} failed",
+                cards.len()
+            ),
+            transcript_style(p.dim),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("│ ", transcript_style(p.divider)),
+        Span::styled("artifacts ", transcript_style(p.muted)),
+        Span::styled(
+            format!("{summaries} summaries · files R{files_read} W{files_written}"),
+            transcript_style(if failed > 0 { p.warning } else { p.secondary }),
+        ),
+    ]));
 
     for card in cards {
         let status = match card.status {
@@ -1501,38 +1582,76 @@ fn render_inline_subagents(
             .or(card.last_update.as_deref())
             .unwrap_or(&card.description);
         let display = sanitize_agent_visible_summary(display);
-        let mut metadata = vec![("time".to_string(), meta)];
-        if card.files_read > 0 || card.files_written > 0 {
-            metadata.push((
-                "files".to_string(),
-                format!("read {} wrote {}", card.files_read, card.files_written),
-            ));
-        }
-        if card.token_usage > 0 {
-            metadata.push(("tokens".to_string(), card.token_usage.to_string()));
-        }
-        lines.extend(view_blocks::render_worker_lines(
-            &view_blocks::WorkerReportView {
-                name: truncate(&card.agent_type, 12),
-                status,
-                task: card.description.clone(),
-                metadata,
-                summary: Some(display),
-            },
-            70,
-        ));
-        // Show live output lines for running agents (mirrors sidebar cards).
-        if card.status == subagent_cards::SubagentCardStatus::Running
-            && !card.recent_lines.is_empty()
-        {
-            let p = theme::palette();
-            for recent in &card.recent_lines {
-                lines.push(Line::from(vec![
-                    Span::styled("  ╎ ", Style::default().fg(p.divider)),
-                    Span::styled(truncate(recent, 72), Style::default().fg(p.muted)),
-                ]));
+        let role = truncate(&agent_role_label(&card.agent_type), 14);
+        let files = if card.files_read > 0 || card.files_written > 0 {
+            format!(" · R{} W{}", card.files_read, card.files_written)
+        } else {
+            String::new()
+        };
+        let tokens = if card.token_usage > 0 {
+            format!(" · {} tok", card.token_usage)
+        } else {
+            String::new()
+        };
+        let lane_style = match status {
+            view_blocks::ViewStatus::Running => {
+                transcript_style(p.text).add_modifier(Modifier::BOLD)
             }
-        }
+            view_blocks::ViewStatus::Done => transcript_style(p.muted),
+            view_blocks::ViewStatus::Failed => transcript_style(p.danger),
+            _ => transcript_style(p.text),
+        };
+        lines.push(Line::from(vec![
+            Span::styled("│ ", transcript_style(p.divider)),
+            Span::styled(
+                status.icon().to_string(),
+                transcript_style(status.color()).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ", transcript_style(p.divider)),
+            Span::styled(format!("{role:<14}"), lane_style),
+            Span::styled(format!(" {:<7}", status.label()), transcript_style(p.muted)),
+            Span::styled(" ", transcript_style(p.divider)),
+            Span::styled(truncate(&card.description, 54), lane_style),
+            Span::styled(format!(" · {meta}{files}{tokens}"), transcript_style(p.dim)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("│   ", transcript_style(p.divider)),
+            Span::styled(
+                if card.status == subagent_cards::SubagentCardStatus::Running {
+                    "now    "
+                } else {
+                    "output "
+                },
+                transcript_style(p.muted),
+            ),
+            Span::styled(truncate(&display, 80), transcript_style(p.secondary)),
+        ]));
+    }
+
+    if running > 0 {
+        lines.push(Line::from(vec![
+            Span::styled("╰─ ", transcript_style(p.divider)),
+            Span::styled(
+                "running agents stay visible here; raw logs stay hidden until needed",
+                transcript_style(p.dim),
+            ),
+        ]));
+    } else {
+        lines.push(Line::from(vec![Span::styled(
+            "╰─",
+            transcript_style(p.divider),
+        )]));
+    }
+}
+
+fn agent_role_label(agent_type: &str) -> String {
+    match agent_type {
+        "code-explorer" => "explorer".to_string(),
+        "code-reviewer" => "reviewer".to_string(),
+        "planner" => "planner".to_string(),
+        "test-runner" => "test-runner".to_string(),
+        "worker" => "worker".to_string(),
+        other => other.replace('_', "-"),
     }
 }
 
@@ -1930,7 +2049,7 @@ mod tests {
     fn light_theme_transcript_uses_dark_readable_ink_for_chinese_text() {
         theme::set_active_theme(theme::ThemeMode::Light);
         let mut terminal = Terminal::new(TestBackend::new(80, 4)).expect("terminal");
-        let msg = test_message("你好！我是 DeepSeek-Code。");
+        let msg = test_message("你好！我是 Octocode。");
 
         terminal
             .draw(|f| {
@@ -2720,7 +2839,8 @@ mod tests {
             .collect();
         let compact = rendered.replace(' ', "");
         assert!(rendered.contains("Brewed for 1m 2s"));
-        assert!(compact.contains("3项任务"));
+        assert!(compact.contains("任务控制台"));
+        assert!(compact.contains("计划3/3"));
         assert!(compact.contains("2完成"));
         assert!(compact.contains("并行构建演示"));
         assert!(compact.contains("用时1s"));
@@ -2774,8 +2894,10 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect();
-        assert!(rendered.contains("2 tasks (2 done, 0 open)"));
-        assert!(rendered.contains("└ ✓ Build project"));
+        assert!(rendered.contains("Mission Control"));
+        assert!(rendered.contains("plan 2/2"));
+        assert!(rendered.contains("2 done"));
+        assert!(rendered.contains("✓ Build project"));
         theme::set_active_theme(theme::ThemeMode::Light);
     }
 
@@ -2860,7 +2982,8 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect();
-        assert!(rendered.contains("10 tasks (0 done, 10 open)"));
+        assert!(rendered.contains("Mission Control"));
+        assert!(rendered.contains("9 queued"));
         assert!(rendered.contains("earlier tasks"));
         assert!(rendered.contains("more tasks"));
         assert!(rendered.contains("5. Inspect subsystem 5"));

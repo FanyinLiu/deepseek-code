@@ -1683,10 +1683,19 @@ fn is_review_like(lower: &str) -> bool {
 }
 
 fn is_test_like(lower: &str) -> bool {
-    lower.contains("test")
-        || lower.contains("测试")
-        || lower.contains("验证")
-        || lower.contains("cargo test")
+    lower.contains("cargo test")
+        || lower.contains("cargo check")
+        || lower.contains("run test")
+        || lower.contains("run tests")
+        || lower.contains("run the test")
+        || lower.contains("run safe test")
+        || lower.contains("test suite")
+        || lower.contains("tests pass")
+        || lower.contains("运行测试")
+        || lower.contains("跑测试")
+        || lower.contains("测试通过")
+        || lower.contains("运行验证")
+        || lower.contains("验证命令")
 }
 
 fn is_write_like(lower: &str) -> bool {
@@ -1743,6 +1752,39 @@ mod tests {
             PathBuf::from("/tmp/project"),
             4,
         )
+    }
+
+    #[test]
+    fn test_path_mentions_do_not_create_tester_without_run_intent() {
+        let plan = coordinator().plan(
+            "Verify project structure",
+            "Verify whether src/lib.rs, Cargo.toml, and tests/mission_cli_tests.rs exist without editing files.",
+            &[],
+        );
+
+        assert!(
+            !plan
+                .tasks
+                .iter()
+                .any(|task| task.role == SwarmAgentRole::Tester),
+            "file paths containing tests/ should not create a tester unless the user asks to run tests"
+        );
+    }
+
+    #[test]
+    fn explicit_test_command_creates_tester() {
+        let plan = coordinator().plan(
+            "Run checks",
+            "Run cargo test after the implementation is complete.",
+            &[],
+        );
+
+        assert!(
+            plan.tasks
+                .iter()
+                .any(|task| task.role == SwarmAgentRole::Tester),
+            "explicit test commands should still create a tester"
+        );
     }
 
     #[test]

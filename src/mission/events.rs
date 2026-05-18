@@ -45,6 +45,26 @@ pub enum MissionEventKind {
         /// Generated plan payload.
         plan: MissionPlan,
     },
+    /// The mission was started.
+    MissionStarted {
+        /// Replayable mission state.
+        state: MissionState,
+    },
+    /// The mission was paused.
+    MissionPaused {
+        /// Replayable mission state.
+        state: MissionState,
+    },
+    /// The mission was resumed.
+    MissionResumed {
+        /// Replayable mission state.
+        state: MissionState,
+    },
+    /// A human note was attached to the mission timeline.
+    MissionNote {
+        /// Note text.
+        message: String,
+    },
     /// The mission completed successfully.
     MissionCompleted {
         /// Final replayable mission state.
@@ -53,6 +73,13 @@ pub enum MissionEventKind {
     /// The mission failed before completion.
     MissionFailed {
         /// Human-readable failure reason.
+        message: String,
+        /// Final replayable mission state.
+        state: MissionState,
+    },
+    /// The mission was cancelled before completion.
+    MissionCancelled {
+        /// Human-readable cancellation reason.
         message: String,
         /// Final replayable mission state.
         state: MissionState,

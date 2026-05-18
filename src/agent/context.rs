@@ -46,7 +46,16 @@ impl ContextAssembler {
             .collect::<Vec<_>>();
 
         if messages.len() > self.max_visible_messages {
-            messages = messages.split_off(messages.len().saturating_sub(self.max_visible_messages));
+            let recent_start = messages.len().saturating_sub(self.max_visible_messages);
+            messages = messages
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, msg)| {
+                    (index >= recent_start
+                        || is_active_protocol_message(&msg, session, &active_sub_turn_ids))
+                    .then_some(msg)
+                })
+                .collect();
         }
 
         messages
@@ -236,6 +245,19 @@ fn truncate_context_line(text: &str, max_chars: usize) -> String {
     }
 }
 
+fn truncate_context_text(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        text.to_string()
+    } else {
+        let mut out = text
+            .chars()
+            .take(max_chars.saturating_sub(3))
+            .collect::<String>();
+        out.push_str("...");
+        out
+    }
+}
+
 fn sanitize_context_message(
     msg: &ProtocolMessage,
     session: &Session,
@@ -266,12 +288,31 @@ fn sanitize_context_message(
     }
     if sanitized.role == Role::Tool {
         let text = sanitized.content.to_string_lossy();
-        sanitized.content = MessageContent::from(truncate_context_line(&text, 4_000));
+        sanitized.content = MessageContent::from(truncate_context_text(&text, 4_000));
         for result in &mut sanitized.tool_results {
-            result.result = truncate_context_line(&result.result, 4_000);
+            result.result = truncate_context_text(&result.result, 4_000);
         }
     }
     Some(sanitized)
+}
+
+fn is_active_protocol_message(
+    msg: &ProtocolMessage,
+    session: &Session,
+    active_sub_turn_ids: &[SubTurnId],
+) -> bool {
+    let keep_active_tool_assistant = msg.visibility == MessageVisibility::InternalProtocolState
+        && !msg.tool_calls.is_empty()
+        && session
+            .reasoning_state
+            .preserved_assistant_messages
+            .contains(&msg.id);
+    let keep_active_tool_result = msg.visibility == MessageVisibility::InternalProtocolState
+        && msg.role == Role::Tool
+        && msg
+            .sub_turn_id
+            .is_some_and(|sub_turn_id| active_sub_turn_ids.contains(&sub_turn_id));
+    keep_active_tool_assistant || keep_active_tool_result
 }
 
 #[cfg(test)]
@@ -371,6 +412,112 @@ mod tests {
             .iter()
             .filter(|msg| msg.role == Role::Tool)
             .all(|msg| msg.content.to_string_lossy().chars().count() <= 4_000));
+    }
+
+    #[test]
+    fn assembler_recent_limit_preserves_complete_active_tool_group() {
+        let turn_id = TurnId::new_v4();
+        let sub_turn_id = SubTurnId::new_v4();
+        let mut assistant = message(
+            "calling many tools",
+            MessageVisibility::InternalProtocolState,
+        );
+        let assistant_id = assistant.id;
+        assistant.turn_id = turn_id;
+        assistant.sub_turn_id = Some(sub_turn_id);
+        for index in 0..13 {
+            assistant.tool_calls.push(crate::deepseek::ToolCall {
+                id: format!("call-{index}"),
+                call_type: "function".into(),
+                function: crate::deepseek::ToolCallFunction {
+                    name: "read_file".into(),
+                    arguments: format!(r#"{{"path":"file-{index}.rs"}}"#),
+                },
+            });
+        }
+
+        let mut messages = vec![assistant];
+        for index in 0..13 {
+            let mut tool = message(
+                &format!("result {index}"),
+                MessageVisibility::InternalProtocolState,
+            );
+            tool.role = Role::Tool;
+            tool.turn_id = turn_id;
+            tool.sub_turn_id = Some(sub_turn_id);
+            tool.tool_results.push(crate::deepseek::ToolResultRecord {
+                tool_call_id: format!("call-{index}"),
+                name: "read_file".into(),
+                result: format!("result {index}"),
+                is_error: false,
+            });
+            messages.push(tool);
+        }
+
+        let mut session = session_with_messages(messages);
+        session.reasoning_state.preserved_assistant_messages = vec![assistant_id];
+        let assembled = ContextAssembler {
+            max_visible_messages: 4,
+            ..ContextAssembler::default()
+        }
+        .assemble(&session, None);
+
+        assert!(assembled
+            .first()
+            .is_some_and(|msg| !msg.tool_calls.is_empty()));
+        assert_eq!(
+            assembled
+                .iter()
+                .filter(|msg| msg.role == Role::Tool)
+                .count(),
+            13
+        );
+    }
+
+    #[test]
+    fn active_tool_results_preserve_multiline_file_content() {
+        let turn_id = TurnId::new_v4();
+        let sub_turn_id = SubTurnId::new_v4();
+        let mut assistant = message("", MessageVisibility::InternalProtocolState);
+        let assistant_id = assistant.id;
+        assistant.turn_id = turn_id;
+        assistant.sub_turn_id = Some(sub_turn_id);
+        assistant.tool_calls.push(crate::deepseek::ToolCall {
+            id: "call-1".into(),
+            call_type: "function".into(),
+            function: crate::deepseek::ToolCallFunction {
+                name: "read_file".into(),
+                arguments: r#"{"path":"Cargo.toml"}"#.into(),
+            },
+        });
+        let result = "File: Cargo.toml\n\n     1 | [package]\n     2 | name = \"octocode\"";
+        let mut tool = message(result, MessageVisibility::InternalProtocolState);
+        tool.role = Role::Tool;
+        tool.turn_id = turn_id;
+        tool.sub_turn_id = Some(sub_turn_id);
+        tool.tool_results.push(crate::deepseek::ToolResultRecord {
+            tool_call_id: "call-1".into(),
+            name: "read_file".into(),
+            result: result.into(),
+            is_error: false,
+        });
+        let mut session = session_with_messages(vec![assistant, tool]);
+        session.reasoning_state.preserved_assistant_messages = vec![assistant_id];
+
+        let assembled = ContextAssembler::default().assemble(&session, None);
+        let tool = assembled
+            .iter()
+            .find(|msg| msg.role == Role::Tool)
+            .expect("active tool result");
+
+        assert!(tool
+            .content
+            .to_string_lossy()
+            .contains("name = \"octocode\""));
+        assert!(tool
+            .tool_results
+            .iter()
+            .any(|result| result.result.contains("name = \"octocode\"")));
     }
 
     #[test]

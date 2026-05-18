@@ -1,19 +1,17 @@
 use std::io::IsTerminal;
 use std::path::Path;
 
+use crate::provider::ProviderKind;
 use crate::storage;
 
-/// Validate a DeepSeek API key entered by the user.
+/// Validate an API key entered by the user.
 pub fn validate_api_key(key: &str) -> Result<&str, anyhow::Error> {
     let trimmed = key.trim();
     if trimmed.is_empty() {
         anyhow::bail!("No API key provided");
     }
-    if !trimmed.starts_with("sk-") {
-        anyhow::bail!(
-            "API key should start with 'sk-'. Got: {}...",
-            preview_key(trimmed)
-        );
+    if trimmed.chars().count() < 8 {
+        anyhow::bail!("API key looks too short. Got: {}...", preview_key(trimmed));
     }
     Ok(trimmed)
 }
@@ -37,7 +35,7 @@ pub fn resolve_api_key_non_interactive(
 ) -> Result<String, anyhow::Error> {
     storage::get_effective_api_key(project_root).ok_or_else(|| {
         anyhow::anyhow!(
-            "No API key configured. Run `deepseek-code login --api-key sk-...` or set DEEPSEEK_API_KEY."
+            "No API key configured. Run `octocode login --api-key sk-...` or set DEEPSEEK_API_KEY."
         )
     })
 }
@@ -46,13 +44,19 @@ pub fn resolve_api_key_non_interactive(
 pub fn prompt_and_store_api_key(project_root: Option<&Path>) -> Result<String, anyhow::Error> {
     if !std::io::stdin().is_terminal() {
         anyhow::bail!(
-            "No API key configured. Run `deepseek-code login --api-key sk-...` or set DEEPSEEK_API_KEY."
+            "No API key configured. Run `octocode login --api-key <key>` or set a provider API key env var."
         );
     }
 
-    println!("No DeepSeek API key configured.");
-    println!("Enter your DeepSeek API key (starts with sk-):");
-    println!("Get one at https://platform.deepseek.com/api_keys");
+    let provider = configured_provider(project_root);
+    println!("No {} API key configured.", provider.as_str());
+    println!(
+        "Enter your provider API key, or set {}.",
+        storage::api_key_env_hint(provider)
+    );
+    if provider == ProviderKind::DeepSeek {
+        println!("Get one at https://platform.deepseek.com/api_keys");
+    }
 
     let mut input = String::new();
     std::io::stdin().read_line(&mut input)?;
@@ -61,6 +65,13 @@ pub fn prompt_and_store_api_key(project_root: Option<&Path>) -> Result<String, a
     let location = storage::store_api_key_with_project_fallback(&key, project_root)?;
     println!("{}", location.user_message());
     Ok(key)
+}
+
+fn configured_provider(project_root: Option<&Path>) -> ProviderKind {
+    project_root
+        .and_then(|root| storage::Config::load(Some(root)).ok())
+        .map(|config| config.provider.default)
+        .unwrap_or_default()
 }
 
 /// Run the login command: store API key in system keyring.
@@ -72,7 +83,7 @@ pub async fn login(
         let trimmed = validate_api_key(&key)?;
         let location = storage::store_api_key_with_project_fallback(trimmed, project_root)?;
         println!("✅ {}", location.user_message());
-        println!("   Run `deepseek-code doctor` to verify.");
+        println!("   Run `octocode doctor` to verify.");
     } else {
         prompt_and_store_api_key(project_root)?;
     }
@@ -85,13 +96,17 @@ mod tests {
 
     #[test]
     fn validate_api_key_accepts_sk_prefix() {
-        assert_eq!(validate_api_key("  sk-test  ").expect("valid"), "sk-test");
+        assert_eq!(
+            validate_api_key("  sk-test-key  ").expect("valid"),
+            "sk-test-key"
+        );
     }
 
     #[test]
-    fn validate_api_key_rejects_empty_or_wrong_prefix() {
+    fn validate_api_key_rejects_empty_or_short_value() {
         assert!(validate_api_key("").is_err());
         assert!(validate_api_key("abc").is_err());
+        assert!(validate_api_key("zai-valid-key").is_ok());
     }
 
     #[test]

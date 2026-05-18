@@ -20,7 +20,7 @@ pub enum TranscriptFormat {
 
 fn to_markdown(session: &Session) -> String {
     let mut out = String::new();
-    out.push_str("# DeepSeek-Code Session\n\n");
+    out.push_str("# Octocode Session\n\n");
     out.push_str(&format!("- **ID**: `{}`\n", session.id));
     out.push_str(&format!(
         "- **Name**: {}\n",
@@ -94,7 +94,7 @@ fn to_markdown(session: &Session) -> String {
 
 fn to_plain_text(session: &Session) -> String {
     let mut out = String::new();
-    out.push_str(&format!("DeepSeek-Code Session: {}\n", session.id));
+    out.push_str(&format!("Octocode Session: {}\n", session.id));
     out.push_str(&format!("Project: {}\n\n", session.project_root.display()));
 
     for msg in &session.messages {

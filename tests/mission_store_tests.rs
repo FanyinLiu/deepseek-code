@@ -70,3 +70,34 @@ fn corrupt_final_jsonl_line_does_not_destroy_prior_events() {
     assert_eq!(events.events.len(), 3);
     assert_eq!(events.skipped_malformed_lines, 1);
 }
+
+#[test]
+fn lifecycle_events_replay_to_latest_state() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let store = MissionStore::for_project(root.path());
+    let bundle = store
+        .create_dry_run(
+            "refactor src/mission lifecycle".to_string(),
+            root.path().to_path_buf(),
+        )
+        .expect("create mission");
+
+    store.start(&bundle.mission.id).expect("start mission");
+    store.pause(&bundle.mission.id).expect("pause mission");
+    store
+        .add_note(&bundle.mission.id, "waiting for review".to_string())
+        .expect("add note");
+
+    let state = store
+        .replay_state(&bundle.mission.id)
+        .expect("replay state");
+    assert_eq!(state.status, MissionStatus::Paused);
+
+    let events = store
+        .load_events_lossy(&bundle.mission.id)
+        .expect("load events");
+    assert!(events.events.iter().any(|event| matches!(
+        event.kind,
+        deepseek_code::mission::MissionEventKind::MissionNote { .. }
+    )));
+}

@@ -19,10 +19,9 @@ jobs:
       - run: cargo check --all-targets --all-features
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-features
-      - run: cargo run --bin deepseek-code -- --help
-      - run: cargo run --bin dscode -- --help
-      - run: cargo run --bin ds -- --help
-      - run: cargo run --bin dscode -- preview-tui --api ready --scenario welcome --width 80 --height 24
+      - run: cargo run --bin octocode -- --help
+      - run: cargo run --bin octo -- --help
+      - run: cargo run --bin octocode -- preview-tui --api ready --scenario welcome --width 80 --height 24
 
   windows-parity:
     runs-on: windows-latest
@@ -36,10 +35,9 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $Ds = Join-Path $env:GITHUB_WORKSPACE "target\debug\ds.exe"
-          $Dscode = Join-Path $env:GITHUB_WORKSPACE "target\debug\dscode.exe"
-          $DeepseekCode = Join-Path $env:GITHUB_WORKSPACE "target\debug\deepseek-code.exe"
-          foreach ($Binary in @($Ds, $Dscode, $DeepseekCode)) {
+          $Octo = Join-Path $env:GITHUB_WORKSPACE "target\debug\octo.exe"
+          $Octocode = Join-Path $env:GITHUB_WORKSPACE "target\debug\octocode.exe"
+          foreach ($Binary in @($Octo, $Octocode)) {
             if (-not (Test-Path $Binary)) {
               throw "missing Windows binary: $Binary"
             }
@@ -50,7 +48,7 @@ jobs:
             }
           }
 
-          $commandsText = & $Ds -C $env:GITHUB_WORKSPACE commands list --json
+          $commandsText = & $Octo -C $env:GITHUB_WORKSPACE commands list --json
           if ($LASTEXITCODE -ne 0) {
             throw "commands list failed"
           }
@@ -65,7 +63,7 @@ jobs:
             throw "commands list missing /help"
           }
 
-          $mcpText = & $Ds -C $env:GITHUB_WORKSPACE commands list --json --filter mcp
+          $mcpText = & $Octo -C $env:GITHUB_WORKSPACE commands list --json --filter mcp
           if ($LASTEXITCODE -ne 0) {
             throw "commands list --filter mcp failed"
           }
@@ -75,12 +73,12 @@ jobs:
             throw "commands list --filter mcp missing /mcp"
           }
 
-          $rootless = Join-Path $env:RUNNER_TEMP "ds-rootless"
+          $rootless = Join-Path $env:RUNNER_TEMP "octocode-rootless"
           New-Item -ItemType Directory -Force $rootless | Out-Null
-          $errPath = Join-Path $env:RUNNER_TEMP "ds-rootless.err"
+          $errPath = Join-Path $env:RUNNER_TEMP "octocode-rootless.err"
           Push-Location $rootless
           try {
-            $jsonLines = & $Ds chat hello --output-format json 2>$errPath
+            $jsonLines = & $Octo chat hello --output-format json 2>$errPath
             $jsonExit = $LASTEXITCODE
           } finally {
             Pop-Location
@@ -106,24 +104,24 @@ jobs:
             throw "chat json error should explain the project root requirement"
           }
 
-          $previewDir = Join-Path $env:RUNNER_TEMP "ds-preview"
+          $previewDir = Join-Path $env:RUNNER_TEMP "octocode-preview"
           New-Item -ItemType Directory -Force $previewDir | Out-Null
           $welcomePath = Join-Path $previewDir "welcome.txt"
           $workbenchPath = Join-Path $previewDir "workbench.txt"
 
-          $welcome = & $Ds preview-tui --api ready --scenario welcome --width 100 --height 28 --theme high-contrast
+          $welcome = & $Octo preview-tui --api ready --scenario welcome --width 100 --height 28 --theme high-contrast
           if ($LASTEXITCODE -ne 0) {
             throw "welcome preview-tui failed"
           }
           $welcome | Set-Content -Encoding utf8 $welcomePath
           $welcomeText = $welcome -join "`n"
-          foreach ($Marker in @("DSCODE", "DeepSeek V4 Flash")) {
+          foreach ($Marker in @("OCTOCODE", "DeepSeek V4 Flash")) {
             if ($welcomeText -notmatch [regex]::Escape($Marker)) {
               throw "welcome preview missing marker: $Marker"
             }
           }
 
-          $workbench = & $Ds preview-tui --api ready --scenario workbench --width 100 --height 28 --theme high-contrast
+          $workbench = & $Octo preview-tui --api ready --scenario workbench --width 100 --height 28 --theme high-contrast
           if ($LASTEXITCODE -ne 0) {
             throw "workbench preview-tui failed"
           }
@@ -138,8 +136,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-preview-tui
-          path: ${{ runner.temp }}\ds-preview\*.txt
+          name: windows-octocode-preview-tui
+          path: ${{ runner.temp }}\octocode-preview\*.txt
           if-no-files-found: ignore
 
   release:
@@ -166,6 +164,5 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            target/${{ matrix.target }}/release/deepseek-code*
-            target/${{ matrix.target }}/release/dscode*
-            target/${{ matrix.target }}/release/ds*
+            target/${{ matrix.target }}/release/octocode*
+            target/${{ matrix.target }}/release/octo*

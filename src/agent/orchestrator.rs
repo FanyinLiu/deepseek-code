@@ -455,7 +455,7 @@ impl Orchestrator {
     #[must_use]
     pub fn new(client: DeepSeekClient, project_root: std::path::PathBuf, session: Session) -> Self {
         let event_log_store =
-            dirs::home_dir().map(|home| EventLogStore::new(home.join(".deepseek-code")));
+            dirs::home_dir().map(|home| EventLogStore::new(home.join(".octocode")));
         Self {
             client,
             project_root,
@@ -506,8 +506,8 @@ impl Orchestrator {
     fn write_artifact(&self, slug: &str, content: &str) {
         if let Some(store) = &self.event_log_store {
             match store.write_artifact(&self.project_root, &self.session.id, slug, content) {
-                Ok(path) => tracing::info!("wrote DS artifact: {}", path.display()),
-                Err(err) => tracing::warn!("failed to write DS artifact: {err}"),
+                Ok(path) => tracing::info!("wrote Octocode artifact: {}", path.display()),
+                Err(err) => tracing::warn!("failed to write Octocode artifact: {err}"),
             }
         }
     }

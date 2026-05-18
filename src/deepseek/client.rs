@@ -5,7 +5,9 @@ use reqwest::Client as HttpClient;
 use tokio_stream::Stream;
 
 use super::errors::DeepSeekError;
-use super::models::{ChatRequest, ChatResponse, StreamChunk, StreamResult};
+use super::models::{
+    ChatRequest, ChatResponse, StreamChunk, StreamResult, ThinkingConfig, ThinkingWireFormat,
+};
 use super::stream::{parse_stream, StreamAccumulator, StreamEvent};
 
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
@@ -18,6 +20,7 @@ pub struct DeepSeekClient {
     base_url: String,
     pro_model_name: Option<String>,
     flash_model_name: Option<String>,
+    thinking_wire_format: ThinkingWireFormat,
 }
 
 impl DeepSeekClient {
@@ -33,6 +36,7 @@ impl DeepSeekClient {
             base_url: DEEPSEEK_BASE_URL.to_string(),
             pro_model_name: None,
             flash_model_name: None,
+            thinking_wire_format: ThinkingWireFormat::DeepSeekNative,
         }
     }
 
@@ -50,6 +54,12 @@ impl DeepSeekClient {
     ) -> Self {
         self.pro_model_name = pro_model;
         self.flash_model_name = flash_model;
+        self
+    }
+
+    #[must_use]
+    pub fn with_thinking_wire_format(mut self, format: ThinkingWireFormat) -> Self {
+        self.thinking_wire_format = format;
         self
     }
 
@@ -79,6 +89,50 @@ impl DeepSeekClient {
         }
     }
 
+    fn chat_payload(&self, req: &ChatRequest) -> Result<serde_json::Value, DeepSeekError> {
+        let req = self.map_chat_request_model(req);
+        let mut payload = serde_json::to_value(&req)?;
+        self.apply_thinking_wire_format(&mut payload);
+        Ok(payload)
+    }
+
+    fn apply_thinking_wire_format(&self, payload: &mut serde_json::Value) {
+        let Some(object) = payload.as_object_mut() else {
+            return;
+        };
+        let thinking = object.get("thinking").cloned();
+        match self.thinking_wire_format {
+            ThinkingWireFormat::DeepSeekNative => {}
+            ThinkingWireFormat::NativeTypeOnly => {
+                if let Some(thinking) = object.get_mut("thinking").and_then(|v| v.as_object_mut()) {
+                    thinking.remove("effort");
+                }
+            }
+            ThinkingWireFormat::DashScopeEnableThinking => {
+                object.remove("thinking");
+                let parsed = thinking.as_ref().and_then(parse_thinking_config);
+                let enabled = parsed.as_ref().is_some_and(|config| config.is_enabled());
+                object.insert(
+                    "enable_thinking".to_string(),
+                    serde_json::Value::Bool(enabled),
+                );
+                if enabled {
+                    if let Some(budget) = parsed
+                        .and_then(|config| thinking_budget_for_effort(config.effort.as_deref()))
+                    {
+                        object.insert(
+                            "thinking_budget".to_string(),
+                            serde_json::Value::Number(budget.into()),
+                        );
+                    }
+                }
+            }
+            ThinkingWireFormat::Unsupported => {
+                object.remove("thinking");
+            }
+        }
+    }
+
     async fn require_success(
         response: reqwest::Response,
     ) -> Result<reqwest::Response, DeepSeekError> {
@@ -93,12 +147,12 @@ impl DeepSeekClient {
     /// Non-streaming chat completion.
     pub async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, DeepSeekError> {
         let url = format!("{}/chat/completions", self.base_url);
-        let req = self.map_chat_request_model(req);
+        let payload = self.chat_payload(req)?;
         let response = self
             .http
             .post(&url)
             .bearer_auth(&self.api_key)
-            .json(&req)
+            .json(&payload)
             .send()
             .await?;
 
@@ -142,12 +196,12 @@ impl DeepSeekClient {
     ) -> Result<impl tokio_stream::Stream<Item = Result<StreamEvent, DeepSeekError>>, DeepSeekError>
     {
         let url = format!("{}/chat/completions", self.base_url);
-        let req = self.map_chat_request_model(req);
+        let payload = self.chat_payload(req)?;
         let response = self
             .http
             .post(&url)
             .bearer_auth(&self.api_key)
-            .json(&req)
+            .json(&payload)
             .send()
             .await?;
 
@@ -211,6 +265,21 @@ impl DeepSeekClient {
     }
 }
 
+fn parse_thinking_config(value: &serde_json::Value) -> Option<ThinkingConfig> {
+    serde_json::from_value(value.clone()).ok()
+}
+
+fn thinking_budget_for_effort(effort: Option<&str>) -> Option<u32> {
+    match effort {
+        Some("min") => Some(1_024),
+        Some("low") => Some(2_048),
+        Some("medium") => Some(4_096),
+        Some("high") => Some(8_192),
+        Some("max") => Some(16_384),
+        _ => None,
+    }
+}
+
 async fn accumulate_stream_events<S, F>(
     stream: S,
     mut on_chunk: F,
@@ -245,7 +314,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{accumulate_stream_events, DeepSeekError, StreamEvent};
-    use crate::deepseek::models::StreamChunk;
+    use crate::deepseek::models::{ChatRequest, StreamChunk, ThinkingConfig, ThinkingWireFormat};
 
     fn chunk(content: &str) -> StreamChunk {
         serde_json::from_str::<StreamChunk>(&format!(
@@ -275,5 +344,53 @@ mod tests {
             .expect("DONE should finish stream");
 
         assert_eq!(result.content, "ok");
+    }
+
+    fn request_with_thinking(thinking: ThinkingConfig) -> ChatRequest {
+        ChatRequest {
+            model: "deepseek-v4-pro".to_string(),
+            messages: Vec::new(),
+            tools: None,
+            thinking: Some(thinking),
+            response_format: None,
+            stream: true,
+            max_tokens: None,
+        }
+    }
+
+    #[test]
+    fn dashscope_payload_maps_thinking_to_enable_thinking() {
+        let client = super::DeepSeekClient::new(String::new())
+            .with_thinking_wire_format(ThinkingWireFormat::DashScopeEnableThinking);
+        let payload = client
+            .chat_payload(&request_with_thinking(ThinkingConfig::with_effort("high")))
+            .expect("payload");
+
+        assert!(payload.get("thinking").is_none());
+        assert_eq!(payload["enable_thinking"], true);
+        assert_eq!(payload["thinking_budget"], 8192);
+    }
+
+    #[test]
+    fn native_type_only_payload_strips_effort() {
+        let client = super::DeepSeekClient::new(String::new())
+            .with_thinking_wire_format(ThinkingWireFormat::NativeTypeOnly);
+        let payload = client
+            .chat_payload(&request_with_thinking(ThinkingConfig::with_effort("max")))
+            .expect("payload");
+
+        assert_eq!(payload["thinking"]["type"], "enabled");
+        assert!(payload["thinking"].get("effort").is_none());
+    }
+
+    #[test]
+    fn unsupported_payload_removes_thinking() {
+        let client = super::DeepSeekClient::new(String::new())
+            .with_thinking_wire_format(ThinkingWireFormat::Unsupported);
+        let payload = client
+            .chat_payload(&request_with_thinking(ThinkingConfig::enabled()))
+            .expect("payload");
+
+        assert!(payload.get("thinking").is_none());
     }
 }

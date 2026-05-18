@@ -203,49 +203,67 @@ pub fn recommend_payload(task: &str) -> FeatureRecommendation {
     let mentions_many_files = normalized.matches("src/").count() >= 2
         || normalized.contains("these three")
         || normalized.contains("multiple files")
-        || normalized.contains("across the codebase");
-    let asks_review = contains_any(&normalized, &["review", "audit", "security", "safety"]);
+        || normalized.contains("across the codebase")
+        || contains_any(
+            &normalized,
+            &["多文件", "多个文件", "跨代码库", "整个代码库"],
+        );
+    let asks_review = contains_any(
+        &normalized,
+        &[
+            "review",
+            "audit",
+            "security",
+            "safety",
+            "审核",
+            "审查",
+            "评审",
+            "代码审查",
+        ],
+    );
     let asks_explain = contains_any(&normalized, &["explain", "understand", "summarize", "map"]);
     let asks_refactor = contains_any(
         &normalized,
         &["refactor", "architecture", "runtime", "long-running"],
     );
+    let asks_fix = contains_any(&normalized, &["fix", "repair", "修复", "修一下"]);
     let asks_tests = contains_any(&normalized, &["test", "tests", "cargo test", "fix build"]);
     let small_edit = contains_any(
         &normalized,
         &["wording", "typo", "rename", "small", "readme wording"],
     ) && words <= 8;
 
-    if asks_refactor && (asks_tests || mentions_many_files || words > 8) {
+    if (asks_refactor || asks_fix) && (asks_tests || mentions_many_files || words > 8) {
         return FeatureRecommendation {
             task: task.to_string(),
             recommended_mode: RecommendedMode::MissionDryRun,
             suggested_agent: Some("planner".to_string()),
-            reason: "large or risky refactor with validation work should start as a recorded dry-run mission".to_string(),
+            reason: "large or risky edit work should start with the executable dry-run path: octocode mission new \"<task>\" --dry-run".to_string(),
         };
     }
 
     if asks_review && mentions_many_files {
         return FeatureRecommendation {
             task: task.to_string(),
-            recommended_mode: RecommendedMode::Swarm,
+            recommended_mode: RecommendedMode::AgentRun,
             suggested_agent: Some("code-reviewer".to_string()),
-            reason: "multi-file review benefits from parallel read-only reviewers".to_string(),
+            reason: "multi-file review should use the executable agent path: octocode agent run code-reviewer \"<task>\"".to_string(),
         };
     }
 
     if asks_review {
+        let suggested_agent = if normalized.contains("security") || normalized.contains("safety") {
+            "security-auditor".to_string()
+        } else {
+            "code-reviewer".to_string()
+        };
         return FeatureRecommendation {
             task: task.to_string(),
             recommended_mode: RecommendedMode::AgentRun,
-            suggested_agent: Some(
-                if normalized.contains("security") || normalized.contains("safety") {
-                    "security-auditor".to_string()
-                } else {
-                    "code-reviewer".to_string()
-                },
+            suggested_agent: Some(suggested_agent.clone()),
+            reason: format!(
+                "review and audit tasks are executable read-only agent work: octocode agent run {suggested_agent} \"<task>\""
             ),
-            reason: "review and audit tasks are read-only agent work".to_string(),
         };
     }
 
@@ -254,7 +272,7 @@ pub fn recommend_payload(task: &str) -> FeatureRecommendation {
             task: task.to_string(),
             recommended_mode: RecommendedMode::AgentRun,
             suggested_agent: Some("code-explorer".to_string()),
-            reason: "explanation tasks benefit from a read-only explorer agent".to_string(),
+            reason: "explanation tasks use the executable explorer path: octocode agent run code-explorer \"<task>\"".to_string(),
         };
     }
 
@@ -327,10 +345,7 @@ fn print_matrix(matrix: &FeatureMatrix) {
         println!("  {action}: {count}");
     }
     println!();
-    println!(
-        "{:<34} {:<16} DeepSeek-Code current",
-        "Capability", "Action"
-    );
+    println!("{:<34} {:<16} Octocode current", "Capability", "Action");
     println!("{}", "-".repeat(88));
     for row in &matrix.rows {
         println!(
@@ -399,8 +414,8 @@ fn print_json<T: Serialize>(value: &T) -> Result<(), anyhow::Error> {
 }
 
 fn config_paths(project_root: &Path) -> ConfigPaths {
-    let project_config_dir = project_root.join(".deepseek-code");
-    let user_config_dir = dirs::home_dir().map(|home| home.join(".deepseek-code"));
+    let project_config_dir = project_root.join(".octocode");
+    let user_config_dir = dirs::home_dir().map(|home| home.join(".octocode"));
     ConfigPaths {
         project_root: project_root.display().to_string(),
         project_config: project_config_dir.join("config.toml").display().to_string(),
@@ -415,9 +430,7 @@ fn config_paths(project_root: &Path) -> ConfigPaths {
 }
 
 fn api_key_configured_from_local_sources(config: &storage::Config) -> bool {
-    std::env::var("DEEPSEEK_API_KEY")
-        .map(|key| !key.trim().is_empty())
-        .unwrap_or(false)
+    storage::get_env_api_key_for_provider(config.provider.default).is_some()
         || config
             .api_key
             .as_ref()
@@ -496,12 +509,43 @@ mod tests {
         assert_eq!(explain.suggested_agent.as_deref(), Some("code-explorer"));
 
         let review = recommend_payload("review src/agent/orchestrator.rs src/agent/swarm.rs");
-        assert_eq!(review.recommended_mode, RecommendedMode::Swarm);
+        assert_eq!(review.recommended_mode, RecommendedMode::AgentRun);
+        assert_eq!(review.suggested_agent.as_deref(), Some("code-reviewer"));
+        assert!(review.reason.contains("octocode agent run code-reviewer"));
 
         let wording = recommend_payload("modify README wording");
         assert_eq!(wording.recommended_mode, RecommendedMode::Direct);
 
         let refactor = recommend_payload("refactor agent runtime and add tests");
         assert_eq!(refactor.recommended_mode, RecommendedMode::MissionDryRun);
+        assert!(refactor.reason.contains("octocode mission new"));
+    }
+
+    #[test]
+    fn recommend_multifile_review_and_fix_use_executable_entries() {
+        let english_review = recommend_payload("review multiple files in src/agent and src/cli");
+        assert_eq!(english_review.recommended_mode, RecommendedMode::AgentRun);
+        assert_eq!(
+            english_review.suggested_agent.as_deref(),
+            Some("code-reviewer")
+        );
+        assert!(english_review
+            .reason
+            .contains("octocode agent run code-reviewer"));
+
+        let chinese_fix = recommend_payload("多文件修复 src/agent 和 src/cli 的状态问题");
+        assert_eq!(chinese_fix.recommended_mode, RecommendedMode::MissionDryRun);
+        assert_eq!(chinese_fix.suggested_agent.as_deref(), Some("planner"));
+        assert!(chinese_fix.reason.contains("octocode mission new"));
+
+        let chinese_review = recommend_payload("审核多个文件的权限逻辑");
+        assert_eq!(chinese_review.recommended_mode, RecommendedMode::AgentRun);
+        assert_eq!(
+            chinese_review.suggested_agent.as_deref(),
+            Some("code-reviewer")
+        );
+        assert!(chinese_review
+            .reason
+            .contains("octocode agent run code-reviewer"));
     }
 }

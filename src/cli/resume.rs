@@ -12,8 +12,8 @@ pub async fn resume(
 
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?;
 
-    let store = SessionStore::new(home.join(".deepseek-code"));
-    let event_store = EventLogStore::new(home.join(".deepseek-code"));
+    let store = SessionStore::new(home.join(".octocode"));
+    let event_store = EventLogStore::new(home.join(".octocode"));
 
     match session_name {
         Some(name) => {
@@ -74,7 +74,7 @@ pub async fn resume(
                         }
                         println!();
                         println!("To continue this session, run:");
-                        println!("  deepseek-code chat --session {}", session.id);
+                        println!("  octocode chat --session {}", session.id);
                     }
                     Err(e) => {
                         eprintln!("Failed to load session: {e}");
@@ -105,7 +105,7 @@ pub async fn export(
 
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?;
 
-    let store = SessionStore::new(home.join(".deepseek-code"));
+    let store = SessionStore::new(home.join(".octocode"));
 
     if let Some(id) = session_id {
         let sid = uuid::Uuid::parse_str(&id)?;
@@ -173,8 +173,8 @@ fn list_and_print(
         );
     }
     println!();
-    println!("Resume: deepseek-code resume <name-or-id-prefix>");
-    println!("Export: deepseek-code export <id>");
+    println!("Resume: octocode resume <name-or-id-prefix>");
+    println!("Export: octocode export <id>");
 
     Ok(())
 }

@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::deepseek::{CacheUsage, DeepSeekModel};
-use crate::tui::{model_hint, status_bar::AppMode, theme};
+use crate::tui::{status_bar::AppMode, theme};
 
 const CONTEXT_LIMIT_TOKENS: u64 = 1_000_000;
 
@@ -48,13 +48,12 @@ pub fn render_statusline(f: &mut Frame, area: Rect, props: StatuslineProps<'_>) 
 
 fn statusline_row(props: &StatuslineProps<'_>, canvas: Color, width: u16) -> Vec<Span<'static>> {
     let colors = statusline_colors(theme::palette());
-    let compact = width < 112;
     let narrow = width < 88;
     let mut spans = vec![Span::styled("  ", Style::default().bg(canvas))];
     let context_limit = props.context_limit.unwrap_or(CONTEXT_LIMIT_TOKENS);
     push_chip(
         &mut spans,
-        " ds-code ".to_string(),
+        " octocode ".to_string(),
         colors.project_bg,
         colors.project_fg,
     );
@@ -65,13 +64,15 @@ fn statusline_row(props: &StatuslineProps<'_>, canvas: Color, width: u16) -> Vec
         colors.mode_bg,
         colors.mode_fg,
     );
-    push_gap(&mut spans, canvas);
-    push_chip(
-        &mut spans,
-        format!(" {} ", model_hint::model_display_name(props.model)),
-        colors.model_bg,
-        colors.model_fg,
-    );
+    if !narrow {
+        push_gap(&mut spans, canvas);
+        push_chip(
+            &mut spans,
+            format!(" {} ", compact_model_label(props.model)),
+            colors.model_bg,
+            colors.model_fg,
+        );
+    }
     push_gap(&mut spans, canvas);
     push_chip(
         &mut spans,
@@ -86,71 +87,6 @@ fn statusline_row(props: &StatuslineProps<'_>, canvas: Color, width: u16) -> Vec
         colors.permissions_bg,
         colors.permissions_fg,
     );
-    if !narrow {
-        push_gap(&mut spans, canvas);
-        push_chip(
-            &mut spans,
-            " web:on ".to_string(),
-            colors.web_bg,
-            colors.web_fg,
-        );
-    }
-    if props.input_tokens > 0 || props.output_tokens > 0 {
-        if props.input_tokens > 0 {
-            push_gap(&mut spans, canvas);
-            push_chip(
-                &mut spans,
-                format!(" ↑ {} ", token_count_label(props.input_tokens)),
-                colors.input_bg,
-                colors.input_fg,
-            );
-        }
-        if props.output_tokens > 0 {
-            push_gap(&mut spans, canvas);
-            push_chip(
-                &mut spans,
-                format!(" ↓ {} ", token_count_label(props.output_tokens)),
-                colors.tokens_bg,
-                colors.tokens_fg,
-            );
-        }
-    }
-    if props.agent_tokens > 0 {
-        push_gap(&mut spans, canvas);
-        push_chip(
-            &mut spans,
-            format!(" agent {} ", token_count_label(props.agent_tokens)),
-            colors.agent_bg,
-            colors.agent_fg,
-        );
-    }
-    if !compact {
-        push_gap(&mut spans, canvas);
-        push_chip(
-            &mut spans,
-            format!(" ¥{:.3} ", props.cost),
-            colors.cost_bg,
-            colors.cost_fg,
-        );
-    }
-    if let Some(cache) = props.cache.filter(|_| !compact) {
-        push_gap(&mut spans, canvas);
-        push_chip(
-            &mut spans,
-            format!(" cache {:.0}% ", cache.hit_rate() * 100.0),
-            colors.cache_bg,
-            colors.cache_fg,
-        );
-    }
-    if width >= 130 {
-        push_gap(&mut spans, canvas);
-        push_chip(
-            &mut spans,
-            " tools ✓ ".to_string(),
-            colors.tools_bg,
-            colors.tools_fg,
-        );
-    }
     push_gap(&mut spans, canvas);
     push_chip(
         &mut spans,
@@ -159,6 +95,15 @@ fn statusline_row(props: &StatuslineProps<'_>, canvas: Color, width: u16) -> Vec
         colors.ctx_fg,
     );
     spans
+}
+
+fn compact_model_label(model: &DeepSeekModel) -> &'static str {
+    match model {
+        DeepSeekModel::Pro => "V4 Pro",
+        DeepSeekModel::Flash => "V4 Flash",
+        DeepSeekModel::LegacyChat => "Chat",
+        DeepSeekModel::LegacyReasoner => "Reasoner",
+    }
 }
 
 fn context_segment_for_width(tokens: u64, width: u16, context_limit: u64) -> String {
@@ -214,11 +159,6 @@ fn compact_number(value: u64) -> String {
     }
 }
 
-fn token_count_label(value: u64) -> String {
-    let unit = if value == 1 { "token" } else { "tokens" };
-    format!("{} {unit}", compact_number(value))
-}
-
 fn context_limit_label(context_limit: u64) -> &'static str {
     if context_limit >= 1_000_000 {
         "1M"
@@ -254,24 +194,10 @@ struct StatuslineColors {
     project_fg: Color,
     ctx_bg: Color,
     ctx_fg: Color,
-    input_bg: Color,
-    input_fg: Color,
     model_bg: Color,
     model_fg: Color,
     mode_bg: Color,
     mode_fg: Color,
-    web_bg: Color,
-    web_fg: Color,
-    tokens_bg: Color,
-    tokens_fg: Color,
-    agent_bg: Color,
-    agent_fg: Color,
-    cost_bg: Color,
-    cost_fg: Color,
-    cache_bg: Color,
-    cache_fg: Color,
-    tools_bg: Color,
-    tools_fg: Color,
     permissions_bg: Color,
     permissions_fg: Color,
 }
@@ -282,24 +208,10 @@ fn statusline_colors(p: theme::ThemePalette) -> StatuslineColors {
         project_fg: p.inverse_text,
         ctx_bg: p.surface_alt,
         ctx_fg: p.text,
-        input_bg: p.warning,
-        input_fg: p.inverse_text,
         model_bg: p.info,
         model_fg: p.inverse_text,
         mode_bg: p.surface_alt,
         mode_fg: p.text,
-        web_bg: p.success,
-        web_fg: p.inverse_text,
-        tokens_bg: p.info,
-        tokens_fg: p.inverse_text,
-        agent_bg: p.success,
-        agent_fg: p.inverse_text,
-        cost_bg: p.surface_alt,
-        cost_fg: p.text,
-        cache_bg: p.surface_alt,
-        cache_fg: p.secondary,
-        tools_bg: p.warning,
-        tools_fg: p.inverse_text,
         permissions_bg: p.danger,
         permissions_fg: p.inverse_text,
     }
@@ -343,13 +255,15 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(!rendered.contains("Model:"));
-        assert!(rendered.contains("ds-code"));
+        assert!(rendered.contains("octocode"));
         assert!(rendered.contains("chat"));
-        assert!(rendered.contains("DeepSeek V4 Pro"));
+        assert!(rendered.contains("V4 Pro"));
         assert!(rendered.contains("128/1M (0.0%)"));
         assert!(!rendered.contains("tok "));
         assert!(!rendered.contains("↑"));
         assert!(!rendered.contains("↓"));
+        assert!(!rendered.contains("web:on"));
+        assert!(!rendered.contains("¥"));
         assert!(rendered.contains("ask"));
         let chip = terminal.backend().buffer().cell((2, 1)).expect("chip");
         assert_ne!(chip.bg, theme::palette().canvas);
@@ -395,12 +309,12 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(rendered.contains("ask"));
-        assert!(rendered.contains("DeepSeek V4 Flash"));
+        assert!(rendered.contains("V4 Flash"));
         assert!(rendered.contains("128/1M (0.0%)"));
     }
 
     #[test]
-    fn statusline_renders_live_input_and_output_tokens() {
+    fn statusline_keeps_live_tokens_out_of_the_footer() {
         let mut terminal = Terminal::new(TestBackend::new(120, 2)).expect("terminal");
         terminal
             .draw(|f| {
@@ -431,13 +345,14 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect();
-        assert!(rendered.contains("↑ 742 tokens"));
-        assert!(rendered.contains("↓ 131 tokens"));
+        assert!(rendered.contains("5.7k/1M"));
+        assert!(!rendered.contains("↑ 742 tokens"));
+        assert!(!rendered.contains("↓ 131 tokens"));
         assert!(!rendered.contains("tok 131"));
     }
 
     #[test]
-    fn statusline_omits_empty_token_directions() {
+    fn statusline_omits_token_directions() {
         let mut terminal = Terminal::new(TestBackend::new(120, 2)).expect("terminal");
         terminal
             .draw(|f| {
@@ -468,7 +383,8 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect();
-        assert!(rendered.contains("↑ 54 tokens"));
+        assert!(rendered.contains("5.7k/1M"));
+        assert!(!rendered.contains("↑ 54 tokens"));
         assert!(!rendered.contains("↓ 0"));
         assert!(!rendered.contains("tok "));
     }
@@ -543,7 +459,8 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect();
-        assert!(rendered.contains("agent 16.2k tokens"));
+        assert!(rendered.contains("16.2k/1M"));
+        assert!(!rendered.contains("agent 16.2k tokens"));
         assert!(!rendered.contains("↓ 16.2k"));
     }
 }

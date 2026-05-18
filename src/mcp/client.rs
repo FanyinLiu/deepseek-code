@@ -168,7 +168,7 @@ impl StdioMcpClient {
             protocol_version: PROTOCOL_VERSION.to_string(),
             capabilities: ClientCapabilities::default(),
             client_info: Implementation {
-                name: "deepseek-code".to_string(),
+                name: "octocode".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
         };
@@ -343,7 +343,7 @@ impl RemoteMcpClient {
             protocol_version: PROTOCOL_VERSION.to_string(),
             capabilities: ClientCapabilities::default(),
             client_info: Implementation {
-                name: "deepseek-code".to_string(),
+                name: "octocode".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
         };

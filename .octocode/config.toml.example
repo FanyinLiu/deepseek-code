@@ -1,4 +1,4 @@
-# DeepSeek-Code project-level configuration
+# Octocode project-level configuration
 # This file should be checked into version control.
 
 [model]
@@ -59,6 +59,26 @@ show_cache_hud = true
 
 [provider]
 default = "deepseek"
+
+# First-class OpenAI-compatible Chinese provider presets:
+# default = "qwen"   # DASHSCOPE_API_KEY / BAILIAN_API_KEY
+# default = "kimi"   # MOONSHOT_API_KEY
+# default = "zhipu"  # ZAI_API_KEY
+#
+# [provider.qwen]
+# base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+# pro_model = "qwen3-coder-plus"
+# flash_model = "qwen3-coder-flash"
+#
+# [provider.kimi]
+# base_url = "https://api.moonshot.cn/v1"
+# pro_model = "kimi-k2.6"
+# flash_model = "kimi-k2.5"
+#
+# [provider.zhipu]
+# base_url = "https://open.bigmodel.cn/api/paas/v4"
+# pro_model = "glm-5.1"
+# flash_model = "glm-4.7-flashx"
 
 [router]
 enabled = true

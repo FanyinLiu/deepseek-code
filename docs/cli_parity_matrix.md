@@ -2,7 +2,7 @@
 
 Date: 2026-05-13
 
-This matrix compares `deepseek-code` against current public CLI-agent product
+This matrix compares `octocode` against current public CLI-agent product
 patterns. It is intentionally product-focused: the goal is not to clone another
 tool, but to identify which CLI surfaces make long-running coding work
 discoverable, resumable, safer, and easier to verify.
@@ -25,11 +25,11 @@ discoverable, resumable, safer, and easier to verify.
 - Factory Droid CLI reference: <https://docs.factory.ai/reference/cli-reference>
 - OpenCode CLI docs: <https://opencode.ai/docs/cli/>
 - OpenCode commands docs: <https://opencode.ai/docs/commands/>
-- Existing deepseek-code docs and source tree in this repository.
+- Existing octocode docs and source tree in this repository.
 
 ## Capability Matrix
 
-| Capability | Claude | Codex | Kimi | Qwen | Gemini | Droid | OpenCode | deepseek-code current | Action |
+| Capability | Claude | Codex | Kimi | Qwen | Gemini | Droid | OpenCode | octocode current | Action |
 |---|---|---|---|---|---|---|---|---|---|
 | project memory file | CLAUDE.md and memory scopes | AGENTS.md/project instructions | project context docs | `/init`, `/memory`, durable memory | GEMINI.md and memory reload | project/org context | project config and instructions | project guidance injection exists, diagnostics thin | already-have |
 | custom agents | markdown agents, CLI `--agents` | emerging subagent patterns | not prominent in public docs | agents/skills surface | `/agents` registry | enterprise agent workflows | `opencode agent create` | markdown/TOML registry exists, no CLI surface | implement-now |
@@ -42,7 +42,7 @@ discoverable, resumable, safer, and easier to verify.
 | patch preview | interactive patch review | prints proposed patches | code edits shown in terminal | restore/diff flows | checkpoint/diff UX | review workflow | diff/session review commands | diff viewer and apply policy exist | already-have |
 | diff apply | edit/apply tools | patch application | edits files | file restore/checkpoint | checkpoint/restore | implementation lifecycle | edit tools | workspace apply and diff modules | already-have |
 | run history | sessions and resume | local sessions | browser UI session management | `/chat save/resume/list` | `/chat save/resume/list` | session ids in exec | session commands | session store and transcripts exist | already-have |
-| resume session | `--resume`, `--continue` | resume current work | browser/session UI | `/resume`, `/chat resume` | `/resume`, `--session` | `droid exec -s` | `--continue`, `--session` | `ds resume` and export exist | already-have |
+| resume session | `--resume`, `--continue` | resume current work | browser/session UI | `/resume`, `/chat resume` | `/resume`, `--session` | `droid exec -s` | `--continue`, `--session` | `octocode resume` and export exist | already-have |
 | replay logs | transcript/history review | visible inline history | export/import task docs | `/chat share`, recap | chat share/session retention | bug/log workflows | export/import/session db | transcript export exists, replay thin | implement-now |
 | MCP support | MCP tools and scoped MCP settings | MCP support in product docs | MCP support | `qwen mcp` commands | MCP reload/read tools | integrations model | MCP commands | stdio MCP registry/client | already-have |
 | custom commands | slash commands, commands/skills | slash commands | slash commands listed | custom markdown/TOML commands | custom TOML commands | `/commands` | markdown commands | built-in registry only | implement-later |
@@ -64,11 +64,11 @@ discoverable, resumable, safer, and easier to verify.
 | worktree isolation | subagent worktree isolation | sandbox/full-auto | not prominent | restore/checkpoints | sandbox/checkpointing | workflow isolation | sessions/subtasks | no worktree isolation | implement-later |
 | long-running workflow support | background/resume/max turns | full-auto and approvals | agent execution and browser UI | resume/compress/recap | plan/session retention | bg-process, exec session | session/run/serve | no mission record yet | implement-now |
 | custom templates | subagent examples/templates | prompts/templates emerging | docs/templates | command templates | custom command TOML | prompt file exec | agent/command templates | none for agent CLI | implement-now |
-| install/doctor command | doctor/help/update docs | install/upgrade | installer and help | auth status/setup | about/settings | install/reference | upgrade/uninstall/debug | `ds doctor` exists | already-have |
+| install/doctor command | doctor/help/update docs | install/upgrade | installer and help | auth status/setup | about/settings | install/reference | upgrade/uninstall/debug | `octocode doctor` exists | already-have |
 | documentation quality | extensive official docs | help/GitHub docs | official docs | detailed command docs | detailed docs | reference docs | strong docs | repo docs partial | implement-now |
-| agent management CLI | `/agents`, `--agent` | subagent commands/docs | limited | `/agents` docs emerging | `/agents list/reload` | no explicit agent CLI in reference | `opencode agent list/create` | missing `ds agent` command | implement-now |
+| agent management CLI | `/agents`, `--agent` | subagent commands/docs | limited | `/agents` docs emerging | `/agents list/reload` | no explicit agent CLI in reference | `opencode agent list/create` | missing `octocode agent` command | implement-now |
 | mission/run records | resumable sessions and background work | session logs | task/browser session management | recap/share/checkpoints | plans/session retention | exec sessions/logs | session db/export/import | missing mission store | implement-now |
-| feature discovery | help, slash command listings | help article/CLI help | quickstart/core operations | `/tools`, `/skills`, `/commands` | `/help`, command docs | CLI reference | rich CLI command list | no `ds features` | implement-now |
+| feature discovery | help, slash command listings | help article/CLI help | quickstart/core operations | `/tools`, `/skills`, `/commands` | `/help`, command docs | CLI reference | rich CLI command list | no `octocode features` | implement-now |
 | TUI command hints | command palette/agents UI | in-terminal command help | status bar modes | command help and shortcuts | command help | slash commands | TUI commands | welcome/help need new commands | implement-now |
 
 ## Top 15 Product Ideas to Steal
@@ -86,10 +86,10 @@ discoverable, resumable, safer, and easier to verify.
 11. Documentation that maps product ideas to concrete commands.
 12. TUI welcome/help copy that advertises advanced commands without clutter.
 13. Read-only planning and audit surfaces as safe defaults.
-14. Durable local stores under `.deepseek-code/`.
+14. Durable local stores under `.octocode/`.
 15. Copy-paste command examples that cover the core workflow.
 
-## DeepSeek-Code Existing Strengths
+## Octocode Existing Strengths
 
 - Rust-native CLI and Ratatui TUI.
 - DeepSeek-specific model handling with `Pro` and `Flash` modes.
@@ -103,8 +103,8 @@ discoverable, resumable, safer, and easier to verify.
 
 ## P0 Implementation Targets
 
-- Add `ds features matrix/status/recommend`.
-- Add `ds agent list/show/run/create/validate`.
+- Add `octocode features matrix/status/recommend`.
+- Add `octocode agent list/show/run/create/validate`.
 - Finish `security-auditor` built-in defaults.
 - Add minimal dry-run mission runtime and persistent event/state store.
 - Add JSON outputs for the new commands.
@@ -115,7 +115,7 @@ discoverable, resumable, safer, and easier to verify.
 - Improve command help and TUI welcome/status copy for the new command surfaces.
 - Document feature discovery, custom agents, mission dry-run, and safety model.
 - Add richer replay/log views for mission events.
-- Add `ds doctor` checks for custom agent and mission store health.
+- Add `octocode doctor` checks for custom agent and mission store health.
 - Normalize custom-agent frontmatter compatibility beyond the minimal TOML-like subset.
 
 ## P2 Implementation Targets

@@ -9,7 +9,7 @@ fn command_with_dumb_stdio(bin: &str) -> Command {
 
 #[test]
 fn preview_tui_works_with_dumb_non_tty_stdio() {
-    let output = command_with_dumb_stdio(env!("CARGO_BIN_EXE_ds"))
+    let output = command_with_dumb_stdio(env!("CARGO_BIN_EXE_octocode"))
         .args([
             "preview-tui",
             "--width",
@@ -28,34 +28,34 @@ fn preview_tui_works_with_dumb_non_tty_stdio() {
 
     assert!(output.status.success(), "stderr={}", stderr(&output));
     let stdout = stdout(&output);
-    assert!(stdout.contains("DSCODE"));
+    assert!(stdout.contains("OCTOCODE"));
     assert!(stdout.contains("DeepSeek V4 Flash"));
 }
 
 #[test]
-fn ds_without_args_fails_cleanly_when_stdio_is_not_tty() {
-    let output = command_with_dumb_stdio(env!("CARGO_BIN_EXE_ds"))
+fn octocode_without_args_fails_cleanly_when_stdio_is_not_tty() {
+    let output = command_with_dumb_stdio(env!("CARGO_BIN_EXE_octocode"))
         .output()
-        .expect("run ds without args");
+        .expect("run octocode without args");
 
     assert_clean_non_tty_tui_failure(&output);
 }
 
 #[test]
-fn dscode_without_args_fails_cleanly_when_stdio_is_not_tty() {
-    let output = command_with_dumb_stdio(env!("CARGO_BIN_EXE_dscode"))
+fn octo_without_args_fails_cleanly_when_stdio_is_not_tty() {
+    let output = command_with_dumb_stdio(env!("CARGO_BIN_EXE_octo"))
         .output()
-        .expect("run dscode without args");
+        .expect("run octo without args");
 
     assert_clean_non_tty_tui_failure(&output);
 }
 
 #[test]
 fn explicit_tui_fails_cleanly_when_stdio_is_not_tty() {
-    let output = command_with_dumb_stdio(env!("CARGO_BIN_EXE_ds"))
+    let output = command_with_dumb_stdio(env!("CARGO_BIN_EXE_octocode"))
         .arg("tui")
         .output()
-        .expect("run ds tui");
+        .expect("run octocode tui");
 
     assert_clean_non_tty_tui_failure(&output);
 }

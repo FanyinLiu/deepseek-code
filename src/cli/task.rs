@@ -46,7 +46,7 @@ pub async fn task(
                 println!("log     {}", path.display());
             } else {
                 println!(
-                    "log     run history is in session events; use `ds resume` to inspect sessions"
+                    "log     run history is in session events; use `octocode resume` to inspect sessions"
                 );
             }
         }
@@ -141,7 +141,7 @@ fn ensure_task_can_run(task: &ScheduledTask) -> Result<(), anyhow::Error> {
 }
 
 fn task_event_store() -> Option<EventLogStore> {
-    dirs::home_dir().map(|home| EventLogStore::new(home.join(".deepseek-code")))
+    dirs::home_dir().map(|home| EventLogStore::new(home.join(".octocode")))
 }
 
 fn task_event_log_path(task: &ScheduledTask, session_id: SessionId) -> Option<PathBuf> {

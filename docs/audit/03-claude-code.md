@@ -1,9 +1,9 @@
-# Anthropic Claude Code 深度调研报告（对标 deepseek-code）
+# Anthropic Claude Code 深度调研报告（对标 octocode）
 
 > 调研时间：2026-05-13
 > 调研对象：Anthropic Claude Code CLI（最新发布 v2.1.128–v2.1.136 一线，docs 当前版本对应 v2.1.139+ 的 agent view 等特性）
 > 信源置信度图例：🟢 官方文档直接确认 / 🟡 GitHub/issues/blog 间接 / 🟠 截图视频可见 / 🔴 推断
-> 对应 deepseek-code 现状档案：`docs/audit/00-current-state.md`（21 项痛点）
+> 对应 octocode 现状档案：`docs/audit/00-current-state.md`（21 项痛点）
 
 ---
 
@@ -44,10 +44,10 @@ TUI 渲染层：从 cli.js 中可见 React 风格的 JSX 注释残片 + ANSI esc
 ### 1.4 缺点
 - 核心闭源 + 混淆，社区无法 fork 修小 bug。
 - 体积大（~50 MB 二进制 + 数十 MB Node-style 资源）。
-- TUI 不是真原生（Ink/React 的运行时开销）—— 与 Rust 写的 Codex / deepseek-code 拉不开延迟。
+- TUI 不是真原生（Ink/React 的运行时开销）—— 与 Rust 写的 Codex / octocode 拉不开延迟。
 
-### 1.5 对 deepseek-code 的启示
-deepseek-code 选 Rust + ratatui 0.30 + crossterm 0.29 已经在**渲染性能上天然胜出**，这是不该放弃的底气。但 Claude Code 的"两条渲染路径"模式值得学：deepseek-code 现状档案 §2.2 指出 "没有真正的分屏/sidebar"，应该考虑在 ratatui 之上做 "classic（line scroll）vs. workbench（alt-screen + 固定输入框）" 的双模式切换。
+### 1.5 对 octocode 的启示
+octocode 选 Rust + ratatui 0.30 + crossterm 0.29 已经在**渲染性能上天然胜出**，这是不该放弃的底气。但 Claude Code 的"两条渲染路径"模式值得学：octocode 现状档案 §2.2 指出 "没有真正的分屏/sidebar"，应该考虑在 ratatui 之上做 "classic（line scroll）vs. workbench（alt-screen + 固定输入框）" 的双模式切换。
 
 ---
 
@@ -100,8 +100,8 @@ CLI flags 极多（cli-reference 单页 55 KB），关键的：`--add-dir`、`--
 - `--dangerously-load-development-channels` / `--allow-dangerously-skip-permissions` 这类「危险但有用」的 flag 命名长到讨厌。
 - 部分 flag 没列入 `--help`（doc 明确："`claude --help` does not list every flag"）—— 探索性不强。
 
-### 2.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §1.3 列了 17 个子命令 + 48 个 slash 命令，**广度上已不输 Claude Code**。但 Claude Code 的几个细节值得抄：(a) `auth login/logout/status` 三件套独立成顶层子命令（deepseek-code 目前只有 `login`）；(b) 命令拼写纠错（"Did you mean X?"）；(c) `--bare` 模式 —— 直接对应 deepseek-code 现状档案 §4 的痛点「Settings 占位」和「scripting 友好度未知」；(d) `project purge` 这种全量清理命令值得加（对应 §3.10 的 sessions / events.jsonl 持久化清理）。
+### 2.5 对 octocode 的启示
+octocode 现状档案 §1.3 列了 17 个子命令 + 48 个 slash 命令，**广度上已不输 Claude Code**。但 Claude Code 的几个细节值得抄：(a) `auth login/logout/status` 三件套独立成顶层子命令（octocode 目前只有 `login`）；(b) 命令拼写纠错（"Did you mean X?"）；(c) `--bare` 模式 —— 直接对应 octocode 现状档案 §4 的痛点「Settings 占位」和「scripting 友好度未知」；(d) `project purge` 这种全量清理命令值得加（对应 §3.10 的 sessions / events.jsonl 持久化清理）。
 
 ---
 
@@ -112,7 +112,7 @@ deepseek-code 现状档案 §1.3 列了 17 个子命令 + 48 个 slash 命令，
 
 **Tips of the day** 是 inline 模式：每次启动显示一条小提示。`/powerup` 命令（v2.1.90 引入）显式打开交互式课程演示，弥补"feature discovery 难"问题。**brand color** 在文档站和插件市场是 Anthropic 标志性的 **暖橙 (#D97757 一类)**，CLI 内的 accent 跟随用户主题。
 
-`claude doctor` 命令打开诊断面板（带状态图标 / 按 `f` 让 Claude 修），相当于 deepseek-code 的 `doctor` 子命令的高度产品化版本。
+`claude doctor` 命令打开诊断面板（带状态图标 / 按 `f` 让 Claude 修），相当于 octocode 的 `doctor` 子命令的高度产品化版本。
 
 ### 3.2 关键引用
 - 🟢 [Quickstart](https://code.claude.com/docs/en/quickstart.md)
@@ -128,8 +128,8 @@ deepseek-code 现状档案 §1.3 列了 17 个子命令 + 48 个 slash 命令，
 - Tips of the day 没有"再来一条"/"隐藏"按钮（要靠 `/help` 间接探索）。
 - 不显示「当前 git 仓库 / 是否 dirty / branch 名」—— 这是 Codex 显式做的安全信号。
 
-### 3.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §2.3 的痛点 1-3（ASCII wordmark 不像 "DeepSeek"、starter 硬编码、首屏不显示 git 状态）正好被 Claude Code 这一节命中：**完全没有 wordmark 也是合法选项**，把腾出来的垂直空间还给对话区。**最关键**：把 deepseek-code 的 3 个硬编码 starter prompt 替换成 Claude Code 风格的 "从 git history 挑最近文件" 算法 —— 这是 `welcome.rs` 应该做的智能化升级方向。
+### 3.5 对 octocode 的启示
+octocode 现状档案 §2.3 的痛点 1-3（ASCII wordmark 不像 "DeepSeek"、starter 硬编码、首屏不显示 git 状态）正好被 Claude Code 这一节命中：**完全没有 wordmark 也是合法选项**，把腾出来的垂直空间还给对话区。**最关键**：把 octocode 的 3 个硬编码 starter prompt 替换成 Claude Code 风格的 "从 git history 挑最近文件" 算法 —— 这是 `welcome.rs` 应该做的智能化升级方向。
 
 ---
 
@@ -155,8 +155,8 @@ deepseek-code 现状档案 §2.3 的痛点 1-3（ASCII wordmark 不像 "DeepSeek
 - 主题 token 文档不全（只能从 plugins 示例反推）。
 - 没有 "import / export 单个主题为可分享 gist" 的内置流程（要手动复制 JSON）。
 
-### 4.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §2.1 已经有三套 palette（Light/Dark/HighContrast）+ 自动检测，**完成度甚至和 Claude Code 接近**。但缺两件事：(a) **不支持用户自定义主题文件**（建议加 `~/.deepseek-code/themes/*.toml`，每个主题指定 base preset + override），(b) **没有 dark-daltonized 等 a11y 变体**（直接抄 Claude Code 的命名空间和色板）。**痛点 5、6**（statusline / diff_viewer / file_tree 不走 palette）是真正的硬伤，必须先把所有组件统一到 palette 才能谈自定义主题。
+### 4.5 对 octocode 的启示
+octocode 现状档案 §2.1 已经有三套 palette（Light/Dark/HighContrast）+ 自动检测，**完成度甚至和 Claude Code 接近**。但缺两件事：(a) **不支持用户自定义主题文件**（建议加 `~/.octocode/themes/*.toml`，每个主题指定 base preset + override），(b) **没有 dark-daltonized 等 a11y 变体**（直接抄 Claude Code 的命名空间和色板）。**痛点 5、6**（statusline / diff_viewer / file_tree 不走 palette）是真正的硬伤，必须先把所有组件统一到 palette 才能谈自定义主题。
 
 ---
 
@@ -195,8 +195,8 @@ deepseek-code 现状档案 §2.1 已经有三套 palette（Light/Dark/HighContra
 - 鼠标 capture 与终端 native selection 互斥，over SSH / tmux 体验有摩擦。
 - 没有真正的 sidebar / file tree —— 跨文件多任务时需要切换上下文。
 
-### 5.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §2.2 的痛点「没有 sidebar / 输入区上限 5 行偏紧 / 没有 modal 层」可以靠"双布局"思路解决：
+### 5.5 对 octocode 的启示
+octocode 现状档案 §2.2 的痛点「没有 sidebar / 输入区上限 5 行偏紧 / 没有 modal 层」可以靠"双布局"思路解决：
 - **保留 classic 模式**（当前的 6 行栈）—— 老用户体验稳定。
 - **新增 workbench 模式**（alt-screen + 固定底部输入）—— 给重度用户长会话稳定渲染。
 - 输入区上限从 5 行放到 30 行（甚至无限滚动）—— Claude Code 的 paste 也是任意行。
@@ -233,8 +233,8 @@ deepseek-code 现状档案 §2.2 的痛点「没有 sidebar / 输入区上限 5 
 - Spinner 动画依赖终端正常重绘，over SSH / 慢终端会有撕裂感。
 - thinking 折叠卡片在 default 模式（非 fullscreen）下不可点击，只能键盘 `Ctrl+O` 切换 —— 鼠标用户摸不着北。
 
-### 6.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §2.9 已经在 transcript_view.rs 中模仿了 Claude Code 的 `render_claude_tool_lines`（"Reading 1 file..." / "Searching workspace..." 系列），但有几个该补的细节：(a) **MCP tool 折叠成 "Called X N times"** —— 当前没有这个逻辑；(b) **代码块加 language chip**（现状档案 §2.9 明确说"不显示 language 标签"）；(c) **inline subagent + diff + plan 进 transcript 后的渲染顺序**，参考 Claude Code 的折叠策略：默认折叠，`Ctrl+O` 展开 —— 这能解决现状档案痛点 12「markdown parser 太简化」之外的「信息密度过高」问题。
+### 6.5 对 octocode 的启示
+octocode 现状档案 §2.9 已经在 transcript_view.rs 中模仿了 Claude Code 的 `render_claude_tool_lines`（"Reading 1 file..." / "Searching workspace..." 系列），但有几个该补的细节：(a) **MCP tool 折叠成 "Called X N times"** —— 当前没有这个逻辑；(b) **代码块加 language chip**（现状档案 §2.9 明确说"不显示 language 标签"）；(c) **inline subagent + diff + plan 进 transcript 后的渲染顺序**，参考 Claude Code 的折叠策略：默认折叠，`Ctrl+O` 展开 —— 这能解决现状档案痛点 12「markdown parser 太简化」之外的「信息密度过高」问题。
 
 ---
 
@@ -259,8 +259,8 @@ deepseek-code 现状档案 §2.9 已经在 transcript_view.rs 中模仿了 Claud
 - 引擎不透明，用户不能自定义 token 颜色范围（只能整体换主题）。
 - 不支持非常见语言（Rust 的 macro / Zig / Nim 等）的高亮深度，主流是 JS/TS/Py/Go/Rust。
 
-### 7.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §2.15 用 syntect 5，**硬编码 `base16-ocean.dark`**，Light 主题代码块违和。修复方向已经清楚：(a) 把 syntect theme 字符串接到 palette（`palette.code_theme` 字段），Light 主题用 `base16-ocean.light` 或 `Solarized (light)`；(b) 给用户开 `~/.deepseek-code/syntect_themes/` 自定义目录。
+### 7.5 对 octocode 的启示
+octocode 现状档案 §2.15 用 syntect 5，**硬编码 `base16-ocean.dark`**，Light 主题代码块违和。修复方向已经清楚：(a) 把 syntect theme 字符串接到 palette（`palette.code_theme` 字段），Light 主题用 `base16-ocean.light` 或 `Solarized (light)`；(b) 给用户开 `~/.octocode/syntect_themes/` 自定义目录。
 
 ---
 
@@ -289,8 +289,8 @@ deepseek-code 现状档案 §2.15 用 syntect 5，**硬编码 `base16-ocean.dark
 - Inline diff 展开/折叠靠 `Ctrl+O`，鼠标点不动（除 fullscreen 模式）。
 - 没有 "accept hunk by hunk" —— 是全文件 accept/reject。
 
-### 8.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §2.14 的 diff_viewer 比 Claude Code CLI 还多一些细节（文件 list 的 ○/✓/✗ 状态、syntect 高亮），核心问题就是**强制 `BG_DEEP` 底色不跟主题**。修复路线：(a) `palette.diff_added_bg` / `palette.diff_removed_bg` 字段加入 palette，light 主题用浅色版本（PaleGreen / Pink），dark 主题保留深色；(b) per-turn diff 已有数据（diffs Vec<FileDiffItem>）—— 加入"按 turn 过滤"的快捷键；(c) 长 hunk 折叠按钮（默认显示前 20 行）。**不需要做 side-by-side**（Claude Code 自己也没做）。
+### 8.5 对 octocode 的启示
+octocode 现状档案 §2.14 的 diff_viewer 比 Claude Code CLI 还多一些细节（文件 list 的 ○/✓/✗ 状态、syntect 高亮），核心问题就是**强制 `BG_DEEP` 底色不跟主题**。修复路线：(a) `palette.diff_added_bg` / `palette.diff_removed_bg` 字段加入 palette，light 主题用浅色版本（PaleGreen / Pink），dark 主题保留深色；(b) per-turn diff 已有数据（diffs Vec<FileDiffItem>）—— 加入"按 turn 过滤"的快捷键；(c) 长 hunk 折叠按钮（默认显示前 20 行）。**不需要做 side-by-side**（Claude Code 自己也没做）。
 
 ---
 
@@ -326,13 +326,13 @@ deepseek-code 现状档案 §2.14 的 diff_viewer 比 Claude Code CLI 还多一�
 - 没有 `#` 追加 memory 的快捷语法（要么走 `/memory`，要么靠 auto-memory 捕获 "remember that..."）—— 对刚从 Cursor 迁来的用户不直观。
 - Shift+Enter 在某些终端要 `/terminal-setup` 配置 —— 上手摩擦。
 
-### 9.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §2.5 / 痛点 4-7 几乎是**直接对应 Claude Code 这一节**。修复路线：
+### 9.5 对 octocode 的启示
+octocode 现状档案 §2.5 / 痛点 4-7 几乎是**直接对应 Claude Code 这一节**。修复路线：
 1. `input.rs` 触发 `slash_command_panel`（代码就在隔壁，现状档案 §2.10 明确指出 panel 已实现但不联动）—— **P0 第一刀**。
 2. `@` mention 补全 UI（现状档案 §3.11 的 `mention_prefix_at_cursor` 已实现，input.rs 没渲染）—— **P0 第二刀**。
 3. `Ctrl+R` reverse history search —— 直接抄 Claude Code 的 reverse-search 设计：默认所有项目，`Ctrl+S` 切换范围（all/project/session），`Tab/Esc` 接受继续编辑，`Enter` 接受并执行。
 4. `Esc + Esc` 打开 rewind 菜单 —— 这条直接和现状档案痛点 21（rollback 只在内存）联动：先做 UI，再做持久化。
-5. `Shift+Tab` 循环 mode —— deepseek-code 已经有 4 个 mode，但切换走的是「永久 mode 改变」，可学 Claude Code 改成「cycle through enabled modes」语义。
+5. `Shift+Tab` 循环 mode —— octocode 已经有 4 个 mode，但切换走的是「永久 mode 改变」，可学 Claude Code 改成「cycle through enabled modes」语义。
 6. **Paste 图片 `[Image #N]` chip** —— 现状档案 §1.3 已有 `image_input` skill，但 input.rs 没渲染 chip。
 
 ---
@@ -378,14 +378,14 @@ deepseek-code 现状档案 §2.5 / 痛点 4-7 几乎是**直接对应 Claude Cod
 - 数量太多导致初次接触者迷茫 —— 靠 `/powerup` 教程缓解。
 - 部分命令命名重叠或混乱（`/cost` / `/stats` / `/usage` 是别名；`/clear` / `/reset` / `/new` 也是；`/undo` / `/rewind` 也是）。
 
-### 10.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §3.10 已有 48 个 slash 命令，**数量上已经追平 Claude Code 三分之二**！但实现深度未必到位。优先级建议：
+### 10.5 对 octocode 的启示
+octocode 现状档案 §3.10 已有 48 个 slash 命令，**数量上已经追平 Claude Code 三分之二**！但实现深度未必到位。优先级建议：
 1. **`/` 触发 popup**（痛点 4）—— 第一刀。
-2. **`/btw` side question** —— deepseek-code 还没有；做法是开一个**临时 conversation context** 跑一个回合再回到主线，不持久化。
+2. **`/btw` side question** —— octocode 还没有；做法是开一个**临时 conversation context** 跑一个回合再回到主线，不持久化。
 3. **`/recap` 自动摘要** —— 当 session 闲置 N 分钟后回来时，自动生成「过去 N 步做了什么」一行摘要。
 4. **`/copy` 选 code block** —— 简单的功能，立刻提升体验。
 5. **`/insights`** —— 长期价值，分析最近 100 个 session 找出 friction（哪些命令被频繁取消、哪些 approval 总被 reject）。
-6. **commands → skills 统一化** —— deepseek-code 已经有 `/skills` 命令但不清楚是否合并 commands；建议直接抄 Claude Code 的迁移路径（保留兼容老 .md 文件 + 推 skills 目录）。
+6. **commands → skills 统一化** —— octocode 已经有 `/skills` 命令但不清楚是否合并 commands；建议直接抄 Claude Code 的迁移路径（保留兼容老 .md 文件 + 推 skills 目录）。
 
 ---
 
@@ -424,11 +424,11 @@ PDF 文件：大 PDF 可以让 Claude 读特定页（"single page, a range like 
 - MCP resource 的 `@` 语法在文档里不显眼，要靠 `/mcp` 反查每个 server 的 resource list。
 - 图片靠 paste，**不能 `@image.png`**（这个不是 @ 语义而是 paste 语义，可能会困惑用户）。
 
-### 11.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §3.11 的 `mention_prefix_at_cursor` 已经实现 file mention 后端，但 input.rs 不触发 popup。建议升级路线：
+### 11.5 对 octocode 的启示
+octocode 现状档案 §3.11 的 `mention_prefix_at_cursor` 已经实现 file mention 后端，但 input.rs 不触发 popup。建议升级路线：
 1. **`@` 触发 popup**（P0）。
 2. **fuzzy match** —— 抄 `nucleo-matcher` Rust crate（VSCode 用的 fzf 算法的 Rust 实现）。
-3. **行号范围 `#5-10` 注入** —— deepseek-code 当前没有"读文件特定行"的 tool 调用，需要先在 backend 加 read_file_range tool，再在 mention 解析中拼装参数。
+3. **行号范围 `#5-10` 注入** —— octocode 当前没有"读文件特定行"的 tool 调用，需要先在 backend 加 read_file_range tool，再在 mention 解析中拼装参数。
 4. **agent / MCP resource 用同一个 `@` 语义** —— 不要分散成 `@agent:name` `@mcp:...` 不同前缀。
 
 ---
@@ -459,8 +459,8 @@ deepseek-code 现状档案 §3.11 的 `mention_prefix_at_cursor` 已经实现 fi
 ### 12.4 缺点
 - 没有命令参数 hint 行内显示（agent_hint 只在 popup 中显示，输入到一半时不再提示）。
 
-### 12.5 对 deepseek-code 的启示
-deepseek-code 现状档案痛点 4-7 直接对应。优先级：（已在 §9 / §10 / §11 中给出）。补充：**prompt suggestion 的灰色文字**是非常便宜但 effect 大的设计 —— 在 input.rs 中加一个 fetch_recent_files 的 placeholder（从 git log --name-only 取最近 5 个文件）。
+### 12.5 对 octocode 的启示
+octocode 现状档案痛点 4-7 直接对应。优先级：（已在 §9 / §10 / §11 中给出）。补充：**prompt suggestion 的灰色文字**是非常便宜但 effect 大的设计 —— 在 input.rs 中加一个 fetch_recent_files 的 placeholder（从 git log --name-only 取最近 5 个文件）。
 
 ---
 
@@ -542,10 +542,10 @@ deepseek-code 现状档案痛点 4-7 直接对应。优先级：（已在 §9 / 
 
 ### 13.4 缺点
 - 用户脚本性能可能拖慢 statusline 更新（debounce 300ms 缓解但极端场景仍卡）。
-- 默认 statusline 信息密度低 —— 对照 Codex / deepseek-code 的 chip 风格"看一眼啥都知道"差距明显。
+- 默认 statusline 信息密度低 —— 对照 Codex / octocode 的 chip 风格"看一眼啥都知道"差距明显。
 
-### 13.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §2.7（11 个彩色 chip + ¥ CNY + 1M context 硬编码）这一块的修复路线必须双管齐下：
+### 13.5 对 octocode 的启示
+octocode 现状档案 §2.7（11 个彩色 chip + ¥ CNY + 1M context 硬编码）这一块的修复路线必须双管齐下：
 1. **Chip 接入 palette**（痛点 3、5）—— 移除硬编码 RGB。
 2. **加用户自定义 statusline 脚本**：抄 Claude Code 的 settings 字段 `[statusline.command]`，pipe JSON 到 stdin，stdout 显示。**保留 default chip 模式**作为开箱即用，但允许 power user 完全替换。
 3. **JSON schema 直接抄 Claude Code**：`cost.total_cost_usd`（不是写死 ¥）、`context_window.context_window_size`（让脚本知道当前模型 ctx 上限）、`effort.level`、`thinking.enabled` —— 这些字段对脚本作者非常友好。
@@ -572,7 +572,7 @@ deepseek-code 现状档案 §2.7（11 个彩色 chip + ¥ CNY + 1M context 硬�
 - 🟢 [Agent view > Read session state](https://code.claude.com/docs/en/agent-view.md)
 - 🟢 [Interactive mode > Session recap](https://code.claude.com/docs/en/interactive-mode.md)
 - 🟢 [Statusline > effort.level](https://code.claude.com/docs/en/statusline.md)
-- 🔴 "Brewing for N" **不是** Claude Code 设计（推断：可能 deepseek-code 自己加的；现状档案 §3.11 也猜测来自 Copilot 借鉴）
+- 🔴 "Brewing for N" **不是** Claude Code 设计（推断：可能 octocode 自己加的；现状档案 §3.11 也猜测来自 Copilot 借鉴）
 
 ### 14.3 亮点
 - **多形状（`✻ ∙ ✢ ✽`）+ 颜色双维度** —— 用紧凑视觉传递多维状态信息。
@@ -580,14 +580,14 @@ deepseek-code 现状档案 §2.7（11 个彩色 chip + ¥ CNY + 1M context 硬�
 - **thinking 默认关** —— 解决了"显示 5000 行思考刷屏"的问题，需要时再展开。
 
 ### 14.4 缺点
-- "Thinking..." 文案不分级（没有 "still thinking" / "almost done" 这种渐进文案 —— 这点 **deepseek-code 反而做得好**）。
+- "Thinking..." 文案不分级（没有 "still thinking" / "almost done" 这种渐进文案 —— 这点 **octocode 反而做得好**）。
 - Spinner 在非 fullscreen 模式有重绘开销。
 
-### 14.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §2.6 的 status_bar 渐进文案（"thinking → still thinking → almost done"）**比 Claude Code 还细**，保留。但要补的：
+### 14.5 对 octocode 的启示
+octocode 现状档案 §2.6 的 status_bar 渐进文案（"thinking → still thinking → almost done"）**比 Claude Code 还细**，保留。但要补的：
 1. **多形状 spinner** —— `✻ ∙ ✢ ✽` + 6 态颜色。
 2. **session recap**：实现 `cli recap` / `/recap` 命令，自动在 idle 3min 回来时生成（用 DeepSeek Flash 跑摘要，开销小）。
-3. **thinking 默认折叠**：deepseek-code 现状档案 §2.9 显示 `show_reasoning` 是个 boolean flag，但默认值在 app.rs 没看到 —— 应该默认 false，留 hotkey 展开。
+3. **thinking 默认折叠**：octocode 现状档案 §2.9 显示 `show_reasoning` 是个 boolean flag，但默认值在 app.rs 没看到 —— 应该默认 false，留 hotkey 展开。
 
 ---
 
@@ -633,12 +633,12 @@ deepseek-code 现状档案 §2.6 的 status_bar 渐进文案（"thinking → sti
 - TodoWrite vs. Task tool 的过渡期（`CLAUDE_CODE_ENABLE_TASKS=1` 提前切到新版）—— 文档充满 "deprecated in favor of..." 噪音。
 - `/plan` 入口和 Shift+Tab 入口的关系略乱（一个是 single-prompt 入口，一个是 session-wide）。
 
-### 15.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §2.10 的 plan_tracker（plan 2/5、进度条、step kind 自动识别、动态 6 行窗口）**视觉细节比 Claude Code 还细**。但应该补的：
+### 15.5 对 octocode 的启示
+octocode 现状档案 §2.10 的 plan_tracker（plan 2/5、进度条、step kind 自动识别、动态 6 行窗口）**视觉细节比 Claude Code 还细**。但应该补的：
 1. **Plan approval 5 选 1 dialog**：抄 Claude Code 的 "Approve & auto / accept edits / manual review / keep planning / refine elsewhere"，对应 §2.10 的 PlanAction DecisionKind。
 2. **`Ctrl+G` 编辑 plan**：调用系统 `$EDITOR` 打开 plan 文本。
 3. **Task list 持久化跨 compaction**（痛点 21 的延伸）：现状档案 §3.4 提到 BackgroundQueue / TaskStatus，但持久化机制未读完 —— 建议确认是否跨 compact 保留。
-4. **`CLAUDE_CODE_TASK_LIST_ID` 等价物**：deepseek-code 的 task list 是 session-scoped 还是 project-scoped？应该支持 `--task-list-id` 来共享于多 session。
+4. **`CLAUDE_CODE_TASK_LIST_ID` 等价物**：octocode 的 task list 是 session-scoped 还是 project-scoped？应该支持 `--task-list-id` 来共享于多 session。
 
 ---
 
@@ -710,14 +710,14 @@ Markdown 系统 prompt 正文...
 - frontmatter 字段很多（~16 个），学习曲线陡。
 - Agent view 各 session 独立计费 —— 「Each session uses your subscription quota independently」—— 容易超 quota。
 
-### 16.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §3.1 列了 5 套并行抽象（subagent / team / swarm / lanes / task_tool），**严重过度工程**。建议收敛路线：
-1. **直接采用 Claude Code 的 frontmatter schema** —— deepseek-code 现状档案 §2.12 已经有 SubagentCard 数据结构，把 backend 的 `SubagentConfig` 改成同样的 YAML schema，删除 `team.rs`，把 `swarm.rs` 降级为 internal scheduler。
+### 16.5 对 octocode 的启示
+octocode 现状档案 §3.1 列了 5 套并行抽象（subagent / team / swarm / lanes / task_tool），**严重过度工程**。建议收敛路线：
+1. **直接采用 Claude Code 的 frontmatter schema** —— octocode 现状档案 §2.12 已经有 SubagentCard 数据结构，把 backend 的 `SubagentConfig` 改成同样的 YAML schema，删除 `team.rs`，把 `swarm.rs` 降级为 internal scheduler。
 2. **`/agents` tabbed UI** —— Running tab + Library tab，现状档案 §2.12 的 subagent_cards 直接是 Running tab 的实现。
-3. **`isolation: worktree`** —— deepseek-code 没有 worktree 支持，这是 P1 改造大头，对应痛点 18 / 19。
-4. **`memory:` 字段** —— deepseek-code 目前没有 subagent persistent memory；建议加 `.deepseek/agent-memory/<name>/MEMORY.md`。
+3. **`isolation: worktree`** —— octocode 没有 worktree 支持，这是 P1 改造大头，对应痛点 18 / 19。
+4. **`memory:` 字段** —— octocode 目前没有 subagent persistent memory；建议加 `.deepseek/agent-memory/<name>/MEMORY.md`。
 5. **`--agents '<JSON>'`** —— 临时注入 subagent 定义（CI/headless 场景）。
-6. **Background agent view** —— deepseek-code 现状档案 §3.4 有 BackgroundQueue / TaskStatus，缺一个 "dispatch + monitor + attach" 的 takeover UI。
+6. **Background agent view** —— octocode 现状档案 §3.4 有 BackgroundQueue / TaskStatus，缺一个 "dispatch + monitor + attach" 的 takeover UI。
 
 ---
 
@@ -794,13 +794,13 @@ deepseek-code 现状档案 §3.1 列了 5 套并行抽象（subagent / team / sw
 - auto mode 仅限 Anthropic API（不能 Bedrock/Vertex），企业部署可能受限。
 - Protected paths 列表是写死的（虽然管理员可以管 managed settings）—— 想加 `.envrc` 一类自定义难。
 
-### 17.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §3.5 的 policy/approvals.rs（4 actions × 7 risks + autonomy 三档）+ `defense/perimeter.rs` 静态扫描 + `defense/identity.rs` prompt-injection 防御，**安全模型实际上比 Claude Code 还细**，但缺：
+### 17.5 对 octocode 的启示
+octocode 现状档案 §3.5 的 policy/approvals.rs（4 actions × 7 risks + autonomy 三档）+ `defense/perimeter.rs` 静态扫描 + `defense/identity.rs` prompt-injection 防御，**安全模型实际上比 Claude Code 还细**，但缺：
 1. **`permissions.allow / ask / deny` 白名单 schema**（痛点 19、20）—— 直接抄 Claude Code 的 rule syntax，特别是 `Bash(npm run *)` 这种命令通配 + `Read(./src/**/*.ts)` 这种路径 glob。
-2. **Auto mode classifier**：deepseek-code 已有 ComplexityRouter（差异化设计），可改造为「risk classifier」：用一个轻量模型（DeepSeek Flash？）对每个 action 评估，类似 Claude Code 的两层（broad classifier + boundary statements）。
+2. **Auto mode classifier**：octocode 已有 ComplexityRouter（差异化设计），可改造为「risk classifier」：用一个轻量模型（DeepSeek Flash？）对每个 action 评估，类似 Claude Code 的两层（broad classifier + boundary statements）。
 3. **Protected paths**：当前现状档案 §3.9 PathsConfig 已有 protected list（用户可配），保留但加 default list（`.git`、`.deepseek`、`.gitconfig`、shell rc）。
 4. **`Recently denied` 回顾 + retry**：对应现状档案 §2.11 的审批面板，加一个 history view。
-5. **`/fewer-permission-prompts` 转录扫描**：deepseek-code 的 events.jsonl 已经持久化，可以写一个 skill 扫历史。
+5. **`/fewer-permission-prompts` 转录扫描**：octocode 的 events.jsonl 已经持久化，可以写一个 skill 扫历史。
 6. **dropped broad rules**：当进入"较宽 mode"时自动收紧之前用户加的过宽 allow rule（防止全局 `run_command(*)` 被默默放行）。
 
 ---
@@ -832,8 +832,8 @@ deepseek-code 现状档案 §3.5 的 policy/approvals.rs（4 actions × 7 risks 
 - 没有 CLI 内 file tree —— 大型项目导航靠 `@` mention + `Glob` 工具。
 - worktree 仅 git，其它 VCS 要写 `WorktreeCreate` hook。
 
-### 18.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §2.16 的 file_tree.rs 已经实现（懒加载 + git_ignore + 排序），但 sidebar 没启用，**痛点 5 「不走 palette」 + 「在 layout 中未启用」**。建议：
+### 18.5 对 octocode 的启示
+octocode 现状档案 §2.16 的 file_tree.rs 已经实现（懒加载 + git_ignore + 排序），但 sidebar 没启用，**痛点 5 「不走 palette」 + 「在 layout 中未启用」**。建议：
 1. **保持 sidebar 实现但不默认启用**（与 Claude Code 一致：CLI 不要 sidebar）。
 2. **加 `/add-dir` 命令** + `--add-dir` flag：现状档案 §1.3 没有这个能力。
 3. **加 `--worktree` 支持**：这是一个完整的新子系统（git 命令封装 + WorktreeCreate hook），对应 §16 sub-agents 的 `isolation: worktree`。
@@ -882,12 +882,12 @@ deepseek-code 现状档案 §2.16 的 file_tree.rs 已经实现（懒加载 + gi
 - 字段太多（settings.json 单页 124 KB）—— 没有按"任务"分类的 cheatsheet，新用户难快速上手。
 - TOML vs JSON 之争：Claude Code 选 JSON（schema 友好），但 JSON 写注释不便（要靠 `_comment` 字段 hack）。
 
-### 19.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §3.9 storage/config.rs（12+ 配置节）**层级已经成熟**，但缺：
+### 19.5 对 octocode 的启示
+octocode 现状档案 §3.9 storage/config.rs（12+ 配置节）**层级已经成熟**，但缺：
 1. **明确的 4 scope 层级**：现状档案 §3.9 直接说「缺少 user-level vs project-level 优先级机制」—— 抄 Claude Code 的 4 scope，TOML 文件加一份 `.deepseek/config.local.toml` (gitignored)。
-2. **`$schema` JSON Schema / TOML Schema**：deepseek-code 用 TOML，可以发布 `taplo` 的 schema 让 editor 验证。
+2. **`$schema` JSON Schema / TOML Schema**：octocode 用 TOML，可以发布 `taplo` 的 schema 让 editor 验证。
 3. **MDM 部署支持** —— 优先级低，企业付费客户多了再做。
-4. **`autoMemoryDirectory` 路径注入防御** —— 直接抄：deepseek-code 的 `[paths]` 节里如果加 memory 目录，**必须只接受 user/managed scope，不接受 project/local**。
+4. **`autoMemoryDirectory` 路径注入防御** —— 直接抄：octocode 的 `[paths]` 节里如果加 memory 目录，**必须只接受 user/managed scope，不接受 project/local**。
 5. **5 个自动 backup**：现状档案没看到 backup 机制 —— 加一个简单的 `~/.deepseek/backups/config-YYYYMMDD-HHmmss.toml.bak`，保留 5 个。
 
 ---
@@ -953,11 +953,11 @@ deepseek-code 现状档案 §3.9 storage/config.rs（12+ 配置节）**层级已
 - 32 个工具 + 各种 alias / deprecated（TodoWrite vs TaskCreate）—— 学习曲线。
 - `PowerShell` / `Monitor` / `TeamCreate` 等都是 opt-in，文档分散。
 
-### 20.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §3.7 的 tools/dispatch.rs（17 个内置工具 + self-heal）**远不够**。建议补：
-1. **`Monitor` 等价物**：deepseek-code 现状档案 §2.6 的 status_bar / app.rs 已有 background 概念，加一个真正的 `monitor` tool（spawn process + 按行回流到 conversation）—— 这是 `/loop` 自适应间隔的基础。
+### 20.5 对 octocode 的启示
+octocode 现状档案 §3.7 的 tools/dispatch.rs（17 个内置工具 + self-heal）**远不够**。建议补：
+1. **`Monitor` 等价物**：octocode 现状档案 §2.6 的 status_bar / app.rs 已有 background 概念，加一个真正的 `monitor` tool（spawn process + 按行回流到 conversation）—— 这是 `/loop` 自适应间隔的基础。
 2. **`AskUserQuestion`** 结构化 clarification —— 现状档案 §2.10 已有 `render_options_panel` Clarification kind，加一个 tool 调用入口。
-3. **`Glob` / `Grep` 替换原生 binaries**：deepseek-code 已用 `walkdir / ignore / glob` crate，性能应该不输，但可以考虑发布时 embed `bfs/ugrep` 二进制做 fallback。
+3. **`Glob` / `Grep` 替换原生 binaries**：octocode 已用 `walkdir / ignore / glob` crate，性能应该不输，但可以考虑发布时 embed `bfs/ugrep` 二进制做 fallback。
 4. **`NotebookEdit` / `LSP` / `PowerShell`** —— optional，做长尾。
 5. **统一的 background bash**：现状档案 §3.4 BackgroundQueue 存在，要做成 `Ctrl+B` 一键背景 + 5GB cutoff。
 6. **`github_pr` mega-tool 拆分**：现状档案 §3.7 已经标记为问题，按 `action` 字段拆成 `gh_pr_list / gh_pr_get / gh_pr_diff / gh_pr_comment`。
@@ -1062,8 +1062,8 @@ claude mcp reset-project-choices
 - 配置复杂：4 scope + OAuth 三种模式 + `headersHelper` —— 文档密集。
 - `headersHelper` 安全模型脆弱（project scope 用时需要 workspace trust）。
 
-### 21.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §3.8 直接说「**MCP 只支持 stdio**」—— **这是最大单点差距**。修复路线（应该是 P0 中的 P0）：
+### 21.5 对 octocode 的启示
+octocode 现状档案 §3.8 直接说「**MCP 只支持 stdio**」—— **这是最大单点差距**。修复路线（应该是 P0 中的 P0）：
 1. **加 HTTP transport**：使用 `reqwest`（已依赖）实现 streamable HTTP + SSE 客户端。SSE 用 `tokio` + `reqwest::Response::bytes_stream()`。
 2. **加 OAuth 2.1**：用 `oauth2` Rust crate。完整的：自动发现 metadata、Dynamic Client Registration、固定 callback port、scope pin。token 存到 keyring（已有依赖）。
 3. **加 4 scope 体系**：local/project/user/plugin —— 现状档案 §3.9 的 McpConfig 只支持 local-ish，要拆。
@@ -1107,8 +1107,8 @@ deepseek-code 现状档案 §3.8 直接说「**MCP 只支持 stdio**」—— **
 - 4 plan + 3 provider + 4 admin layers，文档矩阵复杂。
 - token rotation 错配场景多（OAuth refresh race，但 v2.1.128 修了）。
 
-### 22.5 对 deepseek-code 的启示
-deepseek-code 现状档案痛点「OAuth 登录」明确缺。建议：
+### 22.5 对 octocode 的启示
+octocode 现状档案痛点「OAuth 登录」明确缺。建议：
 1. **`auth login/logout/status` 三件套** + `--api-key` (现有) + `--web`（OAuth）。
 2. **DeepSeek 账户 OAuth**：如果 DeepSeek 没有 OAuth endpoint 就只能 API key + Claude.ai 风格的 long-lived token。
 3. **`apiKeyHelper`** —— 企业短期 token rotation，直接抄 Claude Code 的 shell script schema。
@@ -1154,8 +1154,8 @@ deepseek-code 现状档案痛点「OAuth 登录」明确缺。建议：
 - session 文件格式（jsonl）专有，没有 round-trip 编辑工具。
 - 大 session resume 慢（v2.1.114 起优化 67%，但仍可能秒级）。
 
-### 23.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §3.4 / §3.9 已经有 sessions / transcripts / events.jsonl 持久化。补的：
+### 23.5 对 octocode 的启示
+octocode 现状档案 §3.4 / §3.9 已经有 sessions / transcripts / events.jsonl 持久化。补的：
 1. **`--from-pr`** —— 抄。需要 link session ↔ PR 的机制：commit/PR 创建时把 session_id 写到 commit footer 或 PR description。
 2. **`--fork-session`** —— `--resume` 时加 `--fork-session` 不复用 ID。
 3. **`/branch`** —— 在 transcript 当前位置分叉。
@@ -1200,12 +1200,12 @@ deepseek-code 现状档案 §3.4 / §3.9 已经有 sessions / transcripts / even
 - `/usage` 数据局部（不能精确预测 5h 用完）。
 - effort slider 在 non-fullscreen 模式 UX 一般。
 
-### 24.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §2.7 statusline 已有 11 chip 显示 cost / context %，但**没有 `/usage breakdown`**。建议：
+### 24.5 对 octocode 的启示
+octocode 现状档案 §2.7 statusline 已有 11 chip 显示 cost / context %，但**没有 `/usage breakdown`**。建议：
 1. **`/usage` 命令**：tab 化（Cost / Limits / Stats），breakdown 显示什么在烧 token。
 2. **`/context all` grid 可视化**：把 transcript 内每条 message 的 token 占用画成 colored grid，找 bloat。
 3. **`--max-budget-cny`** 等价（用 CNY）—— 现状档案 §2.7 已 ¥ 硬编码，这条延续。
-4. **Effort slider**：deepseek-code 当前用 thinking on/off 二值；可改成 4 档 + slider。
+4. **Effort slider**：octocode 当前用 thinking on/off 二值；可改成 4 档 + slider。
 
 ---
 
@@ -1272,14 +1272,14 @@ paths:
 - 4 scope + auto memory + rules 三层叠加，新用户难理解什么在生效。
 - auto memory 写错时（学了错的 build 命令）需要手动清理。
 
-### 25.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §1.3 已有 AGENTS.md 概念（welcome page 显示状态）；但**没有 auto memory** —— **核心差距**。建议路线：
+### 25.5 对 octocode 的启示
+octocode 现状档案 §1.3 已有 AGENTS.md 概念（welcome page 显示状态）；但**没有 auto memory** —— **核心差距**。建议路线：
 1. **CLAUDE.md / AGENTS.md / `.deepseek/rules/*.md` 三件套**（用 AGENTS.md 做项目主入口，CLAUDE.md 兼容 import）。
 2. **Auto memory**：在 `~/.deepseek/projects/<hash>/memory/MEMORY.md` 累积；写入触发条件：用户说 "remember that..." / "always..." / 在 conversation 中明确教学。
 3. **`.deepseek/rules/*.md` + `paths:` frontmatter** —— modular。
 4. **`InstructionsLoaded` hook** —— debug 用。
 5. **`autoMemoryDirectory` 路径注入防御** —— 抄。
-6. **`/memory` 命令**：deepseek-code 已经有 `/memory` 命令（现状档案 §3.10）—— 确保实现深度到位（不只是 placeholder）。
+6. **`/memory` 命令**：octocode 已经有 `/memory` 命令（现状档案 §3.10）—— 确保实现深度到位（不只是 placeholder）。
 
 ---
 
@@ -1349,14 +1349,14 @@ deepseek-code 现状档案 §1.3 已有 AGENTS.md 概念（welcome page 显示�
 - 19 events 学习成本高，每个 event 的 input/output schema 不同。
 - shell hooks 的安全模型靠 `$CLAUDE_PROJECT_DIR` 等约定，project-scope hook 第一次跑前要 workspace trust。
 
-### 26.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §3.10 已有 `/hooks` 命令但实现深度未知。建议**整套抄 Claude Code 的 hook schema**：
-1. **19 events 全集**：是 deepseek-code 的差异化升级机会 —— 比现有 hooks 少肯定有。
+### 26.5 对 octocode 的启示
+octocode 现状档案 §3.10 已有 `/hooks` 命令但实现深度未知。建议**整套抄 Claude Code 的 hook schema**：
+1. **19 events 全集**：是 octocode 的差异化升级机会 —— 比现有 hooks 少肯定有。
 2. **`if` field**：permission rule syntax 限定 matcher。
 3. **`mcp_tool` type**：现状档案 §3.8 MCP 只 stdio，但 hook 调 MCP tool 是个差异化好设计。
 4. **`updatedToolInput` / `updatedToolOutput`**：PreToolUse 可改参数，PostToolUse 可改输出 —— 直接对接现状档案 §3.6 defense/output.rs。
 5. **`InstructionsLoaded` hook** —— debug。
-6. **Hook input JSON 通过 stdin、output 通过 stdout/exit code**：deepseek-code 用 Rust，可以直接 spawn shell + pipe，跟 Claude Code 模式一致。
+6. **Hook input JSON 通过 stdin、output 通过 stdout/exit code**：octocode 用 Rust，可以直接 spawn shell + pipe，跟 Claude Code 模式一致。
 
 ---
 
@@ -1409,8 +1409,8 @@ deepseek-code 现状档案 §3.10 已有 `/hooks` 命令但实现深度未知。
 - Plugin schema 大（10+ component 类型）—— 学习曲线。
 - Plugin security model：所有可执行（bin/、hooks shell command、MCP servers）跑用户权限 —— 信任 marketplace 关键。
 
-### 27.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §3.10 已有 `/plugins` 命令但实现深度未知。建议路线（这是大工程，P1 后期）：
+### 27.5 对 octocode 的启示
+octocode 现状档案 §3.10 已有 `/plugins` 命令但实现深度未知。建议路线（这是大工程，P1 后期）：
 1. **Plugin schema 完全照抄 Claude Code**：`.deepseek-plugin/plugin.json` + skills/agents/hooks/.mcp.json/etc.
 2. **`--plugin-dir / --plugin-url` flag**。
 3. **Channels** —— 等 MCP push 通信先做。
@@ -1465,9 +1465,9 @@ deepseek-code 现状档案 §3.10 已有 `/plugins` 命令但实现深度未知�
 - VS Code 扩展是闭源，不能改。
 - JetBrains 比 VS Code 体验差（只是 terminal embed）。
 
-### 28.5 对 deepseek-code 的启示
-deepseek-code 现状档案痛点中明确缺 IDE 扩展。路线（长期）：
-1. **VS Code 扩展**（同时跑在 Cursor / Windsurf）—— TypeScript + Spawn deepseek-code CLI。
+### 28.5 对 octocode 的启示
+octocode 现状档案痛点中明确缺 IDE 扩展。路线（长期）：
+1. **VS Code 扩展**（同时跑在 Cursor / Windsurf）—— TypeScript + Spawn octocode CLI。
 2. **JetBrains 插件**：直接 embed CLI in terminal（简单）。
 3. **`/ide` 命令**：CLI 自查 IDE 连接状态。
 4. **`Option+K` 选中即 @-mention** —— 设计简单，重要。
@@ -1529,8 +1529,8 @@ deepseek-code 现状档案痛点中明确缺 IDE 扩展。路线（长期）：
 - TLS 不解密 —— 防泄漏不彻底（hostname-based only）。
 - WSL1 不支持 —— 老 Windows 用户被排除。
 
-### 29.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §3.5 / §3.6 的 policy + defense 5 层是**静态扫描** —— 绕过容易（恶意 prompt 让 Claude 把 dangerous command 包装成"看起来安全"的形式就能过）。**这是真正的安全模型差距**。
+### 29.5 对 octocode 的启示
+octocode 现状档案 §3.5 / §3.6 的 policy + defense 5 层是**静态扫描** —— 绕过容易（恶意 prompt 让 Claude 把 dangerous command 包装成"看起来安全"的形式就能过）。**这是真正的安全模型差距**。
 1. **加 OS-level sandbox**：macOS Seatbelt + Linux bubblewrap，等价 Claude Code 实现 —— P1 大头。
 2. **`--allow-dangerously-skip-permissions`** 语义：cycle 加入但不激活。
 3. **`failIfUnavailable`**：企业部署 hard gate。
@@ -1574,8 +1574,8 @@ deepseek-code 现状档案 §3.5 / §3.6 的 policy + defense 5 层是**静态�
 - Auto-compact 阈值不可调（仅靠用户主动 `/compact`）。
 - Compact 后某些 conversation-only instruction 丢失，要写到 CLAUDE.md 才稳。
 
-### 30.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §3.7 有 `apply_patch` / `edit_file` 自愈，但 compact / context 满处理不明。建议：
+### 30.5 对 octocode 的启示
+octocode 现状档案 §3.7 有 `apply_patch` / `edit_file` 自愈，但 compact / context 满处理不明。建议：
 1. **`/compact` + targeted summarize from rewind menu**（结合 §15 的 Esc+Esc）。
 2. **`PreCompact` hook** —— 用户可拦截。
 3. **`/context` grid 可视化** —— 找谁在烧。
@@ -1620,10 +1620,10 @@ deepseek-code 现状档案 §3.7 有 `apply_patch` / `edit_file` 自愈，但 co
 - supervisor 模型复杂（涉及 IPC / PID 管理 / 日志路径）。
 - 每个 background session 独立计费 quota —— 容易超限。
 
-### 31.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §3.4 有 BackgroundQueue 但**没有 supervisor 进程**。建议：
+### 31.5 对 octocode 的启示
+octocode 现状档案 §3.4 有 BackgroundQueue 但**没有 supervisor 进程**。建议：
 1. **Supervisor 模式**：独立进程托管 background sessions / tasks。
-2. **`claude agents` 等价表格 UI**：deepseek-code 现状档案 §2.12 subagent_cards 是基础，要扩展到 session-level。
+2. **`claude agents` 等价表格 UI**：octocode 现状档案 §2.12 subagent_cards 是基础，要扩展到 session-level。
 3. **Monitor tool**：见 §20。
 4. **PR status dot** in agent view rows —— 链接到 PR。
 
@@ -1669,12 +1669,12 @@ deepseek-code 现状档案 §3.4 有 BackgroundQueue 但**没有 supervisor 进�
 - 命令行 flag 多到记不住。
 - Python/TS SDK API 升级时 migration cost（v1 → v2 迁移 guide 存在）。
 
-### 32.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §1.3 已经支持 `chat`/`ask`/`run` 等子命令 + json output 部分。建议补：
+### 32.5 对 octocode 的启示
+octocode 现状档案 §1.3 已经支持 `chat`/`ask`/`run` 等子命令 + json output 部分。建议补：
 1. **`--bare` 模式** —— 直接抄。
 2. **`--output-format json|stream-json|text`** —— stream-json 是关键，event-driven 输出。
-3. **`--json-schema`**：deepseek-code Pro 有 json mode，可以利用。
-4. **`--init-only` / `--init` / `--maintenance`** —— 配合 deepseek-code 的 hook lifecycle。
+3. **`--json-schema`**：octocode Pro 有 json mode，可以利用。
+4. **`--init-only` / `--init` / `--maintenance`** —— 配合 octocode 的 hook lifecycle。
 5. **Python / TypeScript SDK**：长期工程，先做 CLI 流式 stable。
 
 ---
@@ -1718,12 +1718,12 @@ deepseek-code 现状档案 §1.3 已经支持 `chat`/`ask`/`run` 等子命令 + 
 - env vars 极多（env-vars.md 168 KB —— 几百个），无人 navigable。
 - privacy settings 仅 Pro/Max 可见。
 
-### 33.5 对 deepseek-code 的启示
-deepseek-code 现状档案 §3.9 已有 TelemetryConfig，但不深。建议：
+### 33.5 对 octocode 的启示
+octocode 现状档案 §3.9 已有 TelemetryConfig，但不深。建议：
 1. **OTLP 标准遥测** —— 用 `opentelemetry-rust` crate。
 2. **Category-filtered debug** —— 直接抄 `--debug "api,mcp,!filesystem"`。
 3. **`/heapdump` 等价**：Rust 用 `jemalloc` 输出。
-4. **`/feedback` 带 session 上下文**：deepseek-code 的 events.jsonl 已经有，加一个上传/导出命令。
+4. **`/feedback` 带 session 上下文**：octocode 的 events.jsonl 已经有，加一个上传/导出命令。
 5. **Subprocess OTEL 隔离** —— 直接抄逻辑：spawn 时 unset `OTEL_*`。
 
 ---
@@ -1806,8 +1806,8 @@ deepseek-code 现状档案 §3.9 已有 TelemetryConfig，但不深。建议：
 - 🆕 **PowerShell tool** preview
 - 🆕 **Conditional hooks**（`if` field）
 
-### 34.2 对 deepseek-code 的整合启示
-最近 7 周特性中**对 deepseek-code 价值排序**（按 ROI）：
+### 34.2 对 octocode 的整合启示
+最近 7 周特性中**对 octocode 价值排序**（按 ROI）：
 1. **Auto mode classifier** —— 用 DeepSeek Flash 做 risk classifier。
 2. **Custom themes**（`~/.deepseek/themes/<name>.toml`）+ Plugin themes。
 3. **Session recap / `/recap`** —— 3min idle 回来自动 summary。
@@ -1821,9 +1821,9 @@ deepseek-code 现状档案 §3.9 已有 TelemetryConfig，但不深。建议：
 
 ---
 
-## TL;DR：Claude Code 最值得 deepseek-code 偷的 12 个设计
+## TL;DR：Claude Code 最值得 octocode 偷的 12 个设计
 
-按"对 deepseek-code 21 项痛点 ROI"排序：
+按"对 octocode 21 项痛点 ROI"排序：
 
 1. **`/` 触发斜杠命令 popover + fuzzy filter + argument hint**（解 §4 痛点 4、8）—— Claude Code 设计已成熟，slash command panel 在 `plan_tracker.rs` 已经画了，只差 input.rs 触发。
 2. **`@` mention popover + fuzzy + 行号范围 `#5-10`**（解痛点 5）—— `mention_prefix_at_cursor` 后端已实现。
@@ -1840,11 +1840,11 @@ deepseek-code 现状档案 §3.9 已有 TelemetryConfig，但不深。建议：
 
 ## TL;DR：Claude Code 我们绝对不要抄的 5 个设计
 
-1. **70+ slash commands 全集**：deepseek-code 现状档案 §3.10 已有 48 个，**继续追平的边际收益很低**；先把每个做深，命名收敛（`/cost`/`/stats`/`/usage` 三 alias 这种就别学了）。
+1. **70+ slash commands 全集**：octocode 现状档案 §3.10 已有 48 个，**继续追平的边际收益很低**；先把每个做深，命名收敛（`/cost`/`/stats`/`/usage` 三 alias 这种就别学了）。
 2. **TodoWrite vs. TaskCreate 双系统过渡期**：直接选**一套**新版（TaskCreate/TaskGet/TaskList/TaskUpdate）做完整实现，不要留 deprecated 别名。
-3. **VS Code 扩展自带 CLI 二进制**：deepseek-code 是 Rust 二进制，VS Code 扩展应该 spawn 系统 PATH 上的 `dscode`，**不要打包二进制进 VSIX**（增加 80MB+ 体积，签名也麻烦）。
-4. **agent teams 实验特性（`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`）**：deepseek-code swarm.rs 已经太重，**不要再追 teammate 互发消息这种实验**，先把单个 subagent 体验做好。
-5. **`Bash` 与 `PowerShell` 双工具**：deepseek-code 跨平台只用 `run_command`（内部按 OS 选 shell），**不要为 Windows 单开 tool**，把抽象做好即可。
+3. **VS Code 扩展自带 CLI 二进制**：octocode 是 Rust 二进制，VS Code 扩展应该 spawn 系统 PATH 上的 `octocode`，**不要打包二进制进 VSIX**（增加 80MB+ 体积，签名也麻烦）。
+4. **agent teams 实验特性（`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`）**：octocode swarm.rs 已经太重，**不要再追 teammate 互发消息这种实验**，先把单个 subagent 体验做好。
+5. **`Bash` 与 `PowerShell` 双工具**：octocode 跨平台只用 `run_command`（内部按 OS 选 shell），**不要为 Windows 单开 tool**，把抽象做好即可。
 
 ## 调研盲区
 

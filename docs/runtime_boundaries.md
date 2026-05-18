@@ -1,6 +1,6 @@
 # Runtime Boundaries
 
-DS is moving toward one local-first runtime kernel shared by CLI, TUI, saved
+Octocode is moving toward one local-first runtime kernel shared by CLI, TUI, saved
 tasks, and missions. This document defines the decision boundaries for the
 implementation.
 

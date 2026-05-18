@@ -1,12 +1,14 @@
 /// Credential storage using the system keyring, with env var fallback.
 ///
 /// Priority:
-/// 1. `DEEPSEEK_API_KEY` environment variable
+/// 1. Provider-specific environment variables
 /// 2. System keyring (platform-specific secure storage)
 /// 3. Config file (not recommended, but allowed as last resort)
 use std::path::{Path, PathBuf};
 
-const KEYRING_SERVICE: &str = "deepseek-code";
+use crate::provider::ProviderKind;
+
+const KEYRING_SERVICE: &str = "octocode";
 const KEYRING_USERNAME: &str = "api-key";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,7 +44,14 @@ impl ApiKeyStoreLocation {
 }
 
 pub fn get_api_key(config_value: Option<&str>) -> Option<String> {
-    if let Some(key) = get_env_api_key() {
+    get_api_key_for_provider(ProviderKind::DeepSeek, config_value)
+}
+
+pub fn get_api_key_for_provider(
+    provider: ProviderKind,
+    config_value: Option<&str>,
+) -> Option<String> {
+    if let Some(key) = get_env_api_key_for_provider(provider) {
         return Some(key);
     }
 
@@ -54,17 +63,49 @@ pub fn get_api_key(config_value: Option<&str>) -> Option<String> {
 }
 
 pub fn get_api_key_without_keyring(config_value: Option<&str>) -> Option<String> {
-    get_env_api_key().or_else(|| get_config_api_key(config_value))
+    get_api_key_without_keyring_for_provider(ProviderKind::DeepSeek, config_value)
+}
+
+pub fn get_api_key_without_keyring_for_provider(
+    provider: ProviderKind,
+    config_value: Option<&str>,
+) -> Option<String> {
+    get_env_api_key_for_provider(provider).or_else(|| get_config_api_key(config_value))
+}
+
+#[must_use]
+pub fn api_key_env_hint(provider: ProviderKind) -> &'static str {
+    env_candidates_for_provider(provider)
+        .first()
+        .copied()
+        .unwrap_or("DEEPSEEK_API_KEY")
 }
 
 pub fn get_env_api_key() -> Option<String> {
-    if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
-        if !key.trim().is_empty() {
-            tracing::debug!("using API key from DEEPSEEK_API_KEY env var");
-            return Some(key.trim().to_string());
+    get_env_api_key_for_provider(ProviderKind::DeepSeek)
+}
+
+pub fn get_env_api_key_for_provider(provider: ProviderKind) -> Option<String> {
+    for var_name in env_candidates_for_provider(provider) {
+        if let Ok(key) = std::env::var(var_name) {
+            if !key.trim().is_empty() {
+                tracing::debug!("using API key from {} env var", var_name);
+                return Some(key.trim().to_string());
+            }
         }
     }
     None
+}
+
+fn env_candidates_for_provider(provider: ProviderKind) -> &'static [&'static str] {
+    match provider {
+        ProviderKind::DeepSeek => &["DEEPSEEK_API_KEY"],
+        ProviderKind::Qwen => &["DASHSCOPE_API_KEY", "BAILIAN_API_KEY", "QWEN_API_KEY"],
+        ProviderKind::Kimi => &["MOONSHOT_API_KEY", "KIMI_API_KEY"],
+        ProviderKind::Zhipu => &["ZAI_API_KEY", "ZHIPUAI_API_KEY", "ZHIPU_API_KEY"],
+        ProviderKind::OpenRouter => &["OPENROUTER_API_KEY"],
+        ProviderKind::OpenAiCompatible => &["OPENAI_API_KEY"],
+    }
 }
 
 pub fn get_keyring_api_key() -> Option<String> {
@@ -96,8 +137,12 @@ fn get_config_api_key(config_value: Option<&str>) -> Option<String> {
 
 pub fn get_effective_api_key(project_root: Option<&Path>) -> Option<String> {
     let config = project_root.and_then(|root| crate::storage::Config::load(Some(root)).ok());
+    let provider = config
+        .as_ref()
+        .map(|config| config.provider.default)
+        .unwrap_or_default();
     let config_value = config.as_ref().and_then(config_api_key);
-    get_api_key(config_value)
+    get_api_key_for_provider(provider, config_value)
 }
 
 pub fn config_api_key(config: &crate::storage::Config) -> Option<&str> {
@@ -205,7 +250,7 @@ pub fn store_api_key_in_project_local_config(
     key: &str,
 ) -> Result<PathBuf, anyhow::Error> {
     let project_root = crate::storage::config::normalize_project_root(project_root);
-    let config_dir = project_root.join(".deepseek-code");
+    let config_dir = project_root.join(".octocode");
     std::fs::create_dir_all(&config_dir)?;
     let path = config_dir.join("local.toml");
 
@@ -253,7 +298,7 @@ mod tests {
         let path =
             store_api_key_in_project_local_config(root.path(), "sk-local").expect("store api key");
 
-        assert_eq!(path, root.path().join(".deepseek-code").join("local.toml"));
+        assert_eq!(path, root.path().join(".octocode").join("local.toml"));
         let loaded = crate::storage::Config::load(Some(root.path())).expect("load config");
         assert_eq!(loaded.api_key.as_deref(), Some("sk-local"));
     }
@@ -261,14 +306,14 @@ mod tests {
     #[test]
     fn project_local_config_normalizes_config_dir_root() {
         let root = tempfile::tempdir().expect("tempdir");
-        let config_dir = root.path().join(".deepseek-code");
+        let config_dir = root.path().join(".octocode");
         std::fs::create_dir_all(&config_dir).expect("create config dir");
 
         let path =
             store_api_key_in_project_local_config(&config_dir, "sk-local").expect("store api key");
 
         assert_eq!(path, config_dir.join("local.toml"));
-        assert!(!config_dir.join(".deepseek-code").exists());
+        assert!(!config_dir.join(".octocode").exists());
         let loaded = crate::storage::Config::load(Some(&config_dir)).expect("load config");
         assert_eq!(loaded.api_key.as_deref(), Some("sk-local"));
     }
@@ -276,7 +321,7 @@ mod tests {
     #[test]
     fn project_local_config_preserves_existing_sections() {
         let root = tempfile::tempdir().expect("tempdir");
-        let config_dir = root.path().join(".deepseek-code");
+        let config_dir = root.path().join(".octocode");
         std::fs::create_dir_all(&config_dir).expect("create config dir");
         std::fs::write(
             config_dir.join("local.toml"),
@@ -295,7 +340,7 @@ mod tests {
     #[test]
     fn project_local_api_key_does_not_reset_project_config() {
         let root = tempfile::tempdir().expect("tempdir");
-        let config_dir = root.path().join(".deepseek-code");
+        let config_dir = root.path().join(".octocode");
         std::fs::create_dir_all(&config_dir).expect("create config dir");
         std::fs::write(
             config_dir.join("config.toml"),

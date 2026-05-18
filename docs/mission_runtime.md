@@ -1,6 +1,6 @@
 # Mission Dry-Run Runtime
 
-`ds mission` records a local dry-run plan for long-running work. The current
+`octocode mission` records a local dry-run plan for long-running work. The current
 runtime is intentionally minimal: it does not execute model calls or edit files.
 It creates a durable mission record, writes a local-rule plan, appends events,
 and can replay those events into state.
@@ -8,16 +8,16 @@ and can replay those events into state.
 ## Commands
 
 ```bash
-ds mission new "refactor src/agent safely" --dry-run
-ds mission new "refactor src/agent safely" --dry-run --json
-ds mission status latest
-ds mission status <mission-id> --json
-ds mission inspect latest
-ds mission inspect latest --json
-ds mission inspect latest --events
-ds mission replay latest
-ds mission list
-ds mission list --json
+octocode mission new "refactor src/agent safely" --dry-run
+octocode mission new "refactor src/agent safely" --dry-run --json
+octocode mission status latest
+octocode mission status <mission-id> --json
+octocode mission inspect latest
+octocode mission inspect latest --json
+octocode mission inspect latest --events
+octocode mission replay latest
+octocode mission list
+octocode mission list --json
 ```
 
 Mission targets accept `latest`, a full mission id, or a unique id prefix.
@@ -27,7 +27,7 @@ Mission targets accept `latest`, a full mission id, or a unique id prefix.
 Mission records are project-local:
 
 ```text
-.deepseek-code/missions/
+.octocode/missions/
   index.json
   <mission-id>/
     mission.json
@@ -84,9 +84,9 @@ Use mission dry-runs before broad changes to preserve a durable plan and event
 timeline:
 
 ```bash
-ds mission new "review src/agent and storage for release safety" --dry-run
-ds mission inspect latest --events
-ds mission replay latest
+octocode mission new "review src/agent and storage for release safety" --dry-run
+octocode mission inspect latest --events
+octocode mission replay latest
 ```
 
 This is a foundation for future long-running execution. The current release only

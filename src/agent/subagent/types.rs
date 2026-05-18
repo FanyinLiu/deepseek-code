@@ -32,7 +32,7 @@ pub enum SubagentType {
     /// Security auditor — read-only scanner with veto recommendations.
     #[serde(rename = "security-auditor")]
     SecurityAuditor,
-    /// Custom agent loaded from `.deepseek-code/agents/`.
+    /// Custom agent loaded from `.octocode/agents/`.
     #[serde(rename = "custom")]
     Custom { name: String },
 }

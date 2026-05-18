@@ -28,8 +28,8 @@ cargo fmt --all --check
 cargo check --all-targets --all-features
 cargo test --all-features
 cargo clippy --all-targets --all-features -- -D warnings
-cargo run --bin deepseek-code -- --help
-cargo run --bin dscode -- --help
+cargo run --bin octocode -- --help
+cargo run --bin octocode -- --help
 ```
 
 Add or keep focused tests for:
@@ -53,7 +53,7 @@ Add or keep focused tests for:
 
 Use the real TUI, not a browser mock:
 
-1. Open `deepseek-code tui` in 80x24 and a wide terminal.
+1. Open `octocode tui` in 80x24 and a wide terminal.
 2. Check the welcome mascot, project context, starter prompts, and input hints.
 3. Type `/`, `/help`, `/status`, `/permissions`, `/agents`, `/compact`.
 4. Type multiline input with Shift+Enter and verify the cursor stays readable.

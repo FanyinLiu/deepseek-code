@@ -27,7 +27,7 @@ impl std::error::Error for AgentParseError {}
 /// Registry of subagent configurations.
 ///
 /// Built-in agents are always available. Project-specific agents can be
-/// loaded from `.deepseek-code/agents/*.toml` or `.deepseek-code/agents/*.md`.
+/// loaded from `.octocode/agents/*.toml` or `.octocode/agents/*.md`.
 #[derive(Debug, Clone)]
 pub struct SubagentRegistry {
     agents: HashMap<String, SubagentConfig>,
@@ -165,7 +165,7 @@ impl SubagentRegistry {
 
     #[must_use]
     pub fn agents_dir(project_root: &Path) -> std::path::PathBuf {
-        project_root.join(".deepseek-code").join("agents")
+        project_root.join(".octocode").join("agents")
     }
 
     pub fn load_markdown_agent_file(path: &Path) -> Result<SubagentConfig, AgentParseError> {

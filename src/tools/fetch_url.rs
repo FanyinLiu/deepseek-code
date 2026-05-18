@@ -12,7 +12,7 @@ pub async fn fetch_url(url: &str, max_chars: usize) -> Result<String, anyhow::Er
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .redirect(Policy::none())
-        .user_agent("deepseek-code/0.1.0")
+        .user_agent("octocode/0.1.0")
         .build()?;
 
     let mut current_url = parse_and_validate_url(url).await?;

@@ -150,10 +150,16 @@ pub enum MissionStatus {
     Created,
     /// A plan has been generated.
     Planned,
+    /// The mission has been started.
+    Running,
+    /// The mission is paused and can be resumed.
+    Paused,
     /// The mission finished successfully.
     Completed,
     /// The mission failed before completion.
     Failed,
+    /// The mission was cancelled before completion.
+    Cancelled,
 }
 
 impl MissionStatus {
@@ -163,8 +169,11 @@ impl MissionStatus {
         match self {
             Self::Created => "created",
             Self::Planned => "planned",
+            Self::Running => "running",
+            Self::Paused => "paused",
             Self::Completed => "completed",
             Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
         }
     }
 }

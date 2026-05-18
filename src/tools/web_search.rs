@@ -24,7 +24,7 @@ pub async fn web_search(query: &str, limit: usize) -> Result<String, anyhow::Err
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
-        .user_agent("deepseek-code/0.1.0")
+        .user_agent("octocode/0.1.0")
         .build()?;
 
     let response = client.get(&url).send().await?;

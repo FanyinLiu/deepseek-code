@@ -114,16 +114,25 @@ pub fn session_line(event: &SessionEvent) -> ReplayLine {
 pub fn mission_line(event: &MissionEvent) -> ReplayLine {
     ReplayLine {
         at: event.at,
-        text: mission_event_label(&event.kind).to_string(),
+        text: mission_event_label(&event.kind),
     }
 }
 
-fn mission_event_label(kind: &MissionEventKind) -> &'static str {
+fn mission_event_label(kind: &MissionEventKind) -> String {
     match kind {
-        MissionEventKind::MissionCreated { .. } => "mission_created",
-        MissionEventKind::PlanGenerated { .. } => "plan_generated",
-        MissionEventKind::MissionCompleted { .. } => "mission_completed",
-        MissionEventKind::MissionFailed { .. } => "mission_failed",
+        MissionEventKind::MissionCreated { .. } => "mission_created".to_string(),
+        MissionEventKind::PlanGenerated { .. } => "plan_generated".to_string(),
+        MissionEventKind::MissionStarted { .. } => "mission_started".to_string(),
+        MissionEventKind::MissionPaused { .. } => "mission_paused".to_string(),
+        MissionEventKind::MissionResumed { .. } => "mission_resumed".to_string(),
+        MissionEventKind::MissionNote { message } => format!("mission_note: {}", one_line(message)),
+        MissionEventKind::MissionCompleted { .. } => "mission_completed".to_string(),
+        MissionEventKind::MissionFailed { message, .. } => {
+            format!("mission_failed: {}", one_line(message))
+        }
+        MissionEventKind::MissionCancelled { message, .. } => {
+            format!("mission_cancelled: {}", one_line(message))
+        }
     }
 }
 

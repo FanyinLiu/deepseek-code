@@ -1,4 +1,4 @@
-# DS CLI Architecture Map
+# Octocode CLI Architecture Map
 
 This map freezes the current architecture before the team-agent workbench
 refactor. It is intentionally implementation-facing: every subsystem has one

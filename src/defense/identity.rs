@@ -1,13 +1,13 @@
 use crate::defense::input_filter::SanitizedInput;
 
-pub const AGENT_NAME: &str = "deepseek-code";
+pub const AGENT_NAME: &str = "octocode";
 pub const CREATOR: &str = "project-defined";
 pub const CORE_MISSION: &str = "Assist with software development tasks safely";
 
 const IDENTITY_OVERRIDE_SIGNATURES: &[&str] = &[
     "your name is",
     "you are now called",
-    "you are not deepseek-code",
+    "you are not octocode",
     "rename yourself",
     "agent name",
     "creator is",
@@ -96,7 +96,7 @@ mod tests {
 
     #[test]
     fn constants_are_immutable_contract_values() {
-        assert_eq!(AGENT_NAME, "deepseek-code");
+        assert_eq!(AGENT_NAME, "octocode");
         assert_eq!(CREATOR, "project-defined");
         assert_eq!(
             CORE_MISSION,

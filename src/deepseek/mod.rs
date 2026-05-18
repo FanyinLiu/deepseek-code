@@ -16,8 +16,8 @@ pub use models::{
     ChatResponse, Checkpoint, DeepSeekModel, ExecutionLane, FileSnapshot, FinishReason,
     MessageContent, MessageId, MessageVisibility, ModelCapability, ModelSwitchRecord,
     ProtocolMessage, ReasoningEffort, ReasoningState, ResponseFormat, Role, Session, SessionId,
-    SessionMetadata, StreamResult, SubTurnId, ThinkingConfig, ThinkingMode, ToolCall,
-    ToolCallDeltaAccumulated, ToolCallFunction, ToolCallRecord, ToolDefinition, ToolResultRecord,
-    ToolTurnId, TurnId, Usage,
+    SessionMetadata, StreamResult, SubTurnId, ThinkingConfig, ThinkingMode, ThinkingWireFormat,
+    ToolCall, ToolCallDeltaAccumulated, ToolCallFunction, ToolCallRecord, ToolDefinition,
+    ToolResultRecord, ToolTurnId, TurnId, Usage,
 };
 pub use thinking::thinking_config_for_lane;
