@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use std::io::IsTerminal;
 
-use crate::cli::{resolve_project_root, TurnOutputFormat};
+use crate::cli::{resolve_project_root, ToolApprovalPolicy, TurnOutputFormat};
 use crate::deepseek::SessionId;
 use crate::storage::{
     EventLogStore, ScheduledTask, ScheduledTaskKind, ScheduledTaskStatus, ScheduledTaskStore,
@@ -76,6 +76,7 @@ pub async fn task(
                 false,
                 Some(task.project_root.clone()),
                 output_format,
+                ToolApprovalPolicy::Deny,
             )
             .await;
             match result {

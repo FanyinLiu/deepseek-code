@@ -93,6 +93,14 @@ enum Commands {
         #[arg(short, long)]
         thinking: bool,
 
+        /// Tool approval policy: ask (prompt), allow, or deny
+        #[arg(long, value_enum, default_value_t = ToolApprovalArg::Deny)]
+        tool_approval: ToolApprovalArg,
+
+        /// Enable tool approval for every request without prompts
+        #[arg(short = 'y', long = "auto-approve")]
+        auto_approve: bool,
+
         /// Output format: text, json, stream-json
         #[arg(long, value_enum, default_value_t = OutputFormatArg::Text)]
         output_format: OutputFormatArg,
@@ -301,6 +309,23 @@ enum OutputFormatArg {
     Text,
     Json,
     StreamJson,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ToolApprovalArg {
+    Ask,
+    Allow,
+    Deny,
+}
+
+impl ToolApprovalArg {
+    fn to_policy(self) -> crate::cli::ToolApprovalPolicy {
+        match self {
+            Self::Ask => crate::cli::ToolApprovalPolicy::Ask,
+            Self::Allow => crate::cli::ToolApprovalPolicy::Allow,
+            Self::Deny => crate::cli::ToolApprovalPolicy::Deny,
+        }
+    }
 }
 
 impl OutputFormatArg {
@@ -1212,13 +1237,21 @@ pub async fn run() -> Result<(), anyhow::Error> {
         Some(Commands::Run {
             task,
             thinking,
+            tool_approval,
+            auto_approve,
             output_format,
         }) => {
+            let tool_approval = if auto_approve {
+                cli::ToolApprovalPolicy::Allow
+            } else {
+                tool_approval.to_policy()
+            };
             cli::run(
                 task,
                 thinking,
                 cli.project_root,
                 output_format.turn_output_format(),
+                tool_approval,
             )
             .await
         }

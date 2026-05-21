@@ -4,7 +4,7 @@ autobins = false
 version = "0.1.0"
 edition = "2021"
 description = "Multi-model, multi-agent coding CLI with TUI"
-default-run = "octocode"
+default-run = "octo"
 
 [dependencies]
 anyhow = "1"
@@ -13,6 +13,7 @@ thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 flate2 = "1"
+inquire = "0.7"
 futures = "0.3"
 ratatui = "0.30"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"] }

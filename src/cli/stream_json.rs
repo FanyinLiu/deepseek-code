@@ -69,6 +69,9 @@ impl FinalJsonCollector {
                 success,
                 summary,
             } => self.record_tool_result(tool_name, *success, summary),
+            AgentEvent::UserQuestionRequested { summary, .. } => {
+                self.final_message.push_str(summary);
+            }
             AgentEvent::StreamDone {
                 usage: Some(usage), ..
             } => self.usage = Some(usage.clone()),
@@ -205,6 +208,18 @@ pub fn print_event(event: &AgentEvent) {
     );
 }
 
+pub fn print_tool_approval_denied(tool_name: impl AsRef<str>, reason: impl AsRef<str>) {
+    let value = json!({
+        "type": "tool_approval_denied",
+        "tool": tool_name.as_ref(),
+        "reason": reason.as_ref(),
+    });
+    println!(
+        "{}",
+        serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string())
+    );
+}
+
 pub(crate) fn event_to_json(event: &AgentEvent) -> serde_json::Value {
     match event {
         AgentEvent::UserMessage { content } => json!({
@@ -258,6 +273,28 @@ pub(crate) fn event_to_json(event: &AgentEvent) -> serde_json::Value {
             "tool_name": tool_name,
             "success": success,
             "summary": summary,
+        }),
+        AgentEvent::UserQuestionRequested {
+            title,
+            options,
+            summary,
+        } => json!({
+            "type": "user_question_requested",
+            "title": title,
+            "options": options,
+            "summary": summary,
+        }),
+        AgentEvent::ContextCompacted {
+            summary,
+            reason,
+            before_tokens,
+            after_tokens,
+        } => json!({
+            "type": "context_compacted",
+            "summary": summary,
+            "reason": reason,
+            "before_tokens": before_tokens,
+            "after_tokens": after_tokens,
         }),
         AgentEvent::HookExecuted {
             event,
@@ -468,6 +505,15 @@ mod tests {
         assert_eq!(hook["type"], "hook_executed");
         assert_eq!(hook["event"], "pre_tool_use");
         assert_eq!(hook["success"], true);
+
+        let compact = event_to_json(&AgentEvent::ContextCompacted {
+            summary: "summary".to_string(),
+            reason: "auto threshold".to_string(),
+            before_tokens: 10,
+            after_tokens: 4,
+        });
+        assert_eq!(compact["type"], "context_compacted");
+        assert_eq!(compact["before_tokens"], 10);
     }
 
     #[test]

@@ -59,3 +59,37 @@ pub use skill::skill;
 pub use stream_json::TurnOutputFormat;
 pub use task::task;
 pub use welcome::welcome;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolApprovalPolicy {
+    Ask,
+    Allow,
+    Deny,
+}
+
+impl ToolApprovalPolicy {
+    #[must_use]
+    pub fn auto_approved(self, auto_approve_session: bool) -> Option<bool> {
+        match self {
+            Self::Allow => Some(true),
+            Self::Deny => Some(false),
+            Self::Ask => {
+                if auto_approve_session {
+                    Some(true)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn should_deny(self) -> bool {
+        matches!(self, Self::Deny)
+    }
+
+    #[must_use]
+    pub const fn should_allow(self) -> bool {
+        matches!(self, Self::Allow)
+    }
+}

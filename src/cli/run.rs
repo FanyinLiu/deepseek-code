@@ -1,8 +1,11 @@
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
+
+use inquire::Select;
 
 use crate::agent::orchestrator::{AgentEvent, Orchestrator};
 use crate::cli::output_blocks;
-use crate::cli::{resolve_project_root, TurnOutputFormat};
+use crate::cli::{resolve_project_root, ToolApprovalPolicy, TurnOutputFormat};
 use crate::deepseek::{
     ExecutionLane, ReasoningState, Session, SessionId, SessionMetadata, ThinkingMode,
 };
@@ -14,6 +17,7 @@ pub async fn run(
     thinking: bool,
     project_root: Option<PathBuf>,
     output_format: TurnOutputFormat,
+    tool_approval: ToolApprovalPolicy,
 ) -> Result<(), anyhow::Error> {
     let root = match resolve_project_root(project_root, "run") {
         Ok(root) => root,
@@ -89,9 +93,22 @@ pub async fn run(
         if let Some(collector) = final_json.as_mut() {
             collector.observe(&event);
             match event {
-                AgentEvent::ToolApprovalNeeded { respond, .. }
-                | AgentEvent::SubagentToolApprovalNeeded { respond, .. } => {
-                    let _ = respond.send(false);
+                AgentEvent::ToolApprovalNeeded {
+                    tool_name, respond, ..
+                }
+                | AgentEvent::SubagentToolApprovalNeeded {
+                    tool_name, respond, ..
+                } => {
+                    let approved = tool_approval.auto_approved(false).unwrap_or(false);
+                    let _ = respond.send(approved);
+                    if !approved {
+                        let reason = if tool_approval.should_deny() {
+                            "policy=deny"
+                        } else {
+                            "policy=ask"
+                        };
+                        crate::cli::stream_json::print_tool_approval_denied(&tool_name, reason);
+                    }
                 }
                 AgentEvent::OptionsNeeded { respond, .. } => {
                     let _ = respond.send(0);
@@ -103,9 +120,22 @@ pub async fn run(
         if output_format.is_stream_json() {
             crate::cli::stream_json::print_event(&event);
             match event {
-                AgentEvent::ToolApprovalNeeded { respond, .. }
-                | AgentEvent::SubagentToolApprovalNeeded { respond, .. } => {
-                    let _ = respond.send(false);
+                AgentEvent::ToolApprovalNeeded {
+                    tool_name, respond, ..
+                }
+                | AgentEvent::SubagentToolApprovalNeeded {
+                    tool_name, respond, ..
+                } => {
+                    let approved = tool_approval.auto_approved(false).unwrap_or(false);
+                    let _ = respond.send(approved);
+                    if !approved {
+                        let reason = if tool_approval.should_deny() {
+                            "policy=deny"
+                        } else {
+                            "policy=ask"
+                        };
+                        crate::cli::stream_json::print_tool_approval_denied(&tool_name, reason);
+                    }
                 }
                 AgentEvent::OptionsNeeded { respond, .. } => {
                     let _ = respond.send(0);
@@ -124,30 +154,33 @@ pub async fn run(
                 display,
                 respond,
             } => {
-                let approved = if auto_approve_session {
-                    output_blocks::print_approval(&tool_name, &display, true);
-                    true
-                } else {
-                    output_blocks::print_approval(&tool_name, &display, false);
-                    print!("Approve? [a]once [s]session [d]eny: ");
-                    let mut answer = String::new();
-                    std::io::stdin().read_line(&mut answer)?;
-                    match answer.trim().to_lowercase().as_str() {
-                        "a" | "yes" | "y" => {
-                            println!("Approved once");
-                            true
+                let approved =
+                    if let Some(approved) = tool_approval.auto_approved(auto_approve_session) {
+                        approved
+                    } else if io::stdin().is_terminal() {
+                        let choice = request_approval_interactively("Approve tool?").await;
+                        match choice {
+                            ToolApprovalDecision::ApproveOnce => true,
+                            ToolApprovalDecision::ApproveSession => {
+                                auto_approve_session = true;
+                                true
+                            }
+                            ToolApprovalDecision::Deny => false,
                         }
-                        "s" => {
-                            println!("Approved for session");
-                            auto_approve_session = true;
-                            true
+                    } else {
+                        let mut answer = String::new();
+                        print!("Approve? [a]once [s]session [d]eny: ");
+                        let _ = io::stdin().read_line(&mut answer);
+                        match answer.trim().to_lowercase().as_str() {
+                            "a" | "yes" | "y" => true,
+                            "s" => {
+                                auto_approve_session = true;
+                                true
+                            }
+                            _ => false,
                         }
-                        _ => {
-                            println!("Denied — skipping");
-                            false
-                        }
-                    }
-                };
+                    };
+                output_blocks::print_approval(&tool_name, &display, approved);
                 let _ = respond.send(approved);
             }
             AgentEvent::ToolStarted { .. } => {}
@@ -157,6 +190,19 @@ pub async fn run(
                 summary,
             } => {
                 output_blocks::print_tool_result(&tool_name, success, &summary);
+            }
+            AgentEvent::UserQuestionRequested { title, options, .. } => {
+                output_blocks::print_option_block(&title, &options);
+            }
+            AgentEvent::ContextCompacted {
+                reason,
+                before_tokens,
+                after_tokens,
+                ..
+            } => {
+                output_blocks::print_header("context", output_blocks::BlockStatus::Done);
+                output_blocks::print_kv("compact", reason);
+                output_blocks::print_kv("tokens", format!("{before_tokens} -> {after_tokens}"));
             }
             AgentEvent::HookExecuted { .. } => {}
             AgentEvent::StreamDone { usage, cache, .. } => {
@@ -217,15 +263,37 @@ pub async fn run(
                 );
                 output_blocks::print_kv("agent", &agent_id);
                 output_blocks::print_kv("args", output_blocks::truncate(&arguments, 120));
-                let approved = if auto_approve_session {
-                    output_blocks::print_kv("action", "approved by session trust");
-                    true
-                } else {
-                    print!("Approve subagent tool? [y/n]: ");
-                    let mut answer = String::new();
-                    let _ = std::io::stdin().read_line(&mut answer);
-                    matches!(answer.trim().to_lowercase().as_str(), "y" | "yes" | "a")
-                };
+                let approved =
+                    if let Some(approved) = tool_approval.auto_approved(auto_approve_session) {
+                        approved
+                    } else if io::stdin().is_terminal() {
+                        let choice = request_approval_interactively("Approve subagent tool?").await;
+                        match choice {
+                            ToolApprovalDecision::ApproveOnce => true,
+                            ToolApprovalDecision::ApproveSession => {
+                                auto_approve_session = true;
+                                true
+                            }
+                            ToolApprovalDecision::Deny => false,
+                        }
+                    } else {
+                        println!("[Subagent approval requested]");
+                        print!("Approve subagent tool? [y/n]: ");
+                        let mut answer = String::new();
+                        let _ = io::stdin().read_line(&mut answer);
+                        let answer = answer.trim().to_lowercase();
+                        matches!(answer.as_str(), "y" | "yes" | "a")
+                    };
+                output_blocks::print_kv(
+                    "action",
+                    if auto_approve_session {
+                        "approved by session trust"
+                    } else if approved {
+                        "approved once"
+                    } else {
+                        "denied"
+                    },
+                );
                 let _ = respond.send(approved);
             }
             AgentEvent::PlanStepUpdate {
@@ -288,14 +356,20 @@ pub async fn run(
                 respond,
             } => {
                 output_blocks::print_option_block(&title, &options);
-                println!("Select option (1–{}): ", options.len());
-                let mut answer = String::new();
-                let _ = std::io::stdin().read_line(&mut answer);
-                let choice = answer
-                    .trim()
-                    .parse::<usize>()
-                    .unwrap_or(options.len())
-                    .saturating_sub(1);
+                let choice = if io::stdin().is_terminal() {
+                    request_options_interactively(&title, &options)
+                        .await
+                        .unwrap_or(0)
+                } else {
+                    println!("Select option (1–{}): ", options.len());
+                    let mut answer = String::new();
+                    let _ = io::stdin().read_line(&mut answer);
+                    answer
+                        .trim()
+                        .parse::<usize>()
+                        .unwrap_or(options.len())
+                        .saturating_sub(1)
+                };
                 let _ = respond.send(choice);
             }
         }
@@ -343,4 +417,57 @@ fn json_error_result<T>(
         crate::cli::stream_json::print_final_error(error.to_string());
     }
     Err(error)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ToolApprovalDecision {
+    ApproveOnce,
+    ApproveSession,
+    Deny,
+}
+
+async fn request_approval_interactively(prompt: impl Into<String>) -> ToolApprovalDecision {
+    let prompt = prompt.into();
+    let options = vec![
+        "✓ Approve once".to_string(),
+        "✓ Approve for session".to_string(),
+        "✗ Deny".to_string(),
+    ];
+    let index = tokio::task::spawn_blocking(move || {
+        Select::new(&prompt, options.clone())
+            .prompt()
+            .ok()
+            .and_then(|selected| {
+                options
+                    .iter()
+                    .position(|option| option == &selected)
+                    .filter(|index| *index < 3)
+            })
+    })
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(2);
+    match index {
+        0 => ToolApprovalDecision::ApproveOnce,
+        1 => ToolApprovalDecision::ApproveSession,
+        _ => ToolApprovalDecision::Deny,
+    }
+}
+
+async fn request_options_interactively(title: &str, options: &[String]) -> Option<usize> {
+    if options.is_empty() {
+        return Some(0);
+    }
+    let options = options.to_vec();
+    let title = title.to_string();
+    tokio::task::spawn_blocking(move || {
+        Select::new(&title, options.clone())
+            .prompt()
+            .ok()
+            .and_then(|selected| options.iter().position(|value| value == &selected))
+    })
+    .await
+    .ok()
+    .flatten()
 }
