@@ -574,6 +574,39 @@ mod tests {
         assert!(!env.iter().any(|(key, _)| key.contains("API_KEY")));
     }
 
+    #[tokio::test]
+    async fn capture_output_stream_tracks_truncation_and_original_bytes() {
+        let source = vec![b'x'; 1024 * 1024 + 1024];
+        let state = std::sync::Arc::new(tokio::sync::Mutex::new(OutputCapture::default()));
+        let stream = tokio::io::Cursor::new(source.clone());
+
+        capture_output_stream(stream, 1024 * 1024, state.clone()).await;
+
+        let output = state.lock().await;
+        assert!(output.truncated);
+        assert_eq!(output.original_bytes as usize, source.len());
+        assert_eq!(output.bytes.len(), 1024 * 1024);
+    }
+
+    #[test]
+    fn command_result_summary_reports_truncated_output() {
+        let result = CommandResult {
+            stdout: "stdout".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+            duration_ms: 0,
+            timed_out: false,
+            stdout_truncated: true,
+            stderr_truncated: false,
+            stdout_original_bytes: 2 * 1024 * 1024,
+            stderr_original_bytes: 0,
+        };
+
+        let summary = result.summary();
+        assert!(summary.contains("truncated: stdout 2097152B -> 1MiB"));
+        assert!(!summary.contains("truncated: stderr"));
+    }
+
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[tokio::test]
     async fn strict_sandbox_reports_missing_native_sandbox_without_running_command() {
