@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use crate::cli::resolve_project_root;
+use std::io::IsTerminal;
+
+use crate::cli::{resolve_project_root, TurnOutputFormat};
 use crate::deepseek::SessionId;
 use crate::storage::{
     EventLogStore, ScheduledTask, ScheduledTaskKind, ScheduledTaskStatus, ScheduledTaskStore,
@@ -46,11 +48,11 @@ pub async fn task(
                 println!("log     {}", path.display());
             } else {
                 println!(
-                    "log     run history is in session events; use `octocode resume` to inspect sessions"
+                    "log     run history is in session events; use `octo resume` to inspect sessions"
                 );
             }
         }
-        TaskCommand::Run { id } => {
+        TaskCommand::Run { id, format } => {
             let task = store.load(&id)?;
             ensure_task_can_run(&task)?;
             let run_session_id = SessionId::new_v4();
@@ -62,11 +64,18 @@ pub async fn task(
                 "running",
                 "scheduled task run started",
             );
+            let output_format = format.unwrap_or_else(|| {
+                if std::io::stdin().is_terminal() {
+                    TurnOutputFormat::Text
+                } else {
+                    TurnOutputFormat::Json
+                }
+            });
             let result = crate::cli::run(
                 task.prompt.clone(),
                 false,
                 Some(task.project_root.clone()),
-                crate::cli::TurnOutputFormat::Text,
+                output_format,
             )
             .await;
             match result {
@@ -110,6 +119,7 @@ pub enum TaskCommand {
     },
     Run {
         id: String,
+        format: Option<TurnOutputFormat>,
     },
     Logs {
         id: String,

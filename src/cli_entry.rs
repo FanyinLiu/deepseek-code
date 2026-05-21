@@ -6,7 +6,7 @@ use crate::{cli, tui};
 
 #[derive(Parser)]
 #[command(
-    name = "octocode",
+    name = "octo",
     version,
     about = "Multi-model, multi-agent coding CLI",
     long_about = None
@@ -346,7 +346,12 @@ enum TaskCommands {
     /// Resume a paused task
     Resume { id: String },
     /// Run a task now
-    Run { id: String },
+    Run {
+        id: String,
+        /// Output format for task execution: text, json, stream-json
+        #[arg(long, value_enum)]
+        format: Option<OutputFormatArg>,
+    },
     /// Show task logs and metadata
     Logs { id: String },
     /// Remove a task
@@ -484,7 +489,7 @@ enum RepairCommands {
     },
     /// Run deterministic repair gates and write a report
     Run {
-        /// Proposal id from `octocode repair propose`
+        /// Proposal id from `octo repair propose`
         proposal_id: String,
         /// Run full validation, including tests when available
         #[arg(long)]
@@ -501,7 +506,7 @@ enum RepairCommands {
     },
     /// Print a repair run report
     Report {
-        /// Run id from `octocode repair run`
+        /// Run id from `octo repair run`
         run_id: String,
     },
     /// Show local repair proposals, runs, and failure-memory count
@@ -555,7 +560,7 @@ enum SkillCommands {
     },
     /// Create a draft skill from a repair run
     Add {
-        /// Repair run id from `octocode repair run`
+        /// Repair run id from `octo repair run`
         run_id: String,
         /// Override generated skill name
         #[arg(long)]
@@ -602,7 +607,7 @@ enum EvolveCommands {
     },
     /// Generate a candidate patch run for an evolution proposal
     Patch {
-        /// Proposal id from `octocode evolve propose`
+        /// Proposal id from `octo evolve propose`
         proposal_id: String,
         /// Use real model-backed planner/implementer/safety reviewer agents
         #[arg(long)]
@@ -616,7 +621,7 @@ enum EvolveCommands {
     },
     /// Convert an evolution proposal into a repair-backed validation run
     Repair {
-        /// Proposal id from `octocode evolve propose`
+        /// Proposal id from `octo evolve propose`
         proposal_id: String,
         /// Ask the configured model to generate a repair candidate patch
         #[arg(long)]
@@ -684,7 +689,7 @@ enum EvolveCommands {
     },
     /// Run validation gates for a generated evolution patch
     Test {
-        /// Run id from `octocode evolve patch`
+        /// Run id from `octo evolve patch`
         run_id: String,
         /// Run full validation, including the full test suite when available
         #[arg(long)]
@@ -695,7 +700,7 @@ enum EvolveCommands {
     },
     /// Apply a tested evolution patch to the current tree
     Apply {
-        /// Run id from `octocode evolve patch`
+        /// Run id from `octo evolve patch`
         run_id: String,
         /// Allow applying a high-risk patch after manual review
         #[arg(long)]
@@ -706,7 +711,7 @@ enum EvolveCommands {
     },
     /// Roll back a previously applied evolution patch
     Rollback {
-        /// Apply id from `octocode evolve apply`
+        /// Apply id from `octo evolve apply`
         apply_id: String,
         /// Print machine-readable JSON
         #[arg(long)]
@@ -1722,7 +1727,10 @@ pub async fn run() -> Result<(), anyhow::Error> {
                 },
                 TaskCommands::Pause { id } => cli::task::TaskCommand::Pause { id },
                 TaskCommands::Resume { id } => cli::task::TaskCommand::Resume { id },
-                TaskCommands::Run { id } => cli::task::TaskCommand::Run { id },
+                TaskCommands::Run { id, format } => cli::task::TaskCommand::Run {
+                    id,
+                    format: format.map(OutputFormatArg::turn_output_format),
+                },
                 TaskCommands::Logs { id } => cli::task::TaskCommand::Logs { id },
                 TaskCommands::Rm { id } => cli::task::TaskCommand::Remove { id },
             };
