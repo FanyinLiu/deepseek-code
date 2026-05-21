@@ -170,6 +170,24 @@ pub const ALL_TOOLS: &[ToolMetadata] = &[
         destructive: true,
         concurrency_safe: false,
     },
+    // ── background shells ──
+    // bash_output is a pure read on the in-process registry.
+    ToolMetadata {
+        name: "bash_output",
+        read_only: true,
+        destructive: false,
+        concurrency_safe: true,
+    },
+    // kill_shell terminates a running child. It's a mutation on the
+    // process tree but cannot affect the workspace, so it's not flagged
+    // destructive (the cost of a wrong kill is bounded — the user can
+    // just rerun the command).
+    ToolMetadata {
+        name: "kill_shell",
+        read_only: false,
+        destructive: false,
+        concurrency_safe: false,
+    },
 ];
 
 #[must_use]

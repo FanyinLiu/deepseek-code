@@ -114,6 +114,11 @@ fn env_candidates_for_provider(provider: ProviderKind) -> &'static [&'static str
         ProviderKind::Qwen => &["DASHSCOPE_API_KEY", "BAILIAN_API_KEY", "QWEN_API_KEY"],
         ProviderKind::Kimi => &["MOONSHOT_API_KEY", "KIMI_API_KEY"],
         ProviderKind::Zhipu => &["ZAI_API_KEY", "ZHIPUAI_API_KEY", "ZHIPU_API_KEY"],
+        ProviderKind::Minimax => &["MINIMAX_API_KEY"],
+        ProviderKind::Tencent => &["TENCENT_TOKENHUB_API_KEY", "HUNYUAN_API_KEY"],
+        ProviderKind::Qianfan => &["QIANFAN_API_KEY", "BAIDU_QIANFAN_API_KEY"],
+        ProviderKind::Stepfun => &["STEPFUN_KEY", "STEPFUN_API_KEY"],
+        ProviderKind::Doubao => &["ARK_API_KEY", "VOLCENGINE_API_KEY", "DOUBAO_API_KEY"],
         ProviderKind::OpenRouter => &["OPENROUTER_API_KEY"],
         ProviderKind::OpenAiCompatible => &["OPENAI_API_KEY"],
     }
@@ -405,6 +410,18 @@ mod tests {
         assert_eq!(loaded.api_key.as_deref(), Some("sk-local"));
         assert_eq!(loaded.router.simple_threshold, 55);
         assert!(!loaded.ui.show_cache_hud);
+    }
+
+    #[test]
+    fn api_key_env_hints_cover_chinese_provider_profiles() {
+        assert_eq!(api_key_env_hint(ProviderKind::Minimax), "MINIMAX_API_KEY");
+        assert_eq!(
+            api_key_env_hint(ProviderKind::Tencent),
+            "TENCENT_TOKENHUB_API_KEY"
+        );
+        assert_eq!(api_key_env_hint(ProviderKind::Qianfan), "QIANFAN_API_KEY");
+        assert_eq!(api_key_env_hint(ProviderKind::Stepfun), "STEPFUN_KEY");
+        assert_eq!(api_key_env_hint(ProviderKind::Doubao), "ARK_API_KEY");
     }
 
     #[test]

@@ -1,5 +1,7 @@
 pub mod ask_user;
 pub mod backend;
+pub mod background_shells;
+pub mod bash_output;
 pub mod dispatch;
 pub mod edit_file;
 pub mod fetch_url;
@@ -8,6 +10,7 @@ pub mod github;
 pub mod glob;
 pub mod grep;
 pub mod image_input;
+pub mod kill_shell;
 pub mod list_dir;
 pub mod mcp_wrapper;
 pub mod mentions;

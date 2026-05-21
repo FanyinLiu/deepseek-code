@@ -2,15 +2,16 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
-use crate::cli::resolve_project_root;
+use crate::cli::resolve_project_root_or_cwd;
 use crate::deepseek::DeepSeekModel;
 use crate::provider::{
-    build_provider, Provider, ProviderCapabilities, ProviderConfig, ProviderKind,
+    build_provider, model_context_window_tokens, model_max_output_tokens, Provider,
+    ProviderCapabilities, ProviderConfig, ProviderKind,
 };
 use crate::storage;
 
 pub async fn models(json: bool, project_root: Option<PathBuf>) -> Result<(), anyhow::Error> {
-    let root = resolve_project_root(project_root, "models")?;
+    let root = resolve_project_root_or_cwd(project_root);
     let config = match storage::Config::load(Some(&root)) {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -41,6 +42,10 @@ struct ProviderModelCapability {
     base_url: Option<String>,
     pro_model: String,
     flash_model: String,
+    pro_context_window_tokens: Option<u64>,
+    flash_context_window_tokens: Option<u64>,
+    pro_max_output_tokens: Option<u64>,
+    flash_max_output_tokens: Option<u64>,
     capabilities: ProviderCapabilities,
 }
 
@@ -67,6 +72,10 @@ fn provider_payload(config: &ProviderConfig, kind: ProviderKind) -> ProviderMode
         base_url: provider.base_url().map(str::to_string),
         pro_model: provider.request_model_name(&DeepSeekModel::Pro),
         flash_model: provider.request_model_name(&DeepSeekModel::Flash),
+        pro_context_window_tokens: model_context_window_tokens(kind, &DeepSeekModel::Pro),
+        flash_context_window_tokens: model_context_window_tokens(kind, &DeepSeekModel::Flash),
+        pro_max_output_tokens: model_max_output_tokens(kind, &DeepSeekModel::Pro),
+        flash_max_output_tokens: model_max_output_tokens(kind, &DeepSeekModel::Flash),
         capabilities,
     }
 }
@@ -75,8 +84,8 @@ fn print_models(payload: &ModelsPayload) {
     println!("Model providers");
     println!("Active: {}\n", payload.active_provider.as_str());
     println!(
-        "{:<18} {:<7} {:<11} {:<10} {:<24} Flash",
-        "Provider", "Think", "Reasoning", "Preserve", "Pro"
+        "{:<18} {:<7} {:<7} {:<11} {:<14} {:<24} Flash",
+        "Provider", "Think", "Tools", "Reasoning", "Context", "Pro"
     );
     for item in &payload.providers {
         let marker = if item.active { "*" } else { " " };
@@ -90,20 +99,33 @@ fn print_models(payload: &ModelsPayload) {
         } else {
             "-"
         };
-        let preserve = if item.capabilities.thinking.supports_preserved_reasoning {
+        let tools = if item.capabilities.supports_tool_calls {
             "yes"
         } else {
             "no"
         };
+        let context = item
+            .pro_context_window_tokens
+            .map(format_tokens)
+            .unwrap_or_else(|| "-".to_string());
         println!(
-            "{} {:<16} {:<7} {:<11} {:<10} {:<24} {}",
+            "{} {:<16} {:<7} {:<7} {:<11} {:<14} {:<24} {}",
             marker,
             item.provider.as_str(),
             thinking,
+            tools,
             reasoning,
-            preserve,
+            context,
             item.pro_model,
             item.flash_model
+        );
+    }
+    println!("\nBase URLs:");
+    for item in &payload.providers {
+        println!(
+            "  {:<18} {}",
+            item.provider.as_str(),
+            item.base_url.as_deref().unwrap_or("(native default)")
         );
     }
     println!("\nThinking controls:");
@@ -113,6 +135,24 @@ fn print_models(payload: &ModelsPayload) {
             item.provider.as_str(),
             item.capabilities.thinking.control_surface
         );
+    }
+    println!("\nRoutes:");
+    for item in &payload.providers {
+        println!(
+            "  {:<18} {}",
+            item.provider.as_str(),
+            item.capabilities.routes.join(", ")
+        );
+    }
+}
+
+fn format_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{}M", tokens / 1_000_000)
+    } else if tokens >= 1_000 {
+        format!("{}K", tokens / 1_000)
+    } else {
+        tokens.to_string()
     }
 }
 

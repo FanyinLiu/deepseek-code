@@ -43,6 +43,13 @@ fn load_cases() -> Vec<EvalCase> {
 
 fn run_case(case: &EvalCase) {
     let root = tempfile::tempdir().expect("tempdir");
+    if case
+        .command_args
+        .first()
+        .is_some_and(|command| matches!(command.as_str(), "models" | "settings" | "doctor"))
+    {
+        std::fs::create_dir_all(root.path().join(".octocode")).expect("create eval project root");
+    }
     let output = Command::new(env!("CARGO_BIN_EXE_octo"))
         .current_dir(root.path())
         .args(&case.command_args)
@@ -70,14 +77,14 @@ fn run_case(case: &EvalCase) {
         case.notes
     );
     for expected in &case.expected_events {
-        assert_expected_event(expected, &stdout, &case.notes);
+        assert_expected_event(expected, &stdout, &stderr, &case.notes);
     }
     for forbidden in &case.forbidden_events {
         assert_forbidden_event(forbidden, &stdout, &stderr, &case.notes);
     }
 }
 
-fn assert_expected_event(expected: &str, stdout: &str, notes: &str) {
+fn assert_expected_event(expected: &str, stdout: &str, stderr: &str, notes: &str) {
     match expected {
         "final:error" => {
             let lines = stdout.lines().collect::<Vec<_>>();
@@ -95,7 +102,24 @@ fn assert_expected_event(expected: &str, stdout: &str, notes: &str) {
             });
             assert!(found, "{notes}: stream-json should include error event");
         }
+        expected if expected.starts_with("stdout:") || expected.starts_with("stderr:") => {
+            assert_expected_text(expected, stdout, stderr, notes);
+        }
         other => panic!("unknown expected eval event '{other}' in {notes}"),
+    }
+}
+
+fn assert_expected_text(expected: &str, stdout: &str, stderr: &str, notes: &str) {
+    if let Some(needle) = expected.strip_prefix("stdout:") {
+        assert!(
+            stdout.contains(needle),
+            "{notes}: stdout did not contain expected text {needle:?}; stdout={stdout}"
+        );
+    } else if let Some(needle) = expected.strip_prefix("stderr:") {
+        assert!(
+            stderr.contains(needle),
+            "{notes}: stderr did not contain expected text {needle:?}; stderr={stderr}"
+        );
     }
 }
 

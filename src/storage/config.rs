@@ -173,6 +173,11 @@ struct PartialProviderConfig {
     qwen: Option<PartialProviderEndpointConfig>,
     kimi: Option<PartialProviderEndpointConfig>,
     zhipu: Option<PartialProviderEndpointConfig>,
+    minimax: Option<PartialProviderEndpointConfig>,
+    tencent: Option<PartialProviderEndpointConfig>,
+    qianfan: Option<PartialProviderEndpointConfig>,
+    stepfun: Option<PartialProviderEndpointConfig>,
+    doubao: Option<PartialProviderEndpointConfig>,
     openrouter: Option<PartialProviderEndpointConfig>,
     #[serde(rename = "openai-compatible")]
     openai_compatible: Option<PartialProviderEndpointConfig>,
@@ -690,6 +695,8 @@ impl Config {
         );
         set_toml_string(&mut value, "ui", "language", self.ui.language.clone());
         set_toml_string(&mut value, "ui", "theme", self.ui.theme.clone());
+        set_toml_string(&mut value, "ui", "motion", self.ui.motion.clone());
+        set_toml_string(&mut value, "ui", "renderer", self.ui.renderer.clone());
         set_toml_bool(
             &mut value,
             "ui",
@@ -712,6 +719,13 @@ impl Config {
         set_toml_bool(
             &mut value,
             "policy",
+            "auto_approve_safe_read",
+            self.policy.auto_approve_safe_read,
+        );
+        set_toml_bool(&mut value, "policy", "auto_mode", self.policy.auto_mode);
+        set_toml_bool(
+            &mut value,
+            "policy",
             "require_approval_for_write",
             self.policy.require_approval_for_write,
         );
@@ -727,13 +741,52 @@ impl Config {
             "network_access",
             self.policy.network_access,
         );
+        set_toml_bool(
+            &mut value,
+            "policy",
+            "block_protected_paths",
+            self.policy.block_protected_paths,
+        );
+        set_toml_integer(
+            &mut value,
+            "policy",
+            "command_timeout_seconds",
+            self.policy.command_timeout_seconds as i64,
+        );
+        set_toml_bool(&mut value, "router", "enabled", self.router.enabled);
+        set_toml_bool(
+            &mut value,
+            "router",
+            "use_model_classifier",
+            self.router.use_model_classifier,
+        );
         set_toml_bool(&mut value, "mcp", "enabled", self.mcp.enabled);
+        set_toml_bool(&mut value, "subagent", "enabled", self.subagent.enabled);
+        set_toml_bool(
+            &mut value,
+            "subagent",
+            "swarm_enabled",
+            self.subagent.swarm_enabled,
+        );
         set_toml_integer(
             &mut value,
             "subagent",
             "max_parallel",
             self.subagent.max_parallel as i64,
         );
+        set_toml_bool(
+            &mut value,
+            "subagent",
+            "auto_decompose",
+            self.subagent.auto_decompose,
+        );
+        set_toml_bool(
+            &mut value,
+            "subagent",
+            "allow_custom_agents",
+            self.subagent.allow_custom_agents,
+        );
+        set_toml_bool(&mut value, "telemetry", "enabled", self.telemetry.enabled);
 
         std::fs::write(&path, toml::to_string_pretty(&value)?)?;
         Ok(path)
@@ -936,6 +989,11 @@ impl ProviderConfig {
             qwen: self.qwen.merge_provider_endpoint(patch.qwen),
             kimi: self.kimi.merge_provider_endpoint(patch.kimi),
             zhipu: self.zhipu.merge_provider_endpoint(patch.zhipu),
+            minimax: self.minimax.merge_provider_endpoint(patch.minimax),
+            tencent: self.tencent.merge_provider_endpoint(patch.tencent),
+            qianfan: self.qianfan.merge_provider_endpoint(patch.qianfan),
+            stepfun: self.stepfun.merge_provider_endpoint(patch.stepfun),
+            doubao: self.doubao.merge_provider_endpoint(patch.doubao),
             openrouter: self.openrouter.merge_provider_endpoint(patch.openrouter),
             openai_compatible: self
                 .openai_compatible
@@ -1429,6 +1487,47 @@ flash_model = "deepseek/deepseek-v4-flash"
         assert_eq!(
             merged.provider.openrouter.flash_model.as_deref(),
             Some("deepseek/deepseek-v4-flash")
+        );
+    }
+
+    #[test]
+    fn provider_layer_merges_new_chinese_provider_overrides() {
+        let base = Config {
+            provider: ProviderConfig {
+                qianfan: ProviderEndpointConfig {
+                    base_url: Some("https://qianfan.baidubce.com/v2".to_string()),
+                    pro_model: Some("ernie-5.0-thinking-preview".to_string()),
+                    flash_model: None,
+                },
+                ..ProviderConfig::default()
+            },
+            ..Config::default()
+        };
+        let patch = parse_config_patch(
+            r#"
+[provider]
+default = "qianfan"
+
+[provider.qianfan]
+flash_model = "ernie-4.5-turbo-128k"
+"#,
+        )
+        .expect("parse patch");
+
+        let merged = base.merge_with_config_patch(patch);
+
+        assert_eq!(merged.provider.default, ProviderKind::Qianfan);
+        assert_eq!(
+            merged.provider.qianfan.base_url.as_deref(),
+            Some("https://qianfan.baidubce.com/v2")
+        );
+        assert_eq!(
+            merged.provider.qianfan.pro_model.as_deref(),
+            Some("ernie-5.0-thinking-preview")
+        );
+        assert_eq!(
+            merged.provider.qianfan.flash_model.as_deref(),
+            Some("ernie-4.5-turbo-128k")
         );
     }
 

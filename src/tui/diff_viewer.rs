@@ -130,11 +130,8 @@ pub fn render_diff_viewer(
 
     // Apply scroll offset
     let visible = area.height as usize;
-    let start = if diff_scroll > 0 && diff_scroll < all_lines.len() {
-        diff_scroll
-    } else {
-        all_lines.len().saturating_sub(visible)
-    };
+    let max_start = all_lines.len().saturating_sub(visible);
+    let start = diff_scroll.min(max_start);
     let end = (start + visible).min(all_lines.len());
     let visible_lines = all_lines[start..end].to_vec();
 

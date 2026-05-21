@@ -103,9 +103,31 @@ pub fn localized_command_usage(usage: &str, language: &str) -> String {
     }
 }
 
+/// A user-defined prompt-type slash command. Loaded from
+/// `.octocode/commands/*.md` (project) and `~/.octocode/commands/*.md` (user).
+/// When invoked, the body is rendered (with `$ARGUMENTS` substitution) and
+/// queued as the next user input — exactly as if the user had typed the
+/// rendered text into the prompt.
+#[derive(Debug, Clone)]
+pub struct PromptCommand {
+    pub name: String,
+    pub description: String,
+    pub body: String,
+    pub source_path: std::path::PathBuf,
+}
+
+impl PromptCommand {
+    /// Render the body with `$ARGUMENTS` replaced by the user's args (possibly empty).
+    #[must_use]
+    pub fn render(&self, args: &str) -> String {
+        self.body.replace("$ARGUMENTS", args.trim())
+    }
+}
+
 /// Registry of all slash commands.
 pub struct CommandRegistry {
     commands: HashMap<&'static str, &'static SlashCommand>,
+    prompt_commands: HashMap<String, PromptCommand>,
 }
 
 impl Default for CommandRegistry {
@@ -119,6 +141,7 @@ impl CommandRegistry {
     pub fn new() -> Self {
         let mut registry = Self {
             commands: HashMap::new(),
+            prompt_commands: HashMap::new(),
         };
         registry.register_all();
         registry
@@ -129,6 +152,65 @@ impl CommandRegistry {
         for &alias in cmd.aliases {
             self.commands.insert(alias, cmd);
         }
+    }
+
+    /// Load user-defined prompt commands from project + user directories.
+    /// Project commands take precedence over user commands on name collision.
+    /// Built-in commands always win (we don't allow shadowing).
+    /// Returns the number of prompt commands loaded.
+    pub fn load_prompt_commands(&mut self, project_root: &std::path::Path) -> usize {
+        self.prompt_commands.clear();
+        let mut count = 0;
+        // User-global first (lower precedence), then project (overrides on conflict).
+        if let Some(home) = dirs::home_dir() {
+            count += self.load_prompt_dir(&home.join(".octocode").join("commands"));
+        }
+        count += self.load_prompt_dir(&project_root.join(".octocode").join("commands"));
+        count
+    }
+
+    fn load_prompt_dir(&mut self, dir: &std::path::Path) -> usize {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return 0;
+        };
+        let mut count = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                continue;
+            }
+            let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            // Skip names that collide with built-in commands.
+            let slash_name = format!("/{name}");
+            if self.commands.contains_key(slash_name.as_str()) {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let (description, body) = parse_prompt_command(&content);
+            self.prompt_commands.insert(
+                slash_name.clone(),
+                PromptCommand {
+                    name: slash_name,
+                    description,
+                    body,
+                    source_path: path,
+                },
+            );
+            count += 1;
+        }
+        count
+    }
+
+    /// List all loaded prompt commands (for /commands listing).
+    #[must_use]
+    pub fn prompt_commands(&self) -> Vec<&PromptCommand> {
+        let mut v: Vec<&PromptCommand> = self.prompt_commands.values().collect();
+        v.sort_by(|a, b| a.name.cmp(&b.name));
+        v
     }
 
     /// Parse and execute a slash command from user input.
@@ -144,12 +226,26 @@ impl CommandRegistry {
         let args = parts.get(1).copied().unwrap_or("");
 
         if let Some(cmd) = self.commands.get(name) {
-            Some((cmd.handler)(args, ctx))
-        } else {
-            Some(Err(format!(
-                "Unknown command: {name}. Type /help for available commands."
-            )))
+            return Some((cmd.handler)(args, ctx));
         }
+
+        if let Some(prompt) = self.prompt_commands.get(name) {
+            // Render and queue as the next user input. We use the same queue
+            // the user's own keystrokes flow through, so the prompt rides the
+            // normal turn pipeline (history, hooks, policy, …).
+            let rendered = prompt.render(args);
+            ctx.app.queued_inputs.push_back(rendered);
+            let label = prompt
+                .source_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("command");
+            return Some(Ok(Some(format!("→ {} ({})", prompt.name, label))));
+        }
+
+        Some(Err(format!(
+            "Unknown command: {name}. Type /help for available commands."
+        )))
     }
 
     /// Get a list of all primary commands for help display.
@@ -180,6 +276,58 @@ impl CommandRegistry {
         list.sort_by_key(|cmd| cmd.name);
         list
     }
+}
+
+// ---------------------------------------------------------------------------
+// Prompt-command parser
+// ---------------------------------------------------------------------------
+
+/// Parse a prompt-command markdown file into (description, body).
+///
+/// Format (all parts optional except body):
+/// ```text
+/// ---
+/// description: short summary
+/// ---
+/// Body text with $ARGUMENTS placeholder.
+/// ```
+///
+/// If no frontmatter is present we treat the first non-empty line as the
+/// description and the rest as body. This makes it easy to write a one-file
+/// command without ceremony.
+fn parse_prompt_command(content: &str) -> (String, String) {
+    let text = content.trim_start();
+    if let Some(stripped) = text.strip_prefix("---") {
+        // Frontmatter form. Find the closing `---`.
+        if let Some(end) = stripped.find("\n---") {
+            let frontmatter = &stripped[..end];
+            let body = stripped[end + 4..].trim_start_matches('\n').to_string();
+            let mut desc = String::new();
+            for line in frontmatter.lines() {
+                let line = line.trim();
+                if let Some(rest) = line.strip_prefix("description:") {
+                    desc = rest.trim().trim_matches('"').to_string();
+                    break;
+                }
+            }
+            if desc.is_empty() {
+                desc = "user-defined prompt".to_string();
+            }
+            return (desc, body);
+        }
+    }
+    // No frontmatter: first non-empty line is the description, rest is body.
+    let mut lines = text.lines();
+    let description = lines
+        .by_ref()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("user-defined prompt")
+        .trim()
+        .trim_start_matches('#')
+        .trim()
+        .to_string();
+    let body: String = lines.collect::<Vec<_>>().join("\n").trim().to_string();
+    (description, body)
 }
 
 // ---------------------------------------------------------------------------
@@ -1041,7 +1189,11 @@ fn cmd_mcp(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     }
 }
 
-fn cmd_usage(_args: &str, ctx: &mut CommandContext) -> CommandResult {
+fn cmd_usage(args: &str, ctx: &mut CommandContext) -> CommandResult {
+    let all_time = args.trim() == "--all-time" || args.trim() == "all";
+    if all_time {
+        return cmd_usage_all_time(ctx);
+    }
     let mut lines = vec!["Session Usage".to_string(), "".to_string()];
     lines.push(format!("Model: {:?}", ctx.app.model));
     lines.push(format!("Total tokens: {}", ctx.app.total_tokens));
@@ -1070,6 +1222,58 @@ fn cmd_usage(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     lines.push("Pricing (DeepSeek API, CNY / MTok):".to_string());
     lines.push("  Flash: input 0.5 (cache hit 0.1), output 2.0".to_string());
     lines.push("  Pro:   input 2.0 (cache hit 0.5), output 8.0".to_string());
+    lines.push("".to_string());
+    lines.push(
+        "Tip: `/usage --all-time` sums across all saved sessions for this project.".to_string(),
+    );
+    Ok(Some(lines.join("\n")))
+}
+
+/// Walk the session store and aggregate usage across every saved session
+/// for the current project. Sessions written before P1-B don't have the
+/// cache fields and are read with `#[serde(default)]` → zero contribution.
+fn cmd_usage_all_time(ctx: &mut CommandContext) -> CommandResult {
+    let Some(home) = dirs::home_dir() else {
+        return Ok(Some("Cannot resolve home directory.".to_string()));
+    };
+    let session_store = crate::storage::SessionStore::new(home.join(".octocode").join("sessions"));
+    let summaries = session_store.list(ctx.project_root).unwrap_or_default();
+
+    let mut total_tokens: u64 = 0;
+    let mut total_cost: f64 = 0.0;
+    let mut cache_hit: u64 = 0;
+    let mut cache_miss: u64 = 0;
+    let mut counted = 0_usize;
+    for summary in &summaries {
+        if let Ok(session) = session_store.load(ctx.project_root, &summary.id) {
+            total_tokens = total_tokens.saturating_add(session.metadata.total_tokens);
+            total_cost += session.metadata.total_cost_estimate;
+            cache_hit = cache_hit.saturating_add(session.metadata.prompt_cache_hit_tokens);
+            cache_miss = cache_miss.saturating_add(session.metadata.prompt_cache_miss_tokens);
+            counted += 1;
+        }
+    }
+
+    let mut lines = vec![
+        format!("All-Time Usage (this project, {counted} sessions)"),
+        String::new(),
+    ];
+    lines.push(format!("Total tokens : {total_tokens}"));
+    lines.push(format!("Estimated cost: ¥{:.3}", total_cost));
+    let cache_total = cache_hit + cache_miss;
+    if cache_total > 0 {
+        let rate = (cache_hit as f64 / cache_total as f64) * 100.0;
+        lines.push(String::new());
+        lines.push("Prompt cache (cross-session):".to_string());
+        lines.push(format!("  hit  : {cache_hit} tokens"));
+        lines.push(format!("  miss : {cache_miss} tokens"));
+        lines.push(format!("  rate : {:.1}%", rate));
+    } else {
+        lines.push(String::new());
+        lines.push(
+            "Prompt cache: no data (older sessions did not record cache fields).".to_string(),
+        );
+    }
     Ok(Some(lines.join("\n")))
 }
 
@@ -1409,18 +1613,20 @@ open_settings = "设置"
 fn cmd_language(args: &str, ctx: &mut CommandContext) -> CommandResult {
     let requested = args.trim().to_ascii_lowercase();
     let current = ctx.app.config.ui.language.clone();
+    let current_label = language_display_name(&current);
     let value = match requested.as_str() {
         "" => {
             return Ok(Some(format!(
-                "Language: {current}\n\nUsage: /language auto | zh-CN | en-US"
+                "Language: {current_label}\n\nUsage: /language auto | Chinese | English | Japanese"
             )));
         }
         "auto" | "system" => "auto",
         "zh" | "zh-cn" | "cn" | "chinese" | "中文" => "zh-CN",
         "en" | "en-us" | "english" => "en-US",
+        "ja" | "ja-jp" | "jp" | "japanese" | "日本語" => "ja-JP",
         other => {
             return Err(format!(
-                "Unknown language: {other}. Use /language auto, /language zh-CN, or /language en-US."
+                "Unknown language: {other}. Use /language auto, /language Chinese, /language English, or /language Japanese."
             ));
         }
     };
@@ -1429,10 +1635,23 @@ fn cmd_language(args: &str, ctx: &mut CommandContext) -> CommandResult {
     ctx.app.welcome.display_language = value.to_string();
     ctx.app
         .push_activity(format!("language: {}", ctx.app.config.ui.language));
+    let label = language_display_name(&ctx.app.config.ui.language);
     Ok(Some(format!(
-        "Language set to {}. Saved to local config.",
-        ctx.app.config.ui.language
+        "Language set to {label}. Saved to local config."
     )))
+}
+
+fn language_display_name(value: &str) -> &'static str {
+    match value.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+        "auto" | "" => "Automatic",
+        "zh" | "zh-cn" | "zh-hans" | "zh-hans-cn" | "chinese" => "Chinese",
+        "en" | "en-us" | "en-gb" | "english" => "English",
+        "ja" | "ja-jp" | "jp" | "japanese" => "Japanese",
+        value if value.starts_with("zh") => "Chinese",
+        value if value.starts_with("en") => "English",
+        value if value.starts_with("ja") => "Japanese",
+        _ => "English",
+    }
 }
 
 fn cmd_mode(args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -2550,7 +2769,7 @@ impl CommandRegistry {
             name: "/language",
             aliases: &["/lang"],
             description: "Show or switch the display language",
-            usage: "/language [auto|zh-CN|en-US]",
+            usage: "/language [auto|Chinese|English|Japanese]",
             handler: cmd_language,
         });
         self.register(&SlashCommand {
@@ -2690,6 +2909,72 @@ mod tests {
     fn test_registry_has_commands() {
         let reg = CommandRegistry::new();
         assert!(!reg.list_commands().is_empty());
+    }
+
+    #[test]
+    fn parse_prompt_command_with_frontmatter() {
+        let content = "---\ndescription: \"review the PR\"\n---\nReview these changes: $ARGUMENTS";
+        let (desc, body) = parse_prompt_command(content);
+        assert_eq!(desc, "review the PR");
+        assert_eq!(body, "Review these changes: $ARGUMENTS");
+    }
+
+    #[test]
+    fn parse_prompt_command_no_frontmatter_uses_first_line() {
+        let content = "# Review code\nPlease review $ARGUMENTS.";
+        let (desc, body) = parse_prompt_command(content);
+        assert_eq!(desc, "Review code");
+        assert_eq!(body, "Please review $ARGUMENTS.");
+    }
+
+    #[test]
+    fn prompt_command_render_substitutes_arguments() {
+        let cmd = PromptCommand {
+            name: "/review".to_string(),
+            description: "review".to_string(),
+            body: "Look at $ARGUMENTS carefully.".to_string(),
+            source_path: std::path::PathBuf::from("test.md"),
+        };
+        assert_eq!(cmd.render("src/main.rs"), "Look at src/main.rs carefully.");
+    }
+
+    #[test]
+    fn load_prompt_commands_picks_up_md_files() {
+        // Use a name that does NOT collide with any built-in.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cmd_dir = temp.path().join(".octocode").join("commands");
+        std::fs::create_dir_all(&cmd_dir).expect("mkdir");
+        std::fs::write(
+            cmd_dir.join("daily-review.md"),
+            "---\ndescription: daily review\n---\nReview $ARGUMENTS",
+        )
+        .expect("write file");
+
+        let mut reg = CommandRegistry::new();
+        let n = reg.load_prompt_commands(temp.path());
+        assert!(n >= 1, "expected at least 1 prompt command, got {n}");
+        let cmd = reg
+            .prompt_commands
+            .get("/daily-review")
+            .expect("/daily-review should load");
+        assert_eq!(cmd.description, "daily review");
+        assert!(cmd.body.contains("$ARGUMENTS"));
+    }
+
+    #[test]
+    fn prompt_command_does_not_shadow_builtin() {
+        // `/help` is a built-in. A user file named help.md must be ignored.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cmd_dir = temp.path().join(".octocode").join("commands");
+        std::fs::create_dir_all(&cmd_dir).expect("mkdir");
+        std::fs::write(cmd_dir.join("help.md"), "rogue").expect("write");
+
+        let mut reg = CommandRegistry::new();
+        reg.load_prompt_commands(temp.path());
+        // /help still points at the built-in
+        assert!(reg.commands.contains_key("/help"));
+        // and the prompt registry did not pick up the shadowing file
+        assert!(!reg.prompt_commands.contains_key("/help"));
     }
 
     #[test]
@@ -2971,7 +3256,7 @@ mod tests {
             .expect("language should run")
             .expect("language should show output");
 
-        assert!(output.contains("Language set to en-US"));
+        assert!(output.contains("Language set to English"));
         assert_eq!(ctx.app.config.ui.language, "en-US");
         assert_eq!(ctx.app.welcome.display_language, "en-US");
         let local = std::fs::read_to_string(temp.path().join(".octocode/local.toml"))

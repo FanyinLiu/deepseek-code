@@ -16,7 +16,16 @@ use crate::deepseek::{
 use crate::storage::config::ModelConfig;
 
 const DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS: u64 = 1_000_000;
+const DEEPSEEK_V4_MAX_OUTPUT_TOKENS: u64 = 384_000;
+const KIMI_K2_CONTEXT_WINDOW_TOKENS: u64 = 256_000;
+const GLM_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
+const GLM_MAX_OUTPUT_TOKENS: u64 = 128_000;
+const QIANFAN_ERNIE_CONTEXT_WINDOW_TOKENS: u64 = 128_000;
+const STEPFUN_CONTEXT_WINDOW_TOKENS: u64 = 16_000;
+const DOUBAO_SEED_CODE_CONTEXT_WINDOW_TOKENS: u64 = 256_000;
+const DOUBAO_SEED_CODE_MAX_OUTPUT_TOKENS: u64 = 32_000;
 const DEFAULT_AUTO_COMPACT_RATIO: f64 = 0.80;
+const PROVIDER_PROFILE_LAST_VERIFIED: &str = "2026-05-21";
 
 /// Supported provider families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -31,6 +40,16 @@ pub enum ProviderKind {
     Kimi,
     #[serde(rename = "zhipu")]
     Zhipu,
+    #[serde(rename = "minimax")]
+    Minimax,
+    #[serde(rename = "tencent")]
+    Tencent,
+    #[serde(rename = "qianfan")]
+    Qianfan,
+    #[serde(rename = "stepfun")]
+    Stepfun,
+    #[serde(rename = "doubao")]
+    Doubao,
     #[serde(rename = "openrouter")]
     OpenRouter,
     #[serde(rename = "openai-compatible")]
@@ -45,6 +64,11 @@ impl ProviderKind {
             Self::Qwen,
             Self::Kimi,
             Self::Zhipu,
+            Self::Minimax,
+            Self::Tencent,
+            Self::Qianfan,
+            Self::Stepfun,
+            Self::Doubao,
             Self::OpenRouter,
             Self::OpenAiCompatible,
         ]
@@ -58,9 +82,31 @@ impl ProviderKind {
             Self::Qwen => "qwen",
             Self::Kimi => "kimi",
             Self::Zhipu => "zhipu",
+            Self::Minimax => "minimax",
+            Self::Tencent => "tencent",
+            Self::Qianfan => "qianfan",
+            Self::Stepfun => "stepfun",
+            Self::Doubao => "doubao",
             Self::OpenRouter => "openrouter",
             Self::OpenAiCompatible => "openai-compatible",
         }
+    }
+
+    #[must_use]
+    pub fn from_config_value(value: &str) -> Option<Self> {
+        Self::all()
+            .iter()
+            .copied()
+            .find(|kind| kind.as_str() == value.trim())
+    }
+
+    #[must_use]
+    pub fn allowed_values() -> String {
+        Self::all()
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     #[must_use]
@@ -70,6 +116,11 @@ impl ProviderKind {
             Self::Qwen => "Qwen / DashScope",
             Self::Kimi => "Kimi / Moonshot",
             Self::Zhipu => "GLM / Zhipu",
+            Self::Minimax => "MiniMax",
+            Self::Tencent => "Tencent TokenHub",
+            Self::Qianfan => "Baidu Qianfan",
+            Self::Stepfun => "StepFun",
+            Self::Doubao => "Doubao / Volcano Ark",
             Self::OpenRouter => "OpenRouter",
             Self::OpenAiCompatible => "OpenAI-compatible",
         }
@@ -78,102 +129,258 @@ impl ProviderKind {
     #[must_use]
     pub fn capabilities(self) -> ProviderCapabilities {
         match self {
-            Self::DeepSeek => ProviderCapabilities {
-                kind: self,
-                display_name: self.display_name(),
-                thinking: ProviderThinkingCapabilities {
+            Self::DeepSeek => provider_capabilities(
+                self,
+                ProviderThinkingCapabilities {
                     supports_thinking: true,
                     supports_reasoning_content: true,
                     supports_preserved_reasoning: true,
                     wire_format: ThinkingWireFormat::DeepSeekNative,
                     control_surface: "thinking.type + thinking.effort",
                 },
-                supports_tool_calls: true,
-                supports_json_output: true,
-                supports_fim: true,
-                supports_responses_api: false,
-                supports_structured_outputs: false,
-                supports_tracing: false,
-                supports_evals: false,
-                supports_cache_control: false,
-            },
-            Self::Qwen => ProviderCapabilities {
-                kind: self,
-                display_name: self.display_name(),
-                thinking: ProviderThinkingCapabilities {
+                Some(DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS),
+                Some(DEEPSEEK_V4_MAX_OUTPUT_TOKENS),
+                CapabilityFlags {
+                    supports_fim: true,
+                    supports_prompt_cache: true,
+                    cache_behavior: "automatic prefix cache; usage exposes hit/miss tokens",
+                    routes: &["fast", "strong", "coding"],
+                    ..CapabilityFlags::default()
+                },
+            ),
+            Self::Qwen => provider_capabilities(
+                self,
+                ProviderThinkingCapabilities {
                     supports_thinking: true,
                     supports_reasoning_content: false,
                     supports_preserved_reasoning: false,
                     wire_format: ThinkingWireFormat::DashScopeEnableThinking,
                     control_surface: "enable_thinking + thinking_budget",
                 },
-                supports_tool_calls: true,
-                supports_json_output: true,
-                supports_fim: false,
-                supports_responses_api: false,
-                supports_structured_outputs: false,
-                supports_tracing: false,
-                supports_evals: false,
-                supports_cache_control: false,
-            },
-            Self::Kimi => ProviderCapabilities {
-                kind: self,
-                display_name: self.display_name(),
-                thinking: ProviderThinkingCapabilities {
+                None,
+                None,
+                CapabilityFlags {
+                    routes: &["fast", "strong", "coding"],
+                    ..CapabilityFlags::default()
+                },
+            ),
+            Self::Kimi => provider_capabilities(
+                self,
+                ProviderThinkingCapabilities {
                     supports_thinking: true,
                     supports_reasoning_content: true,
                     supports_preserved_reasoning: true,
                     wire_format: ThinkingWireFormat::NativeTypeOnly,
                     control_surface: "thinking.type",
                 },
-                supports_tool_calls: true,
-                supports_json_output: true,
-                supports_fim: false,
-                supports_responses_api: false,
-                supports_structured_outputs: false,
-                supports_tracing: false,
-                supports_evals: false,
-                supports_cache_control: false,
-            },
-            Self::Zhipu => ProviderCapabilities {
-                kind: self,
-                display_name: self.display_name(),
-                thinking: ProviderThinkingCapabilities {
+                Some(KIMI_K2_CONTEXT_WINDOW_TOKENS),
+                None,
+                CapabilityFlags {
+                    supports_vision: true,
+                    supports_prompt_cache: true,
+                    cache_behavior: "automatic context cache; usage may expose cached_tokens",
+                    routes: &["strong", "coding", "research_vision"],
+                    ..CapabilityFlags::default()
+                },
+            ),
+            Self::Zhipu => provider_capabilities(
+                self,
+                ProviderThinkingCapabilities {
                     supports_thinking: true,
                     supports_reasoning_content: true,
                     supports_preserved_reasoning: true,
                     wire_format: ThinkingWireFormat::NativeTypeOnly,
                     control_surface: "thinking.type",
                 },
-                supports_tool_calls: true,
-                supports_json_output: true,
-                supports_fim: false,
-                supports_responses_api: false,
-                supports_structured_outputs: false,
-                supports_tracing: false,
-                supports_evals: false,
-                supports_cache_control: false,
-            },
-            Self::OpenRouter | Self::OpenAiCompatible => ProviderCapabilities {
-                kind: self,
-                display_name: self.display_name(),
-                thinking: ProviderThinkingCapabilities {
+                Some(GLM_CONTEXT_WINDOW_TOKENS),
+                Some(GLM_MAX_OUTPUT_TOKENS),
+                CapabilityFlags {
+                    routes: &["strong", "coding"],
+                    ..CapabilityFlags::default()
+                },
+            ),
+            Self::Minimax => provider_capabilities(
+                self,
+                ProviderThinkingCapabilities {
+                    supports_thinking: true,
+                    supports_reasoning_content: true,
+                    supports_preserved_reasoning: true,
+                    wire_format: ThinkingWireFormat::MiniMaxReasoningSplit,
+                    control_surface: "reasoning_split + reasoning_details",
+                },
+                None,
+                None,
+                CapabilityFlags {
+                    supports_prompt_cache: true,
+                    cache_behavior: "automatic cache; no OpenAI prompt_cache_key contract",
+                    routes: &["strong", "coding"],
+                    ..CapabilityFlags::default()
+                },
+            ),
+            Self::Tencent => provider_capabilities(
+                self,
+                ProviderThinkingCapabilities {
+                    supports_thinking: true,
+                    supports_reasoning_content: false,
+                    supports_preserved_reasoning: false,
+                    wire_format: ThinkingWireFormat::Unsupported,
+                    control_surface: "model-specific TokenHub options",
+                },
+                None,
+                None,
+                CapabilityFlags {
+                    routes: &["fast", "strong"],
+                    ..CapabilityFlags::default()
+                },
+            ),
+            Self::Qianfan => provider_capabilities(
+                self,
+                ProviderThinkingCapabilities {
+                    supports_thinking: true,
+                    supports_reasoning_content: true,
+                    supports_preserved_reasoning: true,
+                    wire_format: ThinkingWireFormat::QianfanThinking,
+                    control_surface: "thinking.type + enable_thinking + thinking_budget",
+                },
+                Some(QIANFAN_ERNIE_CONTEXT_WINDOW_TOKENS),
+                None,
+                CapabilityFlags {
+                    supports_responses_api: true,
+                    requires_dedicated_adapter: true,
+                    cache_behavior:
+                        "provider-managed context; Responses API supports previous_response_id",
+                    routes: &["strong", "enterprise"],
+                    ..CapabilityFlags::default()
+                },
+            ),
+            Self::Stepfun => provider_capabilities(
+                self,
+                ProviderThinkingCapabilities {
+                    supports_thinking: false,
+                    supports_reasoning_content: false,
+                    supports_preserved_reasoning: false,
+                    wire_format: ThinkingWireFormat::Unsupported,
+                    control_surface: "standard v1 chat; Step-Plan uses separate endpoint",
+                },
+                Some(STEPFUN_CONTEXT_WINDOW_TOKENS),
+                None,
+                CapabilityFlags {
+                    routes: &["fast"],
+                    ..CapabilityFlags::default()
+                },
+            ),
+            Self::Doubao => provider_capabilities(
+                self,
+                ProviderThinkingCapabilities {
+                    supports_thinking: true,
+                    supports_reasoning_content: false,
+                    supports_preserved_reasoning: false,
+                    wire_format: ThinkingWireFormat::Unsupported,
+                    control_surface: "endpoint/model override required",
+                },
+                Some(DOUBAO_SEED_CODE_CONTEXT_WINDOW_TOKENS),
+                Some(DOUBAO_SEED_CODE_MAX_OUTPUT_TOKENS),
+                CapabilityFlags {
+                    supports_vision: true,
+                    supports_prompt_cache: true,
+                    requires_endpoint_override: true,
+                    requires_model_override: true,
+                    cache_behavior: "Volcano Ark endpoint-specific cache behavior",
+                    routes: &["coding", "research_vision"],
+                    ..CapabilityFlags::default()
+                },
+            ),
+            Self::OpenRouter | Self::OpenAiCompatible => provider_capabilities(
+                self,
+                ProviderThinkingCapabilities {
                     supports_thinking: false,
                     supports_reasoning_content: false,
                     supports_preserved_reasoning: false,
                     wire_format: ThinkingWireFormat::Unsupported,
                     control_surface: "custom provider config required",
                 },
-                supports_tool_calls: true,
-                supports_json_output: true,
-                supports_fim: false,
-                supports_responses_api: matches!(self, Self::OpenAiCompatible),
-                supports_structured_outputs: matches!(self, Self::OpenAiCompatible),
-                supports_tracing: matches!(self, Self::OpenAiCompatible),
-                supports_evals: matches!(self, Self::OpenAiCompatible),
-                supports_cache_control: false,
-            },
+                None,
+                None,
+                CapabilityFlags {
+                    supports_responses_api: matches!(self, Self::OpenAiCompatible),
+                    supports_structured_outputs: matches!(self, Self::OpenAiCompatible),
+                    supports_tracing: matches!(self, Self::OpenAiCompatible),
+                    supports_evals: matches!(self, Self::OpenAiCompatible),
+                    cache_behavior: "depends on configured upstream provider",
+                    routes: &["custom"],
+                    ..CapabilityFlags::default()
+                },
+            ),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CapabilityFlags {
+    supports_fim: bool,
+    supports_responses_api: bool,
+    supports_structured_outputs: bool,
+    supports_tracing: bool,
+    supports_evals: bool,
+    supports_vision: bool,
+    supports_prompt_cache: bool,
+    supports_cache_control: bool,
+    requires_dedicated_adapter: bool,
+    requires_endpoint_override: bool,
+    requires_model_override: bool,
+    cache_behavior: &'static str,
+    routes: &'static [&'static str],
+}
+
+impl Default for CapabilityFlags {
+    fn default() -> Self {
+        Self {
+            supports_fim: false,
+            supports_responses_api: false,
+            supports_structured_outputs: false,
+            supports_tracing: false,
+            supports_evals: false,
+            supports_vision: false,
+            supports_prompt_cache: false,
+            supports_cache_control: false,
+            requires_dedicated_adapter: false,
+            requires_endpoint_override: false,
+            requires_model_override: false,
+            cache_behavior: "no provider-specific cache contract declared",
+            routes: &["fast", "strong"],
+        }
+    }
+}
+
+fn provider_capabilities(
+    kind: ProviderKind,
+    thinking: ProviderThinkingCapabilities,
+    context_window_tokens: Option<u64>,
+    max_output_tokens: Option<u64>,
+    flags: CapabilityFlags,
+) -> ProviderCapabilities {
+    ProviderCapabilities {
+        kind,
+        display_name: kind.display_name(),
+        thinking,
+        supports_tool_calls: true,
+        supports_json_output: true,
+        supports_fim: flags.supports_fim,
+        supports_responses_api: flags.supports_responses_api,
+        supports_structured_outputs: flags.supports_structured_outputs,
+        supports_tracing: flags.supports_tracing,
+        supports_evals: flags.supports_evals,
+        supports_vision: flags.supports_vision,
+        supports_prompt_cache: flags.supports_prompt_cache,
+        supports_cache_control: flags.supports_cache_control,
+        requires_dedicated_adapter: flags.requires_dedicated_adapter,
+        requires_endpoint_override: flags.requires_endpoint_override,
+        requires_model_override: flags.requires_model_override,
+        context_window_tokens,
+        max_output_tokens,
+        cache_behavior: flags.cache_behavior,
+        routes: flags.routes,
+        last_verified: PROVIDER_PROFILE_LAST_VERIFIED,
     }
 }
 
@@ -189,11 +396,21 @@ pub struct ProviderCapabilities {
     pub supports_structured_outputs: bool,
     pub supports_tracing: bool,
     pub supports_evals: bool,
+    pub supports_vision: bool,
+    pub supports_prompt_cache: bool,
     /// Whether this provider needs explicit `cache_control` markers on the
     /// request payload to opt in to prompt caching with explicit breakpoints.
     /// DeepSeek and most OpenAI-compatible providers auto-cache by prefix,
     /// so this stays `false` for them.
     pub supports_cache_control: bool,
+    pub requires_dedicated_adapter: bool,
+    pub requires_endpoint_override: bool,
+    pub requires_model_override: bool,
+    pub context_window_tokens: Option<u64>,
+    pub max_output_tokens: Option<u64>,
+    pub cache_behavior: &'static str,
+    pub routes: &'static [&'static str],
+    pub last_verified: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -251,6 +468,21 @@ pub fn model_context_window_tokens(provider: ProviderKind, model: &DeepSeekModel
         (ProviderKind::DeepSeek, DeepSeekModel::Pro | DeepSeekModel::Flash) => {
             Some(DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS)
         }
+        (ProviderKind::Kimi, DeepSeekModel::Pro | DeepSeekModel::Flash) => {
+            Some(KIMI_K2_CONTEXT_WINDOW_TOKENS)
+        }
+        (ProviderKind::Zhipu, DeepSeekModel::Pro | DeepSeekModel::Flash) => {
+            Some(GLM_CONTEXT_WINDOW_TOKENS)
+        }
+        (ProviderKind::Qianfan, DeepSeekModel::Pro | DeepSeekModel::Flash) => {
+            Some(QIANFAN_ERNIE_CONTEXT_WINDOW_TOKENS)
+        }
+        (ProviderKind::Stepfun, DeepSeekModel::Pro | DeepSeekModel::Flash) => {
+            Some(STEPFUN_CONTEXT_WINDOW_TOKENS)
+        }
+        (ProviderKind::Doubao, DeepSeekModel::Pro | DeepSeekModel::Flash) => {
+            Some(DOUBAO_SEED_CODE_CONTEXT_WINDOW_TOKENS)
+        }
         _ => None,
     }
 }
@@ -261,7 +493,34 @@ pub fn model_context_window_source(provider: ProviderKind, model: &DeepSeekModel
         (ProviderKind::DeepSeek, DeepSeekModel::Pro | DeepSeekModel::Flash) => {
             "DeepSeek API model details"
         }
+        (ProviderKind::Kimi, DeepSeekModel::Pro | DeepSeekModel::Flash) => "Kimi API model details",
+        (ProviderKind::Zhipu, DeepSeekModel::Pro | DeepSeekModel::Flash) => "GLM API model details",
+        (ProviderKind::Qianfan, DeepSeekModel::Pro | DeepSeekModel::Flash) => {
+            "Qianfan model details"
+        }
+        (ProviderKind::Stepfun, DeepSeekModel::Pro | DeepSeekModel::Flash) => {
+            "StepFun text model details"
+        }
+        (ProviderKind::Doubao, DeepSeekModel::Pro | DeepSeekModel::Flash) => {
+            "Volcano Ark Doubao Seed Code details"
+        }
         _ => "not declared by provider preset; using local assembly budget",
+    }
+}
+
+#[must_use]
+pub fn model_max_output_tokens(provider: ProviderKind, model: &DeepSeekModel) -> Option<u64> {
+    match (provider, model.canonical()) {
+        (ProviderKind::DeepSeek, DeepSeekModel::Pro | DeepSeekModel::Flash) => {
+            Some(DEEPSEEK_V4_MAX_OUTPUT_TOKENS)
+        }
+        (ProviderKind::Zhipu, DeepSeekModel::Pro | DeepSeekModel::Flash) => {
+            Some(GLM_MAX_OUTPUT_TOKENS)
+        }
+        (ProviderKind::Doubao, DeepSeekModel::Pro | DeepSeekModel::Flash) => {
+            Some(DOUBAO_SEED_CODE_MAX_OUTPUT_TOKENS)
+        }
+        _ => None,
     }
 }
 
@@ -299,6 +558,16 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub zhipu: ProviderEndpointConfig,
     #[serde(default)]
+    pub minimax: ProviderEndpointConfig,
+    #[serde(default)]
+    pub tencent: ProviderEndpointConfig,
+    #[serde(default)]
+    pub qianfan: ProviderEndpointConfig,
+    #[serde(default)]
+    pub stepfun: ProviderEndpointConfig,
+    #[serde(default)]
+    pub doubao: ProviderEndpointConfig,
+    #[serde(default)]
     pub openrouter: ProviderEndpointConfig,
     #[serde(default, rename = "openai-compatible")]
     pub openai_compatible: ProviderEndpointConfig,
@@ -312,6 +581,11 @@ impl ProviderConfig {
             ProviderKind::Qwen => &self.qwen,
             ProviderKind::Kimi => &self.kimi,
             ProviderKind::Zhipu => &self.zhipu,
+            ProviderKind::Minimax => &self.minimax,
+            ProviderKind::Tencent => &self.tencent,
+            ProviderKind::Qianfan => &self.qianfan,
+            ProviderKind::Stepfun => &self.stepfun,
+            ProviderKind::Doubao => &self.doubao,
             ProviderKind::OpenRouter => &self.openrouter,
             ProviderKind::OpenAiCompatible => &self.openai_compatible,
         }
@@ -437,8 +711,13 @@ fn default_base_url(kind: ProviderKind) -> Option<&'static str> {
     match kind {
         ProviderKind::DeepSeek => None,
         ProviderKind::Qwen => Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
-        ProviderKind::Kimi => Some("https://api.moonshot.cn/v1"),
+        ProviderKind::Kimi => Some("https://api.moonshot.ai/v1"),
         ProviderKind::Zhipu => Some("https://open.bigmodel.cn/api/paas/v4"),
+        ProviderKind::Minimax => Some("https://api.minimaxi.com/v1"),
+        ProviderKind::Tencent => Some("https://tokenhub.tencentmaas.com/v1"),
+        ProviderKind::Qianfan => Some("https://qianfan.baidubce.com/v2"),
+        ProviderKind::Stepfun => Some("https://api.stepfun.ai/v1"),
+        ProviderKind::Doubao => Some("https://ark.cn-beijing.volces.com/api/v3"),
         ProviderKind::OpenRouter => Some("https://openrouter.ai/api/v1"),
         ProviderKind::OpenAiCompatible => Some("https://api.openai.com/v1"),
     }
@@ -463,14 +742,39 @@ fn default_request_model_name(kind: ProviderKind, model: &DeepSeekModel) -> Stri
             DeepSeekModel::Flash => "glm-4.7-flashx".to_string(),
             other => other.to_string(),
         },
+        ProviderKind::Minimax => match canonical {
+            DeepSeekModel::Pro => "MiniMax-M2.7".to_string(),
+            DeepSeekModel::Flash => "MiniMax-M2.7-highspeed".to_string(),
+            other => other.to_string(),
+        },
+        ProviderKind::Tencent => match canonical {
+            DeepSeekModel::Pro => "hunyuan-2.0-thinking".to_string(),
+            DeepSeekModel::Flash => "hunyuan-2.0-instruct".to_string(),
+            other => other.to_string(),
+        },
+        ProviderKind::Qianfan => match canonical {
+            DeepSeekModel::Pro => "ernie-5.0-thinking-preview".to_string(),
+            DeepSeekModel::Flash => "ernie-4.5-turbo-128k".to_string(),
+            other => other.to_string(),
+        },
+        ProviderKind::Stepfun => match canonical {
+            DeepSeekModel::Pro => "step-2-16k".to_string(),
+            DeepSeekModel::Flash => "step-2-mini".to_string(),
+            other => other.to_string(),
+        },
+        ProviderKind::Doubao => match canonical {
+            DeepSeekModel::Pro => "configure-doubao-pro-model".to_string(),
+            DeepSeekModel::Flash => "configure-doubao-flash-model".to_string(),
+            other => other.to_string(),
+        },
         ProviderKind::OpenRouter => match canonical {
             DeepSeekModel::Pro => "deepseek/deepseek-v4-pro".to_string(),
             DeepSeekModel::Flash => "deepseek/deepseek-v4-flash".to_string(),
             other => other.to_string(),
         },
         ProviderKind::OpenAiCompatible => match canonical {
-            DeepSeekModel::Pro => "deepseek-reasoner".to_string(),
-            DeepSeekModel::Flash => "deepseek-chat".to_string(),
+            DeepSeekModel::Pro => "deepseek-v4-pro".to_string(),
+            DeepSeekModel::Flash => "deepseek-v4-flash".to_string(),
             other => other.to_string(),
         },
     }
@@ -582,13 +886,33 @@ mod tests {
         let qwen: ProviderConfig = toml::from_str(r#"default = "qwen""#).expect("qwen parses");
         let kimi: ProviderConfig = toml::from_str(r#"default = "kimi""#).expect("kimi parses");
         let zhipu: ProviderConfig = toml::from_str(r#"default = "zhipu""#).expect("zhipu parses");
+        let minimax: ProviderConfig =
+            toml::from_str(r#"default = "minimax""#).expect("minimax parses");
+        let tencent: ProviderConfig =
+            toml::from_str(r#"default = "tencent""#).expect("tencent parses");
+        let qianfan: ProviderConfig =
+            toml::from_str(r#"default = "qianfan""#).expect("qianfan parses");
+        let stepfun: ProviderConfig =
+            toml::from_str(r#"default = "stepfun""#).expect("stepfun parses");
+        let doubao: ProviderConfig =
+            toml::from_str(r#"default = "doubao""#).expect("doubao parses");
 
         assert_eq!(qwen.default, ProviderKind::Qwen);
         assert_eq!(kimi.default, ProviderKind::Kimi);
         assert_eq!(zhipu.default, ProviderKind::Zhipu);
+        assert_eq!(minimax.default, ProviderKind::Minimax);
+        assert_eq!(tencent.default, ProviderKind::Tencent);
+        assert_eq!(qianfan.default, ProviderKind::Qianfan);
+        assert_eq!(stepfun.default, ProviderKind::Stepfun);
+        assert_eq!(doubao.default, ProviderKind::Doubao);
         assert_eq!(ProviderKind::Qwen.as_str(), "qwen");
         assert_eq!(ProviderKind::Kimi.as_str(), "kimi");
         assert_eq!(ProviderKind::Zhipu.as_str(), "zhipu");
+        assert_eq!(ProviderKind::Minimax.as_str(), "minimax");
+        assert_eq!(ProviderKind::Tencent.as_str(), "tencent");
+        assert_eq!(ProviderKind::Qianfan.as_str(), "qianfan");
+        assert_eq!(ProviderKind::Stepfun.as_str(), "stepfun");
+        assert_eq!(ProviderKind::Doubao.as_str(), "doubao");
     }
 
     #[test]
@@ -613,6 +937,23 @@ mod tests {
                 .thinking
                 .supports_thinking
         );
+        assert_eq!(
+            ProviderKind::Qianfan.capabilities().thinking.wire_format,
+            ThinkingWireFormat::QianfanThinking
+        );
+        assert_eq!(
+            ProviderKind::Minimax.capabilities().thinking.wire_format,
+            ThinkingWireFormat::MiniMaxReasoningSplit
+        );
+        assert!(ProviderKind::Doubao.capabilities().requires_model_override);
+        assert!(ProviderKind::Kimi
+            .capabilities()
+            .routes
+            .contains(&"research_vision"));
+        assert!(ProviderKind::Qianfan
+            .capabilities()
+            .routes
+            .contains(&"enterprise"));
     }
 
     #[test]
@@ -636,6 +977,30 @@ mod tests {
         assert_eq!(budget.model_window_tokens, None);
         assert_eq!(budget.effective_budget_tokens, 32_000);
         assert_eq!(budget.auto_compact_threshold_tokens, 25_600);
+    }
+
+    #[test]
+    fn provider_profiles_declare_context_and_output_limits() {
+        assert_eq!(
+            model_context_window_tokens(ProviderKind::DeepSeek, &DeepSeekModel::Pro),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            model_max_output_tokens(ProviderKind::DeepSeek, &DeepSeekModel::Flash),
+            Some(384_000)
+        );
+        assert_eq!(
+            model_context_window_tokens(ProviderKind::Zhipu, &DeepSeekModel::Pro),
+            Some(200_000)
+        );
+        assert_eq!(
+            model_max_output_tokens(ProviderKind::Doubao, &DeepSeekModel::Pro),
+            Some(32_000)
+        );
+        assert_eq!(
+            ProviderKind::Qwen.capabilities().last_verified,
+            "2026-05-21"
+        );
     }
 
     #[test]
@@ -776,7 +1141,7 @@ flash_model = "chat-fast"
             "sk-test".to_string(),
         );
         assert_eq!(kimi.kind(), ProviderKind::Kimi);
-        assert_eq!(kimi.base_url(), Some("https://api.moonshot.cn/v1"));
+        assert_eq!(kimi.base_url(), Some("https://api.moonshot.ai/v1"));
         assert_eq!(kimi.request_model_name(&DeepSeekModel::Pro), "kimi-k2.6");
         assert_eq!(kimi.request_model_name(&DeepSeekModel::Flash), "kimi-k2.5");
 
@@ -797,6 +1162,41 @@ flash_model = "chat-fast"
             zhipu.request_model_name(&DeepSeekModel::Flash),
             "glm-4.7-flashx"
         );
+
+        let minimax = build_provider(
+            &ProviderConfig {
+                default: ProviderKind::Minimax,
+                ..ProviderConfig::default()
+            },
+            "sk-test".to_string(),
+        );
+        assert_eq!(minimax.base_url(), Some("https://api.minimaxi.com/v1"));
+        assert_eq!(
+            minimax.request_model_name(&DeepSeekModel::Pro),
+            "MiniMax-M2.7"
+        );
+
+        let qianfan = build_provider(
+            &ProviderConfig {
+                default: ProviderKind::Qianfan,
+                ..ProviderConfig::default()
+            },
+            "sk-test".to_string(),
+        );
+        assert_eq!(qianfan.base_url(), Some("https://qianfan.baidubce.com/v2"));
+        assert_eq!(
+            qianfan.request_model_name(&DeepSeekModel::Pro),
+            "ernie-5.0-thinking-preview"
+        );
+
+        let stepfun = build_provider(
+            &ProviderConfig {
+                default: ProviderKind::Stepfun,
+                ..ProviderConfig::default()
+            },
+            "sk-test".to_string(),
+        );
+        assert_eq!(stepfun.base_url(), Some("https://api.stepfun.ai/v1"));
     }
 
     #[test]

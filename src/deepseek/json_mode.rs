@@ -176,6 +176,7 @@ mod tests {
                     role: Some("assistant".into()),
                     content: Some(ChatMessageContent::Text(content.into())),
                     reasoning_content: None,
+                    reasoning_details: None,
                     tool_calls: None,
                 },
                 finish_reason: Some("stop".into()),

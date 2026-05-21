@@ -182,9 +182,6 @@ fn scan_mention_paths(root: &Path) -> Result<Vec<String>, anyhow::Error> {
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
-        if rel.chars().any(char::is_whitespace) {
-            continue;
-        }
         paths.push(rel);
         if paths.len() >= MENTION_INDEX_LIMIT {
             break;

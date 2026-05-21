@@ -127,6 +127,40 @@ impl DeepSeekClient {
                     }
                 }
             }
+            ThinkingWireFormat::QianfanThinking => {
+                object.remove("thinking");
+                let parsed = thinking.as_ref().and_then(parse_thinking_config);
+                let enabled = parsed.as_ref().is_some_and(|config| config.is_enabled());
+                object.insert(
+                    "thinking".to_string(),
+                    serde_json::json!({
+                        "type": if enabled { "enabled" } else { "disabled" },
+                    }),
+                );
+                object.insert(
+                    "enable_thinking".to_string(),
+                    serde_json::Value::Bool(enabled),
+                );
+                if enabled {
+                    if let Some(budget) = parsed
+                        .and_then(|config| thinking_budget_for_effort(config.effort.as_deref()))
+                    {
+                        object.insert(
+                            "thinking_budget".to_string(),
+                            serde_json::Value::Number(budget.into()),
+                        );
+                    }
+                }
+            }
+            ThinkingWireFormat::MiniMaxReasoningSplit => {
+                object.remove("thinking");
+                let parsed = thinking.as_ref().and_then(parse_thinking_config);
+                let enabled = parsed.as_ref().is_some_and(|config| config.is_enabled());
+                object.insert(
+                    "reasoning_split".to_string(),
+                    serde_json::Value::Bool(enabled),
+                );
+            }
             ThinkingWireFormat::Unsupported => {
                 object.remove("thinking");
             }
@@ -359,6 +393,19 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_payload_keeps_native_thinking() {
+        let client = super::DeepSeekClient::new(String::new())
+            .with_thinking_wire_format(ThinkingWireFormat::DeepSeekNative);
+        let payload = client
+            .chat_payload(&request_with_thinking(ThinkingConfig::with_effort("high")))
+            .expect("payload");
+
+        assert_eq!(payload["thinking"]["type"], "enabled");
+        assert_eq!(payload["thinking"]["effort"], "high");
+        assert!(payload.get("enable_thinking").is_none());
+    }
+
+    #[test]
     fn dashscope_payload_maps_thinking_to_enable_thinking() {
         let client = super::DeepSeekClient::new(String::new())
             .with_thinking_wire_format(ThinkingWireFormat::DashScopeEnableThinking);
@@ -369,6 +416,33 @@ mod tests {
         assert!(payload.get("thinking").is_none());
         assert_eq!(payload["enable_thinking"], true);
         assert_eq!(payload["thinking_budget"], 8192);
+    }
+
+    #[test]
+    fn qianfan_payload_maps_thinking_to_nested_and_top_level_flags() {
+        let client = super::DeepSeekClient::new(String::new())
+            .with_thinking_wire_format(ThinkingWireFormat::QianfanThinking);
+        let payload = client
+            .chat_payload(&request_with_thinking(ThinkingConfig::with_effort(
+                "medium",
+            )))
+            .expect("payload");
+
+        assert_eq!(payload["thinking"]["type"], "enabled");
+        assert_eq!(payload["enable_thinking"], true);
+        assert_eq!(payload["thinking_budget"], 4096);
+    }
+
+    #[test]
+    fn minimax_payload_maps_thinking_to_reasoning_split() {
+        let client = super::DeepSeekClient::new(String::new())
+            .with_thinking_wire_format(ThinkingWireFormat::MiniMaxReasoningSplit);
+        let payload = client
+            .chat_payload(&request_with_thinking(ThinkingConfig::enabled()))
+            .expect("payload");
+
+        assert!(payload.get("thinking").is_none());
+        assert_eq!(payload["reasoning_split"], true);
     }
 
     #[test]

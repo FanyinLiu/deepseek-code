@@ -4,16 +4,50 @@ use std::path::Path;
 /// Find all `@path` mentions in text and return the list of paths.
 pub fn extract_mentions(text: &str) -> Vec<String> {
     let mut mentions = Vec::new();
-    for word in text.split_whitespace() {
-        if let Some(path) = word.strip_prefix('@') {
-            // Strip trailing punctuation
-            let path = path.trim_end_matches(|c: char| c.is_ascii_punctuation());
+    let mut index = 0usize;
+    while index < text.len() {
+        let Some(ch) = text[index..].chars().next() else {
+            break;
+        };
+        if ch != '@' || !is_mention_token_boundary(text, index) {
+            index += ch.len_utf8();
+            continue;
+        }
+
+        let after_at = index + ch.len_utf8();
+        if text[after_at..].starts_with('"') {
+            let path_start = after_at + 1;
+            let path_end = text[path_start..]
+                .find('"')
+                .map_or(text.len(), |rel| path_start + rel);
+            let path = &text[path_start..path_end];
             if !path.is_empty() {
-                mentions.push(path.to_string());
+                mentions.push(path.replace('\\', "/"));
             }
+            index = if path_end < text.len() {
+                path_end + 1
+            } else {
+                text.len()
+            };
+        } else {
+            let rest = &text[after_at..];
+            let path_len = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            let path = rest[..path_len].trim_end_matches(|c: char| c.is_ascii_punctuation());
+            if !path.is_empty() {
+                mentions.push(path.replace('\\', "/"));
+            }
+            index = after_at + path_len;
         }
     }
     mentions
+}
+
+fn is_mention_token_boundary(text: &str, start: usize) -> bool {
+    start == 0
+        || text[..start]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_whitespace)
 }
 
 /// Read mentioned files and build a context string to inject before the user message.
@@ -66,9 +100,29 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_mentions_with_quoted_path() {
+        let text = "Review @\"docs/My Plan.md\" and @src/lib.rs.";
+        let m = extract_mentions(text);
+        assert_eq!(m, vec!["docs/My Plan.md", "src/lib.rs"]);
+    }
+
+    #[test]
     fn test_extract_mentions_none() {
         let text = "No mentions here.";
         let m = extract_mentions(text);
         assert!(m.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_mentions_with_quoted_path() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let docs = root.path().join("docs");
+        std::fs::create_dir_all(&docs).expect("create docs");
+        std::fs::write(docs.join("My Plan.md"), "ship it").expect("write file");
+
+        let context = resolve_mentions(root.path(), "Read @\"docs/My Plan.md\"");
+
+        assert!(context.contains("--- docs/My Plan.md ---"));
+        assert!(context.contains("ship it"));
     }
 }

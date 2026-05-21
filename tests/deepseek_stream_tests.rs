@@ -48,6 +48,20 @@ fn test_accumulate_reasoning_deltas() {
     assert_eq!(result.reasoning_content, "Let me think about this...");
 }
 
+#[test]
+fn test_accumulate_minimax_reasoning_details() {
+    let mut acc = StreamAccumulator::new();
+
+    let chunk = serde_json::from_str::<StreamChunk>(
+        r#"{"choices":[{"index":0,"delta":{"reasoning_details":[{"type":"reasoning.text","text":"first "},{"type":"reasoning.text","text":"second"}]},"finish_reason":null}],"usage":null}"#
+    ).expect("valid stream chunk");
+
+    acc.apply_chunk(&chunk).unwrap();
+
+    let result = acc.finalize();
+    assert_eq!(result.reasoning_content, "first second");
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Tool call delta merging
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

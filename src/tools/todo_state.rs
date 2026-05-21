@@ -15,6 +15,32 @@ pub struct TodoSummary {
     pub active: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct TodoBoardItem {
+    pub id: String,
+    pub status: String,
+    pub content: String,
+    pub active_form: Option<String>,
+    pub priority: Option<String>,
+}
+
+impl TodoBoardItem {
+    #[must_use]
+    pub fn display_text(&self) -> &str {
+        if self.status == "in_progress" {
+            self.active_form.as_deref().unwrap_or(&self.content)
+        } else {
+            &self.content
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TodoBoard {
+    pub summary: TodoSummary,
+    pub items: Vec<TodoBoardItem>,
+}
+
 impl TodoSummary {
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -104,6 +130,15 @@ pub fn load_todo_summary(project_root: &Path) -> TodoSummary {
         .unwrap_or_default()
 }
 
+#[must_use]
+pub fn load_todo_board(project_root: &Path) -> TodoBoard {
+    let items = read_todo_items(project_root).unwrap_or_default();
+    TodoBoard {
+        summary: summarize_todo_items(&items),
+        items: board_items(&items),
+    }
+}
+
 pub fn validate_todo_items(todos: &[Value]) -> Result<()> {
     let mut ids = std::collections::HashSet::new();
     let mut in_progress = 0usize;
@@ -182,6 +217,52 @@ pub fn summarize_todo_items(todos: &[Value]) -> TodoSummary {
     summary
 }
 
+#[must_use]
+pub fn board_items(todos: &[Value]) -> Vec<TodoBoardItem> {
+    todos
+        .iter()
+        .enumerate()
+        .filter_map(|(index, todo)| {
+            let content = todo
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            if content.is_empty() {
+                return None;
+            }
+            let id = todo
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| (index + 1).to_string());
+            let status = todo
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("pending")
+                .to_string();
+            let active_form = todo
+                .get("active_form")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string);
+            let priority = todo
+                .get("priority")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string);
+            Some(TodoBoardItem {
+                id,
+                status,
+                content: content.to_string(),
+                active_form,
+                priority,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,5 +319,25 @@ mod tests {
 
         assert_eq!(summary.completed, 1);
         assert!(todo_state_path(temp.path()).exists());
+    }
+
+    #[test]
+    fn board_items_prefer_active_form_for_running_task() {
+        let items = board_items(&[
+            serde_json::json!({
+                "id": "ship-ui",
+                "content": "Ship UI",
+                "active_form": "Shipping UI",
+                "status": "in_progress",
+                "priority": "high"
+            }),
+            serde_json::json!({"content": "Verify", "status": "pending"}),
+        ]);
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].id, "ship-ui");
+        assert_eq!(items[0].display_text(), "Shipping UI");
+        assert_eq!(items[0].priority.as_deref(), Some("high"));
+        assert_eq!(items[1].id, "2");
     }
 }

@@ -19,6 +19,13 @@ use crate::policy;
 use crate::search::{self, SearchMatch};
 use crate::storage::{EventLogStore, SessionEvent, SessionEventKind};
 
+/// Per-turn output-token budget. Covers reasoning_content + content
+/// combined. DeepSeek V4 Pro/Flash advertise a max of 384K, but real-world
+/// reasoning rarely needs more than ~20-30K. 8K (the previous value) was
+/// chronically under-budget: complex prompts could burn the full budget on
+/// chain-of-thought and never get to write a final answer.
+const TURN_MAX_OUTPUT_TOKENS: u32 = 32_768;
+
 use super::background::{BackgroundQueue, BackgroundTaskSnapshot};
 use super::compact::{
     build_compact_snapshot, retained_messages, should_auto_compact, DEFAULT_COMPACT_KEEP_MESSAGES,
@@ -1618,7 +1625,7 @@ impl Orchestrator {
             thinking: thinking_config,
             response_format: None,
             stream: true,
-            max_tokens: Some(8192),
+            max_tokens: Some(TURN_MAX_OUTPUT_TOKENS),
         };
 
         // 9. Stream and process
@@ -1633,8 +1640,23 @@ impl Orchestrator {
         match result {
             Ok(stream_result) => {
                 if stream_result.tool_calls.is_empty() {
+                    // GUARANTEE: every turn ends with a visible message. Per
+                    // `docs/provider_eval_design.md`, **reasoning_content must
+                    // not be rendered as user text** — it stays internal.
+                    // So we have two cases:
+                    //   1. content non-empty → show it as-is.
+                    //   2. content empty (with or without reasoning) → emit a
+                    //      placeholder. We diagnose whether the model burned its
+                    //      output budget on reasoning so the user knows what to do.
+                    let content_empty = stream_result.content.trim().is_empty();
+                    let visible_content = if content_empty {
+                        empty_content_placeholder(&stream_result)
+                    } else {
+                        stream_result.content.clone()
+                    };
+                    let used_placeholder = content_empty;
                     let msg = ReasoningManager::new_assistant_message(
-                        &stream_result.content,
+                        &visible_content,
                         (!stream_result.reasoning_content.is_empty())
                             .then_some(&stream_result.reasoning_content),
                         &[],
@@ -1651,27 +1673,34 @@ impl Orchestrator {
                             },
                         );
                     }
-                    if !stream_result.content.trim().is_empty() {
+                    if !visible_content.trim().is_empty() {
                         self.record_event(
                             Some(turn_id),
                             SessionEventKind::AssistantVisible {
-                                content: stream_result.content.clone(),
+                                content: visible_content.clone(),
                             },
                         );
                     }
                     if !emitted.reasoning {
                         send_reasoning_delta(event_tx, &stream_result.reasoning_content);
                     }
-                    if !emitted.content {
-                        send_event(
-                            event_tx,
-                            AgentEvent::ContentDelta(stream_result.content.clone()),
-                        );
+                    if !emitted.content || used_placeholder {
+                        send_event(event_tx, AgentEvent::ContentDelta(visible_content.clone()));
                     }
                     if let Some(ref usage) = stream_result.usage {
                         self.session.metadata.total_tokens += u64::from(usage.total_tokens);
                         self.session.metadata.total_cost_estimate += usage
                             .estimate_cost_cny(&self.session.reasoning_state.effective_model());
+                        self.session.metadata.prompt_cache_hit_tokens = self
+                            .session
+                            .metadata
+                            .prompt_cache_hit_tokens
+                            .saturating_add(u64::from(usage.prompt_cache_hit_tokens.unwrap_or(0)));
+                        self.session.metadata.prompt_cache_miss_tokens = self
+                            .session
+                            .metadata
+                            .prompt_cache_miss_tokens
+                            .saturating_add(u64::from(usage.prompt_cache_miss_tokens.unwrap_or(0)));
                         send_event(
                             event_tx,
                             AgentEvent::StreamDone {
@@ -2055,7 +2084,7 @@ impl Orchestrator {
                     thinking: thinking_config,
                     response_format: None,
                     stream: true,
-                    max_tokens: Some(8192),
+                    max_tokens: Some(TURN_MAX_OUTPUT_TOKENS),
                 };
 
                 let mut plan_execution_failed = false;
@@ -2835,7 +2864,7 @@ impl Orchestrator {
             thinking: Some(ThinkingConfig::enabled()),
             response_format: None,
             stream: true,
-            max_tokens: Some(8192),
+            max_tokens: Some(TURN_MAX_OUTPUT_TOKENS),
         };
 
         let suppress_visible_content = self.plan_execution.is_some();
@@ -2871,8 +2900,19 @@ impl Orchestrator {
                         &mut self.session.reasoning_state,
                         &mut self.session.messages,
                     );
+                    // Same placeholder fallback as the no-tool branch above.
+                    // Reasoning stays internal per `docs/provider_eval_design.md`;
+                    // when content is empty we surface a placeholder instead of
+                    // leaking the chain-of-thought.
+                    let content_empty = followup_result.content.trim().is_empty();
+                    let visible_content = if content_empty {
+                        empty_content_placeholder(&followup_result)
+                    } else {
+                        followup_result.content.clone()
+                    };
+                    let used_placeholder = content_empty;
                     let mut final_msg = ReasoningManager::new_assistant_message(
-                        &followup_result.content,
+                        &visible_content,
                         (!followup_result.reasoning_content.is_empty())
                             .then_some(&followup_result.reasoning_content),
                         &[],
@@ -2887,13 +2927,23 @@ impl Orchestrator {
                     if !emitted.reasoning {
                         send_reasoning_delta(event_tx, &followup_result.reasoning_content);
                     }
-                    if !emitted.content && !suppress_visible_content {
-                        send_event(event_tx, AgentEvent::ContentDelta(followup_result.content));
+                    if (!emitted.content || used_placeholder) && !suppress_visible_content {
+                        send_event(event_tx, AgentEvent::ContentDelta(visible_content));
                     }
                     if let Some(ref usage) = followup_result.usage {
                         self.session.metadata.total_tokens += u64::from(usage.total_tokens);
                         self.session.metadata.total_cost_estimate += usage
                             .estimate_cost_cny(&self.session.reasoning_state.effective_model());
+                        self.session.metadata.prompt_cache_hit_tokens = self
+                            .session
+                            .metadata
+                            .prompt_cache_hit_tokens
+                            .saturating_add(u64::from(usage.prompt_cache_hit_tokens.unwrap_or(0)));
+                        self.session.metadata.prompt_cache_miss_tokens = self
+                            .session
+                            .metadata
+                            .prompt_cache_miss_tokens
+                            .saturating_add(u64::from(usage.prompt_cache_miss_tokens.unwrap_or(0)));
                         send_event(
                             event_tx,
                             AgentEvent::StreamDone {
@@ -2913,6 +2963,33 @@ impl Orchestrator {
         }
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Empty-content placeholder
+// ---------------------------------------------------------------------------
+
+/// Returned when a stream finishes with no visible content. Diagnoses the
+/// likely cause from the usage block so the user knows what to do next.
+/// Per `docs/provider_eval_design.md`, reasoning_content is NEVER included
+/// in this message — it stays internal.
+fn empty_content_placeholder(stream_result: &StreamResult) -> String {
+    if let Some(ref usage) = stream_result.usage {
+        // If completion_tokens is at/near max_tokens, the model almost
+        // certainly ran out of room mid-reasoning before writing an answer.
+        let used = usage.completion_tokens;
+        let near_budget = used >= TURN_MAX_OUTPUT_TOKENS.saturating_sub(256);
+        if near_budget {
+            return format!(
+                "_(模型本轮的输出预算被思考过程耗尽（completion_tokens={used}）。\
+                 试着把问题拆小一些，或换 Flash 模型再问 / model exhausted its \
+                 output budget on reasoning before writing an answer — try a \
+                 narrower question or the Flash model.)_"
+            );
+        }
+    }
+    "_(模型本轮未返回任何内容，请换个说法重试 / model returned no content this turn — try rephrasing and asking again.)_"
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------

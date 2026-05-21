@@ -10,6 +10,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::deepseek::{MessageVisibility, ProtocolMessage, Role, ToolCall};
+use crate::tools::todo_state;
 use crate::tui::shared_output::{BlockRole, ASSISTANT_PREFIX, SYSTEM_PREFIX, TOOL_LOG_PREFIX};
 use crate::tui::{
     diff_viewer, motion, plan_tracker, subagent_cards, syntax_highlight, theme, view_blocks,
@@ -27,6 +28,8 @@ pub struct TranscriptProps<'a> {
     pub plan_current_step: usize,
     pub plan_total_steps: usize,
     pub plan_warnings: &'a [String],
+    pub todo_summary: &'a todo_state::TodoSummary,
+    pub todo_items: &'a [todo_state::TodoBoardItem],
     pub subagents: &'a [subagent_cards::SubagentCard],
     pub global_elapsed_ms: u64,
     pub diffs: &'a [diff_viewer::FileDiffItem],
@@ -165,12 +168,30 @@ pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) 
         );
     }
 
+    // ── Project Todo / Task Board ──
+    if !props.todo_items.is_empty() {
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
+        }
+        render_inline_todo_board(
+            &mut lines,
+            props.todo_summary,
+            props.todo_items,
+            content_width,
+        );
+    }
+
     // ── Inline Subagents ──
     if !props.subagents.is_empty() {
         if !lines.is_empty() {
             lines.push(Line::from(""));
         }
-        render_inline_subagents(&mut lines, props.subagents, props.global_elapsed_ms);
+        render_inline_subagents(
+            &mut lines,
+            props.subagents,
+            props.global_elapsed_ms,
+            content_width,
+        );
     }
 
     // ── Inline Diffs ──
@@ -1935,12 +1956,115 @@ fn aggregate_plan_status(steps: &[plan_tracker::PlanStepItem]) -> plan_tracker::
     }
 }
 
+fn render_inline_todo_board(
+    lines: &mut Vec<Line>,
+    summary: &todo_state::TodoSummary,
+    items: &[todo_state::TodoBoardItem],
+    width: u16,
+) {
+    let p = theme::palette();
+    let line_width = width.max(32) as usize;
+    let mut header = format!(
+        "Task Board · {} total · active {} · pending {} · done {}",
+        summary.total, summary.in_progress, summary.pending, summary.completed
+    );
+    if summary.cancelled > 0 {
+        header.push_str(&format!(" · cancelled {}", summary.cancelled));
+    }
+    lines.push(Line::from(vec![
+        Span::styled(
+            "╭─ ",
+            transcript_style(p.divider).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            truncate_display_width(&header, line_width.saturating_sub(3)),
+            transcript_style(p.accent).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    let visible_items = items.iter().take(8);
+    for item in visible_items {
+        let status = todo_view_status(&item.status);
+        let id = truncate_display_width(&item.id, 10);
+        let id = format!("{id:<10}");
+        let status_label = todo_status_label(&item.status);
+        let status_text = format!("{status_label:<9}");
+        let priority = if width >= 72 {
+            item.priority
+                .as_ref()
+                .map(|priority| format!(" · {}", truncate_display_width(priority, 12)))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let fixed_width = 2
+            + display_width(status.icon())
+            + 1
+            + display_width(&id)
+            + 1
+            + display_width(&status_text)
+            + display_width(&priority);
+        let text_width = line_width.saturating_sub(fixed_width).max(8);
+        let text = truncate_display_width(item.display_text(), text_width);
+        lines.push(Line::from(vec![
+            Span::styled("│ ", transcript_style(p.divider)),
+            Span::styled(
+                status.icon().to_string(),
+                transcript_style(status.color()).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ", transcript_style(p.divider)),
+            Span::styled(id, transcript_style(p.secondary)),
+            Span::styled(" ", transcript_style(p.divider)),
+            Span::styled(status_text, transcript_style(p.muted)),
+            Span::styled(text, transcript_style(p.text)),
+            Span::styled(priority, transcript_style(p.dim)),
+        ]));
+    }
+
+    if items.len() > 8 {
+        lines.push(Line::from(vec![
+            Span::styled("│ ", transcript_style(p.divider)),
+            Span::styled(
+                format!("+{} more tasks", items.len() - 8),
+                transcript_style(p.dim),
+            ),
+        ]));
+    }
+    lines.push(Line::from(vec![
+        Span::styled("╰─ ", transcript_style(p.divider)),
+        Span::styled(".octocode/todos.json", transcript_style(p.dim)),
+        Span::styled(" · ", transcript_style(p.divider)),
+        Span::styled("/task list", transcript_style(p.warning)),
+    ]));
+}
+
+fn todo_view_status(status: &str) -> view_blocks::ViewStatus {
+    match status {
+        "in_progress" => view_blocks::ViewStatus::Running,
+        "completed" => view_blocks::ViewStatus::Done,
+        "cancelled" | "canceled" => view_blocks::ViewStatus::Cancelled,
+        _ => view_blocks::ViewStatus::Queued,
+    }
+}
+
+fn todo_status_label(status: &str) -> &'static str {
+    match status {
+        "in_progress" => "active",
+        "completed" => "done",
+        "cancelled" | "canceled" => "cancelled",
+        _ => "pending",
+    }
+}
+
 fn render_inline_subagents(
     lines: &mut Vec<Line>,
     cards: &[subagent_cards::SubagentCard],
     _global_elapsed_ms: u64,
+    width: u16,
 ) {
     let p = theme::palette();
+    let compact = width < 96;
+    let line_width = width.max(24) as usize;
     let running = cards
         .iter()
         .filter(|c| c.status == subagent_cards::SubagentCardStatus::Running)
@@ -1956,6 +2080,20 @@ fn render_inline_subagents(
     let summaries = cards.iter().filter(|c| c.summary.is_some()).count();
     let files_read: usize = cards.iter().map(|c| c.files_read).sum();
     let files_written: usize = cards.iter().map(|c| c.files_written).sum();
+    let token_usage: u64 = cards.iter().map(|c| c.token_usage).sum();
+    let header = if compact {
+        format!("Agents {} · running {running} · done {done}", cards.len())
+    } else {
+        format!(
+            "Agent Team · {} total · {running} running · {done} done · {failed} failed",
+            cards.len()
+        )
+    };
+    let artifacts = if token_usage > 0 {
+        format!("{summaries} summaries · files R{files_read} W{files_written} · {token_usage} tok")
+    } else {
+        format!("{summaries} summaries · files R{files_read} W{files_written}")
+    };
 
     lines.push(Line::from(vec![
         Span::styled(
@@ -1963,22 +2101,15 @@ fn render_inline_subagents(
             transcript_style(p.divider).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "Agent Team",
+            truncate_display_width(&header, line_width.saturating_sub(3)),
             transcript_style(p.accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!(
-                " · {} total · {running} running · {done} done · {failed} failed",
-                cards.len()
-            ),
-            transcript_style(p.dim),
         ),
     ]));
     lines.push(Line::from(vec![
         Span::styled("│ ", transcript_style(p.divider)),
         Span::styled("artifacts ", transcript_style(p.muted)),
         Span::styled(
-            format!("{summaries} summaries · files R{files_read} W{files_written}"),
+            truncate_display_width(&artifacts, line_width.saturating_sub(12)),
             transcript_style(if failed > 0 { p.warning } else { p.secondary }),
         ),
     ]));
@@ -2000,16 +2131,6 @@ fn render_inline_subagents(
             .unwrap_or(&card.description);
         let display = sanitize_agent_visible_summary(display);
         let role = truncate(&agent_role_label(&card.agent_type), 14);
-        let files = if card.files_read > 0 || card.files_written > 0 {
-            format!(" · R{} W{}", card.files_read, card.files_written)
-        } else {
-            String::new()
-        };
-        let tokens = if card.token_usage > 0 {
-            format!(" · {} tok", card.token_usage)
-        } else {
-            String::new()
-        };
         let lane_style = match status {
             view_blocks::ViewStatus::Running => {
                 transcript_style(p.text).add_modifier(Modifier::BOLD)
@@ -2018,6 +2139,37 @@ fn render_inline_subagents(
             view_blocks::ViewStatus::Failed => transcript_style(p.danger),
             _ => transcript_style(p.text),
         };
+        let role_width = if compact { 9 } else { 14 };
+        let role = truncate_display_width(&role, role_width);
+        let role = format!("{role:<role_width$}");
+        let status_label = if compact && status == view_blocks::ViewStatus::Running {
+            "run"
+        } else {
+            status.label()
+        };
+        let status_width = if compact { 5 } else { 7 };
+        let status_text = format!("{status_label:<status_width$}");
+        let files = if !compact && (card.files_read > 0 || card.files_written > 0) {
+            format!(" · R{} W{}", card.files_read, card.files_written)
+        } else {
+            String::new()
+        };
+        let tokens = if !compact && card.token_usage > 0 {
+            format!(" · {} tok", card.token_usage)
+        } else {
+            String::new()
+        };
+        let meta = format!(" · {meta}{files}{tokens}");
+        let fixed_width = 2
+            + display_width(status.icon())
+            + 1
+            + display_width(&role)
+            + 1
+            + display_width(&status_text)
+            + 1
+            + display_width(&meta);
+        let description_width = line_width.saturating_sub(fixed_width).max(8);
+        let description = truncate_display_width(&card.description, description_width);
         lines.push(Line::from(vec![
             Span::styled("│ ", transcript_style(p.divider)),
             Span::styled(
@@ -2025,23 +2177,28 @@ fn render_inline_subagents(
                 transcript_style(status.color()).add_modifier(Modifier::BOLD),
             ),
             Span::styled(" ", transcript_style(p.divider)),
-            Span::styled(format!("{role:<14}"), lane_style),
-            Span::styled(format!(" {:<7}", status.label()), transcript_style(p.muted)),
+            Span::styled(role, lane_style),
             Span::styled(" ", transcript_style(p.divider)),
-            Span::styled(truncate(&card.description, 54), lane_style),
-            Span::styled(format!(" · {meta}{files}{tokens}"), transcript_style(p.dim)),
+            Span::styled(status_text, transcript_style(p.muted)),
+            Span::styled(" ", transcript_style(p.divider)),
+            Span::styled(description, lane_style),
+            Span::styled(meta, transcript_style(p.dim)),
         ]));
+        let detail_label = if card.status == subagent_cards::SubagentCardStatus::Running {
+            "now    "
+        } else {
+            "output "
+        };
+        let detail_width = line_width
+            .saturating_sub(2 + 2 + display_width(detail_label))
+            .max(8);
         lines.push(Line::from(vec![
             Span::styled("│   ", transcript_style(p.divider)),
+            Span::styled(detail_label, transcript_style(p.muted)),
             Span::styled(
-                if card.status == subagent_cards::SubagentCardStatus::Running {
-                    "now    "
-                } else {
-                    "output "
-                },
-                transcript_style(p.muted),
+                truncate_display_width(&display, detail_width),
+                transcript_style(p.secondary),
             ),
-            Span::styled(truncate(&display, 80), transcript_style(p.secondary)),
         ]));
     }
 
@@ -2362,6 +2519,8 @@ mod tests {
                         plan_current_step: 0,
                         plan_total_steps: 0,
                         plan_warnings: &[],
+                        todo_summary: &todo_state::TodoSummary::default(),
+                        todo_items: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
                         diffs: &[],
@@ -2387,6 +2546,28 @@ mod tests {
             .collect()
     }
 
+    fn render_snapshot(width: u16, height: u16, props: TranscriptProps<'_>) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|f| render_transcript(f, f.area(), props))
+            .expect("draw");
+
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(width as usize)
+            .map(|line| {
+                line.iter()
+                    .map(ratatui::buffer::Cell::symbol)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn transcript_defaults_to_latest_lines() {
         theme::set_active_theme(theme::ThemeMode::Light);
@@ -2397,6 +2578,141 @@ mod tests {
         assert!(!rendered.contains("line 1"));
         assert!(rendered.contains("line 4"));
         assert!(rendered.contains("line 6"));
+    }
+
+    #[test]
+    fn narrow_agent_team_compacts_metadata_without_orphan_lines() {
+        theme::set_active_theme(theme::ThemeMode::Light);
+        let mut explorer = subagent_cards::SubagentCard::new(
+            "019e0c78-8006",
+            "code-explorer",
+            "Trace plan and agent render paths",
+        );
+        explorer.status = subagent_cards::SubagentCardStatus::Done;
+        explorer.summary = Some("Located transcript and subagent render paths".into());
+        explorer.duration_ms = Some(1_250);
+        explorer.files_read = 3;
+
+        let mut reviewer = subagent_cards::SubagentCard::new(
+            "019e0c78-7fe3",
+            "code-reviewer",
+            "Review multi-agent UI against 8 competitors",
+        );
+        reviewer.apply_delta("checking Mission Control density and task visibility");
+        reviewer.token_usage = 42;
+
+        let mut planner = subagent_cards::SubagentCard::new(
+            "019e0c78-81a4",
+            "planner",
+            "Plan next UI pass for real swarm runs",
+        );
+        planner.apply_delta("mapping agent lanes to plan steps");
+        planner.files_written = 1;
+
+        let subagents = vec![explorer, reviewer, planner];
+        let rendered = render_snapshot(
+            80,
+            22,
+            TranscriptProps {
+                messages: &[],
+                pending_user_message: None,
+                queued_user_messages: &[],
+                scroll_offset: 0,
+                plan_summary: None,
+                plan_steps: &[],
+                plan_current_step: 0,
+                plan_total_steps: 0,
+                plan_warnings: &[],
+                todo_summary: &todo_state::TodoSummary::default(),
+                todo_items: &[],
+                subagents: &subagents,
+                global_elapsed_ms: 0,
+                diffs: &[],
+                selected_diff: None,
+                is_streaming: true,
+                show_streaming_placeholder: false,
+                stream_buffer: "",
+                reasoning_buffer: "",
+                reasoning_elapsed_ms: 0,
+                reasoning_tokens: 0,
+                show_reasoning: false,
+            },
+        );
+        let lines: Vec<&str> = rendered.lines().collect();
+
+        assert!(rendered.contains("Agents 3"));
+        assert!(rendered.contains("running 2"));
+        assert!(rendered.contains("done 1"));
+        assert!(rendered.contains("Review multi-agent UI"));
+        assert!(rendered.contains("files R3 W1"));
+        assert!(rendered.contains("42 tok"));
+        assert!(lines.iter().all(|line| line.chars().count() <= 80));
+        assert!(!lines
+            .iter()
+            .any(|line| matches!(line.trim(), "W0" | "W1" | "tok")));
+    }
+
+    #[test]
+    fn task_board_renders_project_todo_state_as_transcript_block() {
+        theme::set_active_theme(theme::ThemeMode::Light);
+        let raw_items = vec![
+            serde_json::json!({
+                "id": "ui",
+                "content": "Build task board",
+                "active_form": "Building task board",
+                "status": "in_progress",
+                "priority": "high"
+            }),
+            serde_json::json!({
+                "id": "tests",
+                "content": "Add task board tests",
+                "status": "pending"
+            }),
+            serde_json::json!({
+                "id": "done",
+                "content": "Inspect todo store",
+                "status": "completed"
+            }),
+        ];
+        let todo_summary = todo_state::summarize_todo_items(&raw_items);
+        let todo_items = todo_state::board_items(&raw_items);
+
+        let rendered = render_snapshot(
+            90,
+            18,
+            TranscriptProps {
+                messages: &[],
+                pending_user_message: None,
+                queued_user_messages: &[],
+                scroll_offset: 0,
+                plan_summary: None,
+                plan_steps: &[],
+                plan_current_step: 0,
+                plan_total_steps: 0,
+                plan_warnings: &[],
+                todo_summary: &todo_summary,
+                todo_items: &todo_items,
+                subagents: &[],
+                global_elapsed_ms: 0,
+                diffs: &[],
+                selected_diff: None,
+                is_streaming: false,
+                show_streaming_placeholder: false,
+                stream_buffer: "",
+                reasoning_buffer: "",
+                reasoning_elapsed_ms: 0,
+                reasoning_tokens: 0,
+                show_reasoning: false,
+            },
+        );
+
+        assert!(rendered.contains("Task Board"));
+        assert!(rendered.contains("3 total"));
+        assert!(rendered.contains("active 1"));
+        assert!(rendered.contains("Building task board"));
+        assert!(rendered.contains("Add task board tests"));
+        assert!(rendered.contains(".octocode/todos.json"));
+        assert!(rendered.contains("/task list"));
     }
 
     #[test]
@@ -2482,6 +2798,8 @@ mod tests {
                         plan_current_step: 0,
                         plan_total_steps: 0,
                         plan_warnings: &[],
+                        todo_summary: &todo_state::TodoSummary::default(),
+                        todo_items: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
                         diffs: &[],
@@ -2717,6 +3035,8 @@ mod tests {
                         plan_current_step: 0,
                         plan_total_steps: 0,
                         plan_warnings: &[],
+                        todo_summary: &todo_state::TodoSummary::default(),
+                        todo_items: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
                         diffs: &[],
@@ -2778,6 +3098,8 @@ mod tests {
                         plan_current_step: 0,
                         plan_total_steps: 0,
                         plan_warnings: &[],
+                        todo_summary: &todo_state::TodoSummary::default(),
+                        todo_items: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
                         diffs: &[],
@@ -2861,6 +3183,8 @@ mod tests {
                         plan_current_step: 0,
                         plan_total_steps: 0,
                         plan_warnings: &[],
+                        todo_summary: &todo_state::TodoSummary::default(),
+                        todo_items: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
                         diffs: &[],
@@ -2910,6 +3234,8 @@ mod tests {
                         plan_current_step: 0,
                         plan_total_steps: 0,
                         plan_warnings: &[],
+                        todo_summary: &todo_state::TodoSummary::default(),
+                        todo_items: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
                         diffs: &[],
@@ -2960,6 +3286,8 @@ mod tests {
                         plan_current_step: 0,
                         plan_total_steps: 0,
                         plan_warnings: &[],
+                        todo_summary: &todo_state::TodoSummary::default(),
+                        todo_items: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
                         diffs: &[],
@@ -3008,6 +3336,8 @@ mod tests {
                         plan_current_step: 0,
                         plan_total_steps: 0,
                         plan_warnings: &[],
+                        todo_summary: &todo_state::TodoSummary::default(),
+                        todo_items: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
                         diffs: &[],
@@ -3059,6 +3389,8 @@ mod tests {
                         plan_current_step: 0,
                         plan_total_steps: 0,
                         plan_warnings: &[],
+                        todo_summary: &todo_state::TodoSummary::default(),
+                        todo_items: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
                         diffs: &[],
@@ -3109,6 +3441,8 @@ mod tests {
                         plan_current_step: 0,
                         plan_total_steps: 0,
                         plan_warnings: &[],
+                        todo_summary: &todo_state::TodoSummary::default(),
+                        todo_items: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
                         diffs: &[],
@@ -3162,6 +3496,8 @@ mod tests {
                         plan_current_step: 0,
                         plan_total_steps: 0,
                         plan_warnings: &[],
+                        todo_summary: &todo_state::TodoSummary::default(),
+                        todo_items: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
                         diffs: &[],
@@ -3210,6 +3546,8 @@ mod tests {
                         plan_current_step: 0,
                         plan_total_steps: 0,
                         plan_warnings: &[],
+                        todo_summary: &todo_state::TodoSummary::default(),
+                        todo_items: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
                         diffs: &[],
@@ -3272,6 +3610,8 @@ mod tests {
                         plan_current_step: 2,
                         plan_total_steps: 3,
                         plan_warnings: &[],
+                        todo_summary: &todo_state::TodoSummary::default(),
+                        todo_items: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
                         diffs: &[],
@@ -3329,6 +3669,8 @@ mod tests {
                         plan_current_step: 2,
                         plan_total_steps: 2,
                         plan_warnings: &[],
+                        todo_summary: &todo_state::TodoSummary::default(),
+                        todo_items: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
                         diffs: &[],
@@ -3417,6 +3759,8 @@ mod tests {
                         plan_current_step: 5,
                         plan_total_steps: 10,
                         plan_warnings: &[],
+                        todo_summary: &todo_state::TodoSummary::default(),
+                        todo_items: &[],
                         subagents: &[],
                         global_elapsed_ms: 0,
                         diffs: &[],

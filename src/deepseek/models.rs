@@ -316,6 +316,12 @@ pub enum ThinkingWireFormat {
     /// DashScope/Qwen-compatible `enable_thinking` and optional budget fields.
     #[serde(rename = "dashscope_enable_thinking")]
     DashScopeEnableThinking,
+    /// Qianfan-compatible thinking controls with nested and top-level flags.
+    #[serde(rename = "qianfan_thinking")]
+    QianfanThinking,
+    /// MiniMax OpenAI-compatible reasoning split mode.
+    #[serde(rename = "minimax_reasoning_split")]
+    MiniMaxReasoningSplit,
     /// Remove thinking controls from the outbound request.
     Unsupported,
 }
@@ -362,6 +368,8 @@ pub struct ChatResponseMessage {
     pub content: Option<ChatMessageContent>,
     #[serde(default)]
     pub reasoning_content: Option<String>,
+    #[serde(default)]
+    pub reasoning_details: Option<serde_json::Value>,
     #[serde(default)]
     pub tool_calls: Option<Vec<ToolCall>>,
 }
@@ -420,6 +428,8 @@ pub struct StreamDelta {
     pub content: Option<String>,
     #[serde(default)]
     pub reasoning_content: Option<String>,
+    #[serde(default)]
+    pub reasoning_details: Option<serde_json::Value>,
     #[serde(default)]
     pub tool_calls: Option<Vec<ToolCallDelta>>,
 }
@@ -758,6 +768,13 @@ pub struct Session {
 pub struct SessionMetadata {
     pub total_tokens: u64,
     pub total_cost_estimate: f64,
+    /// Cumulative prompt-cache hits across all turns in this session. Used by
+    /// `/usage --all-time` to compute cross-session cache effectiveness.
+    /// `#[serde(default)]` keeps old session.json files loadable.
+    #[serde(default)]
+    pub prompt_cache_hit_tokens: u64,
+    #[serde(default)]
+    pub prompt_cache_miss_tokens: u64,
     pub model_switches: Vec<ModelSwitchRecord>,
     pub tags: Vec<String>,
 }

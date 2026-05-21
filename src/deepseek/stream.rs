@@ -190,6 +190,17 @@ impl StreamAccumulator {
                 }
                 self.result.reasoning_content.push_str(reasoning);
             }
+            if let Some(ref reasoning_details) = delta.reasoning_details {
+                let reasoning = reasoning_details_to_text(reasoning_details);
+                if !reasoning.is_empty() {
+                    if self.result.reasoning_content.len() + reasoning.len() > MAX_CONTENT_LEN {
+                        return Err(DeepSeekError::Other(
+                            "stream reasoning content exceeded maximum size (8 MiB)".into(),
+                        ));
+                    }
+                    self.result.reasoning_content.push_str(&reasoning);
+                }
+            }
             if let Some(ref tool_deltas) = delta.tool_calls {
                 for td in tool_deltas {
                     self.merge_tool_delta(td)?;
@@ -252,6 +263,23 @@ impl StreamAccumulator {
             });
         }
         self.result
+    }
+}
+
+fn reasoning_details_to_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(reasoning_details_to_text)
+            .collect::<Vec<_>>()
+            .join(""),
+        serde_json::Value::Object(object) => object
+            .get("text")
+            .or_else(|| object.get("content"))
+            .map(reasoning_details_to_text)
+            .unwrap_or_default(),
+        _ => String::new(),
     }
 }
 

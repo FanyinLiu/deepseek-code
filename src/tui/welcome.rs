@@ -409,7 +409,9 @@ fn ui_language_from_config(value: &str) -> UiLanguage {
         "auto" | "" => auto_ui_language(),
         "zh" | "zh-cn" | "zh-hans" | "zh-hans-cn" | "chinese" => UiLanguage::ZhCn,
         "en" | "en-us" | "en-gb" | "english" => UiLanguage::EnUs,
+        "ja" | "ja-jp" | "jp" | "japanese" => UiLanguage::EnUs,
         value if value.starts_with("zh") => UiLanguage::ZhCn,
+        value if value.starts_with("ja") => UiLanguage::EnUs,
         _ => UiLanguage::EnUs,
     }
 }
@@ -422,7 +424,7 @@ fn auto_ui_language() -> UiLanguage {
         .find_map(|value| {
             if value.starts_with("zh") {
                 Some(UiLanguage::ZhCn)
-            } else if value.starts_with("en") {
+            } else if value.starts_with("en") || value.starts_with("ja") {
                 Some(UiLanguage::EnUs)
             } else {
                 None
@@ -907,7 +909,11 @@ fn render_compact_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData
         )]),
         Line::from(vec![Span::styled(headline, welcome_muted())]),
         Line::from(""),
-        Line::from(vec![Span::styled(data.model.to_string(), welcome_muted())]),
+        Line::from(vec![
+            Span::styled("octo", welcome_accent()),
+            Span::styled(" · ", welcome_muted()),
+            Span::styled(data.model.to_string(), welcome_muted()),
+        ]),
         Line::from(""),
         Line::from(footer),
     ]);
@@ -1081,7 +1087,7 @@ fn render_compact_api_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboard
     if show_context {
         let model = format!("{} ({})", model_label(&data.model), data.thinking);
         let workspace = Line::from(vec![
-            Span::styled(&data.workspace_name, welcome_text()),
+            Span::styled("octo", welcome_accent()),
             Span::styled(" · ", welcome_muted()),
             Span::styled(model, welcome_muted()),
         ]);
@@ -1297,8 +1303,8 @@ fn render_product_mark(f: &mut Frame, area: Rect, lang: UiLanguage) {
     let workspace_line = tr(lang, "Octocode Workbench", "Octocode 工作台");
     let subtitle = tr(
         lang,
-        "Local, minimal, and continuous stream.",
-        "本地、轻量、持续滚动输出。",
+        "Run with `octo` from this workspace.",
+        "使用主命令 octo。",
     );
     let mut lines = vec![Line::from(vec![
         Span::styled("OCTOCODE", welcome_accent().add_modifier(Modifier::BOLD)),
@@ -1336,7 +1342,11 @@ fn render_quick_access(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
             Span::styled(tr(lang, "Quick start", "快速开始"), welcome_accent()),
             Span::styled(" : ", welcome_muted()),
             Span::styled(
-                tr(lang, "/help for all commands", "/help 查看所有命令"),
+                tr(
+                    lang,
+                    "run octo, then /help for commands",
+                    "运行 octo 后用 /help 查看命令",
+                ),
                 welcome_text(),
             ),
         ]),
@@ -1512,8 +1522,8 @@ mod tests {
         let rendered = buffer_text(terminal.backend());
         let compact = rendered.replace(' ', "");
 
-        assert!(rendered.contains("OCTOCODE"));
-        assert!(compact.to_lowercase().contains("octocode"));
+        assert!(rendered.contains("Octocode") || rendered.contains("OCTOCODE"));
+        assert!(compact.contains("octo"));
     }
 
     #[test]

@@ -62,6 +62,8 @@ pub fn standard_tool_definitions() -> Vec<ToolDefinition> {
         write_file_def(),
         apply_patch_def(),
         run_command_def(),
+        bash_output_def(),
+        kill_shell_def(),
         fetch_url_def(),
         web_search_def(),
         github_pr_def(),
@@ -114,6 +116,8 @@ fn tool_display_name(name: &str) -> &'static str {
         "write_file" => "Write file",
         "apply_patch" => "Apply patch",
         "run_command" => "Run command",
+        "bash_output" => "Bash output",
+        "kill_shell" => "Kill shell",
         "fetch_url" => "Fetch URL",
         "web_search" => "Web search",
         "github_pr" => "GitHub PR",
@@ -134,7 +138,8 @@ fn tool_permission_profile(name: &str) -> ToolPermissionProfile {
         }
         "edit_file" | "write_file" | "apply_patch" => ToolPermissionProfile::WorkspaceWrite,
         "git_add" | "git_commit" => ToolPermissionProfile::GitMutation,
-        "run_command" => ToolPermissionProfile::Command,
+        "run_command" | "kill_shell" => ToolPermissionProfile::Command,
+        "bash_output" => ToolPermissionProfile::SafeRead,
         "fetch_url" | "web_search" | "github_pr" => ToolPermissionProfile::Network,
         "run_subagent" => ToolPermissionProfile::Agent,
         "think" => ToolPermissionProfile::InternalReasoning,
@@ -148,7 +153,7 @@ fn tool_output_summary(name: &str) -> ToolOutputSummary {
             ToolOutputSummary::PersistentState
         }
         "ask_user" | "ask_user_question" => ToolOutputSummary::UserQuestion,
-        "read_file" | "list_dir" | "grep" | "search_code" | "run_command" => {
+        "read_file" | "list_dir" | "grep" | "search_code" | "run_command" | "bash_output" => {
             ToolOutputSummary::Compact
         }
         _ => ToolOutputSummary::Inline,
@@ -576,7 +581,7 @@ fn run_command_def() -> ToolDefinition {
         tool_type: "function".into(),
         function: super::models::FunctionDef {
             name: "run_command".into(),
-            description: "Run a shell command in the project workspace. Requires approval. Do not use this for file reading, directory listing, or code search commands such as cat, ls, find, grep, rg, sed, head, or tail; use read_file, list_dir, search_files, or search_code instead.".into(),
+            description: "Run a shell command in the project workspace. Requires approval. Do not use this for file reading, directory listing, or code search commands such as cat, ls, find, grep, rg, sed, head, or tail; use read_file, list_dir, search_files, or search_code instead. For long-running commands (npm install, cargo build, tests), pass run_in_background: true to get a shell_id back immediately and then poll progress via bash_output.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -584,12 +589,52 @@ fn run_command_def() -> ToolDefinition {
                     "cwd": { "type": "string", "description": "Working directory (default: project root)" },
                     "timeout_seconds": {
                         "type": "integer",
-                        "description": "Command timeout in seconds. Defaults to policy.command_timeout_seconds.",
+                        "description": "Command timeout in seconds. Ignored when run_in_background is true.",
                         "minimum": 1,
                         "maximum": 600
+                    },
+                    "run_in_background": {
+                        "type": "boolean",
+                        "description": "If true, spawn the command in the background and return a shell_id immediately instead of waiting for completion. Use bash_output to poll progress."
                     }
                 },
                 "required": ["command"]
+            }),
+        },
+    }
+}
+
+fn bash_output_def() -> ToolDefinition {
+    ToolDefinition {
+        tool_type: "function".into(),
+        function: super::models::FunctionDef {
+            name: "bash_output".into(),
+            description: "Poll incremental stdout/stderr from a background shell previously started via run_command with run_in_background: true. Returns only new output since the last cursor; pass back next_stdout_cursor / next_stderr_cursor on the next call.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "shell_id": { "type": "string", "description": "The shell id returned by run_command in background mode." },
+                    "stdout_cursor": { "type": "integer", "minimum": 0, "description": "Cursor returned by the previous call; defaults to 0." },
+                    "stderr_cursor": { "type": "integer", "minimum": 0, "description": "Cursor returned by the previous call; defaults to 0." }
+                },
+                "required": ["shell_id"]
+            }),
+        },
+    }
+}
+
+fn kill_shell_def() -> ToolDefinition {
+    ToolDefinition {
+        tool_type: "function".into(),
+        function: super::models::FunctionDef {
+            name: "kill_shell".into(),
+            description: "Terminate a background shell. Safe on already-exited shells.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "shell_id": { "type": "string", "description": "The shell id to terminate." }
+                },
+                "required": ["shell_id"]
             }),
         },
     }

@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::{hash_map::DefaultHasher, HashMap, VecDeque},
     hash::{Hash, Hasher},
     io::{self, IsTerminal, Write},
@@ -54,7 +55,11 @@ struct TranscriptState {
     scroll_offset: usize,
     plan_hash: u64,
     subagents_len: usize,
+    subagents_hash: u64,
+    swarm_hash: u64,
+    todo_hash: u64,
     diffs_len: usize,
+    diff_hash: u64,
     settings_open: bool,
     showing_welcome: bool,
 }
@@ -183,6 +188,7 @@ pub struct TuiApp {
     pub options_needed: Option<DecisionPrompt>,
     pub pending_options: Option<(String, Vec<String>)>,
     pub todo_summary: crate::tools::todo_state::TodoSummary,
+    pub todo_items: Vec<crate::tools::todo_state::TodoBoardItem>,
     pub recent_tool_summaries: VecDeque<String>,
     pub last_user_question_summary: Option<String>,
     pub latest_compact_summary: Option<String>,
@@ -217,6 +223,22 @@ pub struct TuiApp {
     pub settings_open: bool,
     pub settings_tab: settings_panel::SettingsTab,
     pub settings_selected: usize,
+    slash_suggestion_cache: RefCell<SlashSuggestionCache>,
+}
+
+#[derive(Default)]
+struct SlashSuggestionCache {
+    prefix: String,
+    language: String,
+    suggestions: Vec<(String, String)>,
+}
+
+impl SlashSuggestionCache {
+    fn clear(&mut self) {
+        self.prefix.clear();
+        self.language.clear();
+        self.suggestions.clear();
+    }
 }
 
 pub struct DecisionPrompt {
@@ -665,6 +687,7 @@ impl TuiApp {
         } else {
             Vec::new()
         };
+        let todo_board = crate::tools::todo_state::load_todo_board(&project_root);
 
         Self {
             input_text: String::new(),
@@ -721,7 +744,8 @@ impl TuiApp {
             file_diffs: Vec::new(),
             options_needed: None,
             pending_options: None,
-            todo_summary: crate::tools::todo_state::load_todo_summary(&project_root),
+            todo_summary: todo_board.summary,
+            todo_items: todo_board.items,
             recent_tool_summaries: VecDeque::new(),
             last_user_question_summary: None,
             latest_compact_summary: None,
@@ -754,6 +778,7 @@ impl TuiApp {
             settings_open: false,
             settings_tab: settings_panel::SettingsTab::Model,
             settings_selected: 0,
+            slash_suggestion_cache: RefCell::default(),
         }
     }
 
@@ -888,9 +913,11 @@ impl TuiApp {
         self.input_text.len().hash(&mut hasher);
         self.cursor_pos.hash(&mut hasher);
         self.plan_steps.len().hash(&mut hasher);
+        plan_steps_hash(&self.plan_steps).hash(&mut hasher);
         self.plan_current_step.hash(&mut hasher);
         self.plan_total_steps.hash(&mut hasher);
         self.subagents.len().hash(&mut hasher);
+        subagents_hash(&self.subagents).hash(&mut hasher);
         self.options_needed.is_some().hash(&mut hasher);
         self.pending_options
             .as_ref()
@@ -904,6 +931,7 @@ impl TuiApp {
         self.todo_summary.completed.hash(&mut hasher);
         self.todo_summary.cancelled.hash(&mut hasher);
         self.todo_summary.active.is_some().hash(&mut hasher);
+        self.todo_items.hash(&mut hasher);
         self.file_diffs.len().hash(&mut hasher);
         self.queued_inputs.len().hash(&mut hasher);
         self.show_file_tree.hash(&mut hasher);
@@ -925,7 +953,7 @@ impl TuiApp {
         self.current_turn_reasoning_tokens.hash(&mut hasher);
         self.is_chinese_ui().hash(&mut hasher);
         self.welcome.workspace_name.len().hash(&mut hasher);
-        self.active_swarm.is_some().hash(&mut hasher);
+        active_swarm_hash(self.active_swarm.as_ref()).hash(&mut hasher);
 
         hasher.finish()
     }
@@ -970,7 +998,7 @@ impl TuiApp {
         });
         let plan_hash = stable_hash(&(
             self.plan_summary.as_deref(),
-            self.plan_steps.len(),
+            plan_steps_hash(&self.plan_steps),
             self.plan_current_step,
             self.plan_total_steps,
             self.plan_warnings.len(),
@@ -990,10 +1018,32 @@ impl TuiApp {
             scroll_offset: self.scroll_offset,
             plan_hash,
             subagents_len: self.subagents.len(),
+            subagents_hash: subagents_hash(&self.subagents),
+            swarm_hash: active_swarm_hash(self.active_swarm.as_ref()),
+            todo_hash: stable_hash(&self.todo_items),
             diffs_len: self.file_diffs.len(),
+            diff_hash: self.diff_state_hash(),
             settings_open: self.settings_open,
             showing_welcome: self.is_showing_welcome(),
         }
+    }
+
+    fn diff_state_hash(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.diff_focused.hash(&mut hasher);
+        self.selected_diff.hash(&mut hasher);
+        self.diff_scroll.hash(&mut hasher);
+        for diff in &self.file_diffs {
+            diff.path.hash(&mut hasher);
+            diff.stats.hash(&mut hasher);
+            let status = match diff.status {
+                diff_viewer::DiffStatus::Pending => 0u8,
+                diff_viewer::DiffStatus::Accepted => 1,
+                diff_viewer::DiffStatus::Rejected => 2,
+            };
+            status.hash(&mut hasher);
+        }
+        hasher.finish()
     }
 
     fn status_state(&self) -> StatusState {
@@ -1200,6 +1250,23 @@ impl TuiApp {
                 );
                 true
             }
+            1 => {
+                self.config.policy.auto_approve_safe_read =
+                    !self.config.policy.auto_approve_safe_read;
+                self.status_message = format!(
+                    "Safe reads: {}",
+                    settings_on_off(self.config.policy.auto_approve_safe_read)
+                );
+                true
+            }
+            2 => {
+                self.config.policy.auto_mode = !self.config.policy.auto_mode;
+                self.status_message = format!(
+                    "Auto mode: {}",
+                    settings_on_off(self.config.policy.auto_mode)
+                );
+                true
+            }
             3 => {
                 self.config.policy.require_approval_for_write =
                     !self.config.policy.require_approval_for_write;
@@ -1226,6 +1293,26 @@ impl TuiApp {
                 );
                 true
             }
+            6 => {
+                self.config.policy.block_protected_paths =
+                    !self.config.policy.block_protected_paths;
+                self.status_message = format!(
+                    "Protected paths: {}",
+                    settings_on_off(self.config.policy.block_protected_paths)
+                );
+                true
+            }
+            7 => {
+                self.config.policy.command_timeout_seconds = cycle_command_timeout_seconds(
+                    self.config.policy.command_timeout_seconds,
+                    delta,
+                );
+                self.status_message = format!(
+                    "Command timeout: {}s",
+                    self.config.policy.command_timeout_seconds
+                );
+                true
+            }
             _ => false,
         }
     }
@@ -1235,10 +1322,11 @@ impl TuiApp {
             0 => {
                 self.config.ui.language = cycle_ui_language(&self.config.ui.language, delta);
                 self.welcome.display_language = self.config.ui.language.clone();
+                let language_label = ui_language_display_name(&self.config.ui.language);
                 self.status_message = if self.is_chinese_ui() {
-                    format!("界面语言：{}", self.config.ui.language)
+                    format!("界面语言：{language_label}")
                 } else {
-                    format!("Display language: {}", self.config.ui.language)
+                    format!("Display language: {language_label}")
                 };
                 self.push_activity(format!("language: {}", self.config.ui.language));
                 true
@@ -1246,6 +1334,18 @@ impl TuiApp {
             1 => {
                 let next = cycle_theme_mode(self.theme_mode, delta);
                 self.set_theme_mode(next);
+                true
+            }
+            2 => {
+                self.motion_level = cycle_motion_level(self.motion_level, delta);
+                self.config.ui.motion = self.motion_level.label().to_string();
+                self.status_message = format!("Motion: {}", self.motion_level.label());
+                self.push_activity(format!("motion: {}", self.motion_level.label()));
+                true
+            }
+            3 => {
+                let next = cycle_renderer_mode(self.renderer_mode, delta);
+                self.set_renderer_mode(next);
                 true
             }
             4 => {
@@ -1278,6 +1378,36 @@ impl TuiApp {
 
     fn apply_agent_setting_change(&mut self, delta: i32) -> bool {
         match self.settings_selected {
+            0 => {
+                self.config.router.enabled = !self.config.router.enabled;
+                self.status_message =
+                    format!("Router: {}", settings_on_off(self.config.router.enabled));
+                true
+            }
+            1 => {
+                self.config.router.use_model_classifier = !self.config.router.use_model_classifier;
+                self.status_message = format!(
+                    "Model classifier: {}",
+                    settings_on_off(self.config.router.use_model_classifier)
+                );
+                true
+            }
+            2 => {
+                self.config.subagent.enabled = !self.config.subagent.enabled;
+                self.status_message = format!(
+                    "Subagents: {}",
+                    settings_on_off(self.config.subagent.enabled)
+                );
+                true
+            }
+            3 => {
+                self.config.subagent.swarm_enabled = !self.config.subagent.swarm_enabled;
+                self.status_message = format!(
+                    "Swarm: {}",
+                    settings_on_off(self.config.subagent.swarm_enabled)
+                );
+                true
+            }
             4 => {
                 let current = self.config.subagent.max_parallel.max(1);
                 self.config.subagent.max_parallel = if delta < 0 {
@@ -1291,9 +1421,34 @@ impl TuiApp {
                 );
                 true
             }
+            5 => {
+                self.config.subagent.auto_decompose = !self.config.subagent.auto_decompose;
+                self.status_message = format!(
+                    "Auto decompose: {}",
+                    settings_on_off(self.config.subagent.auto_decompose)
+                );
+                true
+            }
+            6 => {
+                self.config.subagent.allow_custom_agents =
+                    !self.config.subagent.allow_custom_agents;
+                self.status_message = format!(
+                    "Custom agents: {}",
+                    settings_on_off(self.config.subagent.allow_custom_agents)
+                );
+                true
+            }
             7 => {
                 self.config.mcp.enabled = !self.config.mcp.enabled;
                 self.status_message = format!("MCP: {}", settings_on_off(self.config.mcp.enabled));
+                true
+            }
+            9 => {
+                self.config.telemetry.enabled = !self.config.telemetry.enabled;
+                self.status_message = format!(
+                    "Telemetry: {}",
+                    settings_on_off(self.config.telemetry.enabled)
+                );
                 true
             }
             _ => false,
@@ -1543,6 +1698,7 @@ impl TuiApp {
                     if let Some(idx) = self.selected_diff {
                         if idx > 0 {
                             self.selected_diff = Some(idx - 1);
+                            self.diff_scroll = 0;
                         }
                     }
                 } else if self.file_tree_focused {
@@ -1565,6 +1721,7 @@ impl TuiApp {
                     if let Some(idx) = self.selected_diff {
                         if idx + 1 < self.file_diffs.len() {
                             self.selected_diff = Some(idx + 1);
+                            self.diff_scroll = 0;
                         }
                     }
                 } else if self.file_tree_focused {
@@ -1584,10 +1741,18 @@ impl TuiApp {
                 }
             }
             KeyCode::PageDown => {
-                self.scroll_newer(PAGE_SCROLL_LINES);
+                if self.diff_focused {
+                    self.diff_scroll = self.diff_scroll.saturating_add(PAGE_SCROLL_LINES);
+                } else {
+                    self.scroll_newer(PAGE_SCROLL_LINES);
+                }
             }
             KeyCode::PageUp => {
-                self.scroll_older(PAGE_SCROLL_LINES);
+                if self.diff_focused {
+                    self.diff_scroll = self.diff_scroll.saturating_sub(PAGE_SCROLL_LINES);
+                } else {
+                    self.scroll_older(PAGE_SCROLL_LINES);
+                }
             }
             KeyCode::Tab => {
                 if let Some((_, options)) = &self.pending_options {
@@ -1645,6 +1810,9 @@ impl TuiApp {
                     self.plan_summary = None;
                     self.subagents.clear();
                     self.file_diffs.clear();
+                    self.selected_diff = None;
+                    self.diff_scroll = 0;
+                    self.diff_focused = false;
                     self.pending_options = None;
                     self.activity_log.clear();
                     crate::workspace::apply::clear_history();
@@ -1665,14 +1833,34 @@ impl TuiApp {
                     };
                 }
                 'd' if self.input_text.is_empty() => {
-                    if !self.file_diffs.is_empty() {
+                    if self.file_diffs.is_empty() {
+                        self.diff_focused = false;
+                        self.selected_diff = None;
+                        self.diff_scroll = 0;
+                        self.status_message = if self.is_chinese_ui() {
+                            "没有可查看的 diff".into()
+                        } else {
+                            "No diffs to review".into()
+                        };
+                    } else {
                         self.diff_focused = !self.diff_focused;
                         self.file_tree_focused = false;
-                        if self.diff_focused && self.selected_diff.is_none() {
+                        if self.diff_focused
+                            && self
+                                .selected_diff
+                                .is_none_or(|idx| idx >= self.file_diffs.len())
+                        {
                             self.selected_diff = Some(0);
                         }
+                        self.diff_scroll = 0;
                         self.status_message = if self.diff_focused {
-                            "Diff focus ON — ↑↓ navigate, a=accept, r=reject, d=exit".into()
+                            if self.is_chinese_ui() {
+                                "Diff 焦点：↑↓ 文件 · PgUp/PgDn 滚动 · a 接受 · r 拒绝 · d 关闭"
+                                    .into()
+                            } else {
+                                "Diff focus: ↑↓ file · PgUp/PgDn scroll · a accept · r reject · d close"
+                                    .into()
+                            }
                         } else {
                             "Diff focus OFF".into()
                         };
@@ -1682,6 +1870,7 @@ impl TuiApp {
                     self.show_file_tree = !self.show_file_tree;
                     self.file_tree_focused = self.show_file_tree;
                     self.diff_focused = false;
+                    self.diff_scroll = 0;
                     if self.show_file_tree {
                         self.file_tree.refresh();
                         self.status_message =
@@ -1706,8 +1895,14 @@ impl TuiApp {
                     if let Some(idx) = self.selected_diff {
                         if idx < self.file_diffs.len() {
                             self.file_diffs[idx].status = diff_viewer::DiffStatus::Accepted;
-                            self.status_message =
-                                format!("Accepted: {}", self.file_diffs[idx].path);
+                            self.status_message = if self.is_chinese_ui() {
+                                format!("已标记接受（未应用）：{}", self.file_diffs[idx].path)
+                            } else {
+                                format!(
+                                    "Marked accepted (not applied): {}",
+                                    self.file_diffs[idx].path
+                                )
+                            };
                         }
                     }
                 }
@@ -1715,8 +1910,14 @@ impl TuiApp {
                     if let Some(idx) = self.selected_diff {
                         if idx < self.file_diffs.len() {
                             self.file_diffs[idx].status = diff_viewer::DiffStatus::Rejected;
-                            self.status_message =
-                                format!("Rejected: {}", self.file_diffs[idx].path);
+                            self.status_message = if self.is_chinese_ui() {
+                                format!("已标记拒绝（未应用）：{}", self.file_diffs[idx].path)
+                            } else {
+                                format!(
+                                    "Marked rejected (not applied): {}",
+                                    self.file_diffs[idx].path
+                                )
+                            };
                         }
                     }
                 }
@@ -1857,12 +2058,21 @@ impl TuiApp {
         let trimmed = self.input_text.trim();
         if self.settings_open || !trimmed.starts_with('/') || trimmed.contains(char::is_whitespace)
         {
+            self.slash_suggestion_cache.borrow_mut().clear();
             return Vec::new();
         }
 
-        let registry = crate::commands::CommandRegistry::new();
-        let language = &self.config.ui.language;
-        registry
+        let language = self.config.ui.language.clone();
+        {
+            let cache = self.slash_suggestion_cache.borrow();
+            if cache.prefix == trimmed && cache.language == language {
+                return cache.suggestions.clone();
+            }
+        }
+
+        let mut registry = crate::commands::CommandRegistry::new();
+        registry.load_prompt_commands(&self.file_tree.root);
+        let suggestions = registry
             .match_prefix(trimmed)
             .into_iter()
             .map(|cmd| {
@@ -1878,18 +2088,24 @@ impl TuiApp {
                 (
                     display_name.to_string(),
                     format!(
-                        "{} · {} · {}",
-                        slash_command_group(cmd.name, self.is_chinese_ui()),
+                        "{} · {}",
                         crate::commands::localized_command_description(
                             cmd.name,
                             cmd.description,
-                            language
+                            &language
                         ),
-                        crate::commands::localized_command_usage(cmd.usage, language)
+                        crate::commands::localized_command_usage(cmd.usage, &language)
                     ),
                 )
             })
-            .collect()
+            .collect::<Vec<_>>();
+        {
+            let mut cache = self.slash_suggestion_cache.borrow_mut();
+            cache.prefix = trimmed.to_string();
+            cache.language = language;
+            cache.suggestions = suggestions.clone();
+        }
+        suggestions
     }
 
     fn handle_file_mention_key(&mut self, key: KeyEvent) -> bool {
@@ -1938,11 +2154,17 @@ impl TuiApp {
         if self.api_key_entry.is_some() || self.settings_open {
             return Vec::new();
         }
-        let Some((_, prefix)) = mention_prefix_at_cursor(&self.input_text, self.cursor_pos) else {
+        let Some(mention) = mention_prefix_at_cursor(&self.input_text, self.cursor_pos) else {
             return Vec::new();
         };
         let recent = recent_mention_paths(&self.input_history);
-        file_mention_candidates(&self.file_tree.mention_paths, &prefix, 8, &recent)
+        file_mention_candidates(
+            &self.file_tree.mention_paths,
+            &mention.prefix,
+            8,
+            &recent,
+            mention.quoted,
+        )
     }
 
     fn shell_hint_active(&self) -> bool {
@@ -1959,26 +2181,31 @@ impl TuiApp {
         let idx = self
             .selected_file_mention_index
             .min(suggestions.len().saturating_sub(1));
-        let Some((token_start, _)) = mention_prefix_at_cursor(&self.input_text, self.cursor_pos)
-        else {
+        let Some(mention) = mention_prefix_at_cursor(&self.input_text, self.cursor_pos) else {
             return;
         };
         let byte_cursor = char_to_byte_idx(&self.input_text, self.cursor_pos);
         let completion = &suggestions[idx];
-        let replacement = format!("@{completion} ");
+        let replacement = file_mention_replacement(completion, mention.quoted, true);
         self.input_text
-            .replace_range(token_start..byte_cursor, &replacement);
+            .replace_range(mention.token_start..byte_cursor, &replacement);
         self.cursor_pos =
-            self.input_text[..token_start].chars().count() + replacement.chars().count();
+            self.input_text[..mention.token_start].chars().count() + replacement.chars().count();
         self.selected_file_mention_index = idx;
-        self.status_message = format!("@{completion} will attach file context");
+        self.status_message = format!(
+            "{} will attach file context",
+            file_mention_display(completion, mention.quoted)
+        );
     }
 
     fn current_file_mention_is_exact_match(&self, suggestions: &[String]) -> bool {
-        let Some((_, prefix)) = mention_prefix_at_cursor(&self.input_text, self.cursor_pos) else {
+        let Some(mention) = mention_prefix_at_cursor(&self.input_text, self.cursor_pos) else {
             return false;
         };
-        let prefix = prefix.replace('\\', "/");
+        if mention.quoted {
+            return false;
+        }
+        let prefix = mention.prefix.replace('\\', "/");
         suggestions
             .iter()
             .any(|candidate| candidate.eq_ignore_ascii_case(&prefix))
@@ -2313,7 +2540,8 @@ impl TuiApp {
             return false;
         }
 
-        let registry = crate::commands::CommandRegistry::new();
+        let mut registry = crate::commands::CommandRegistry::new();
+        registry.load_prompt_commands(&self.file_tree.root);
         let matches = registry.match_prefix(trimmed);
         match matches.as_slice() {
             [cmd] => {
@@ -2353,17 +2581,24 @@ impl TuiApp {
     }
 
     fn try_complete_file_mention(&mut self) -> bool {
-        let Some((token_start, prefix)) =
-            mention_prefix_at_cursor(&self.input_text, self.cursor_pos)
-        else {
+        let Some(mention) = mention_prefix_at_cursor(&self.input_text, self.cursor_pos) else {
             return false;
         };
+        let prefix = mention.prefix.clone();
 
         let recent = recent_mention_paths(&self.input_history);
-        let candidates =
-            file_mention_candidates(&self.file_tree.mention_paths, &prefix, 8, &recent);
+        let candidates = file_mention_candidates(
+            &self.file_tree.mention_paths,
+            &prefix,
+            8,
+            &recent,
+            mention.quoted,
+        );
         if candidates.is_empty() {
-            self.status_message = format!("No file matches @{prefix}");
+            self.status_message = format!(
+                "No file matches {}",
+                file_mention_display(&prefix, mention.quoted)
+            );
             return true;
         }
 
@@ -2380,13 +2615,16 @@ impl TuiApp {
         };
 
         let byte_cursor = char_to_byte_idx(&self.input_text, self.cursor_pos);
-        let suffix = if candidates.len() == 1 { " " } else { "" };
-        let replacement = format!("@{completion}{suffix}");
+        let replacement =
+            file_mention_replacement(&completion, mention.quoted, candidates.len() == 1);
         self.input_text
-            .replace_range(token_start..byte_cursor, &replacement);
+            .replace_range(mention.token_start..byte_cursor, &replacement);
         self.cursor_pos =
-            self.input_text[..token_start].chars().count() + replacement.chars().count();
-        self.status_message = format!("@{completion} will attach file context");
+            self.input_text[..mention.token_start].chars().count() + replacement.chars().count();
+        self.status_message = format!(
+            "{} will attach file context",
+            file_mention_display(&completion, mention.quoted)
+        );
         true
     }
 
@@ -2488,10 +2726,7 @@ impl TuiApp {
     }
 
     fn is_showing_welcome(&self) -> bool {
-        !self.api_key_state.is_ready()
-            && self.messages.is_empty()
-            && self.stream_buffer.is_empty()
-            && !self.is_streaming
+        self.messages.is_empty() && self.stream_buffer.is_empty() && !self.is_streaming
     }
 
     fn runtime_idle_title(&self) -> Option<String> {
@@ -2610,7 +2845,9 @@ impl TuiApp {
     }
 
     pub fn refresh_todo_summary(&mut self) {
-        self.todo_summary = crate::tools::todo_state::load_todo_summary(&self.file_tree.root);
+        let board = crate::tools::todo_state::load_todo_board(&self.file_tree.root);
+        self.todo_summary = board.summary;
+        self.todo_items = board.items;
     }
 
     fn push_recent_tool_summary(&mut self, tool_name: &str, success: bool, summary: &str) {
@@ -3117,7 +3354,7 @@ impl TuiApp {
             } => {
                 let status = if success { "ok" } else { "error" };
                 self.push_recent_tool_summary(&tool_name, success, &summary);
-                if success && tool_name == "todo_write" {
+                if success && is_todo_state_tool(&tool_name) {
                     self.refresh_todo_summary();
                 }
                 self.push_activity(format!(
@@ -3219,6 +3456,7 @@ impl TuiApp {
                 let turn_duration_ms = self
                     .stream_start
                     .map(|started| started.elapsed().as_millis() as u64);
+                let had_hidden_reasoning = !self.reasoning_buffer.trim().is_empty();
                 self.is_streaming = false;
                 self.stream_start = None;
                 self.reasoning_buffer.clear();
@@ -3235,6 +3473,14 @@ impl TuiApp {
                         }
                         self.stream_buffer.push_str(&report);
                     }
+                }
+                if self.stream_buffer.trim().is_empty()
+                    && had_hidden_reasoning
+                    && self.pending_options.is_none()
+                    && self.options_needed.is_none()
+                    && self.approval_queue.is_empty()
+                {
+                    self.stream_buffer = empty_visible_answer_notice(self.is_chinese_ui()).into();
                 }
                 if !self.current_turn_usage_finalized && total_tokens > 0 {
                     self.current_turn_tokens = total_tokens;
@@ -3415,18 +3661,39 @@ impl TuiApp {
                 summary,
             } => {
                 let status = if success { "ok" } else { "error" };
-                if success {
-                    self.active_swarm = None;
-                    self.subagents.clear();
-                    self.plan_steps.clear();
-                    self.plan_summary = None;
-                    self.plan_warnings.clear();
-                    self.plan_total_steps = 0;
-                    self.plan_current_step = 0;
-                } else if let Some(swarm) = self.active_swarm.as_mut() {
+                if let Some(swarm) = self.active_swarm.as_mut() {
                     swarm.status = status.to_string();
                     swarm.running = 0;
-                    swarm.detail_expanded = true;
+                    if success {
+                        let terminal = swarm
+                            .done
+                            .saturating_add(swarm.failed)
+                            .saturating_add(swarm.cancelled);
+                        if terminal < swarm.total {
+                            swarm.done = swarm.done.saturating_add(swarm.total - terminal);
+                        }
+                        swarm.detail_expanded = false;
+                    } else {
+                        swarm.detail_expanded = true;
+                    }
+                }
+                if success {
+                    for step in &mut self.plan_steps {
+                        if matches!(
+                            step.status,
+                            plan_tracker::PlanStepStatus::Pending
+                                | plan_tracker::PlanStepStatus::Running
+                        ) {
+                            step.transition_to(plan_tracker::PlanStepStatus::Done);
+                        }
+                    }
+                    self.plan_current_step = self.plan_total_steps.max(self.plan_steps.len());
+                } else {
+                    for step in &mut self.plan_steps {
+                        if step.status == plan_tracker::PlanStepStatus::Running {
+                            step.transition_to(plan_tracker::PlanStepStatus::Failed);
+                        }
+                    }
                 }
                 self.push_activity(format!("swarm {run_id} finished [{status}]"));
                 self.status_message = truncate_for_activity(&summary, 120);
@@ -3673,7 +3940,8 @@ impl TuiApp {
             );
         }
 
-        // Welcome page: full body (only when empty)
+        // Empty workbench state: welcome content lives in the same surface as
+        // the composer/status UI, not in a separate startup page.
         if self.settings_open {
             settings_panel::render_settings_panel(
                 f,
@@ -3707,33 +3975,7 @@ impl TuiApp {
             } else {
                 &self.subagents
             };
-            let queued_user_messages = self.queued_user_message_refs();
-            transcript_view::render_transcript(
-                f,
-                content_area,
-                transcript_view::TranscriptProps {
-                    messages: &self.messages,
-                    pending_user_message: self.pending_user_message.as_deref(),
-                    queued_user_messages: &queued_user_messages,
-                    scroll_offset: self.scroll_offset,
-                    plan_summary: self.plan_summary.as_deref(),
-                    plan_steps: &self.plan_steps,
-                    plan_current_step: self.plan_current_step,
-                    plan_total_steps: self.plan_total_steps,
-                    plan_warnings: &self.plan_warnings,
-                    subagents: visible_subagents,
-                    global_elapsed_ms: elapsed,
-                    diffs: &self.file_diffs,
-                    selected_diff: self.selected_diff,
-                    is_streaming: self.is_streaming,
-                    show_streaming_placeholder: false,
-                    stream_buffer: &self.stream_buffer,
-                    reasoning_buffer: &self.reasoning_buffer,
-                    reasoning_elapsed_ms: self.reasoning_elapsed_ms(),
-                    reasoning_tokens: self.current_turn_reasoning_tokens,
-                    show_reasoning: self.show_reasoning,
-                },
-            );
+            self.render_transcript_surface(f, content_area, visible_subagents, elapsed);
         }
 
         if self.scroll_offset > 0 {
@@ -3871,14 +4113,6 @@ impl TuiApp {
                 },
             );
         }
-        let (cursor_x, cursor_y) = input::terminal_cursor_position(
-            input_area,
-            &self.input_text,
-            self.cursor_pos,
-            self.api_key_entry.is_some(),
-        );
-        f.set_cursor_position((cursor_x, cursor_y));
-
         self.render_powerline_footer(f, footer_area);
 
         // Approval popup (on top of everything)
@@ -3890,6 +4124,113 @@ impl TuiApp {
                 self.approval_selected_index,
             );
         }
+    }
+
+    fn render_transcript_surface(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        visible_subagents: &[subagent_cards::SubagentCard],
+        elapsed: u64,
+    ) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+
+        if self.should_show_diff_focus_panel() && area.height >= 8 {
+            let diff_height = diff_focus_height(area.height);
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(diff_height)])
+                .split(area);
+            self.render_transcript_only(f, chunks[0], visible_subagents, elapsed);
+            self.render_diff_focus_panel(f, chunks[1]);
+        } else {
+            self.render_transcript_only(f, area, visible_subagents, elapsed);
+        }
+    }
+
+    fn render_transcript_only(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        visible_subagents: &[subagent_cards::SubagentCard],
+        elapsed: u64,
+    ) {
+        let queued_user_messages = self.queued_user_message_refs();
+        transcript_view::render_transcript(
+            f,
+            area,
+            transcript_view::TranscriptProps {
+                messages: &self.messages,
+                pending_user_message: self.pending_user_message.as_deref(),
+                queued_user_messages: &queued_user_messages,
+                scroll_offset: self.scroll_offset,
+                plan_summary: self.plan_summary.as_deref(),
+                plan_steps: &self.plan_steps,
+                plan_current_step: self.plan_current_step,
+                plan_total_steps: self.plan_total_steps,
+                plan_warnings: &self.plan_warnings,
+                todo_summary: &self.todo_summary,
+                todo_items: &self.todo_items,
+                subagents: visible_subagents,
+                global_elapsed_ms: elapsed,
+                diffs: &self.file_diffs,
+                selected_diff: self.selected_diff,
+                is_streaming: self.is_streaming,
+                show_streaming_placeholder: false,
+                stream_buffer: &self.stream_buffer,
+                reasoning_buffer: &self.reasoning_buffer,
+                reasoning_elapsed_ms: self.reasoning_elapsed_ms(),
+                reasoning_tokens: self.current_turn_reasoning_tokens,
+                show_reasoning: self.show_reasoning,
+            },
+        );
+    }
+
+    fn should_show_diff_focus_panel(&self) -> bool {
+        self.diff_focused
+            && self
+                .selected_diff
+                .is_some_and(|idx| idx < self.file_diffs.len())
+    }
+
+    fn render_diff_focus_panel(&self, f: &mut Frame, area: Rect) {
+        let Some(selected) = self.selected_diff else {
+            return;
+        };
+        let Some(item) = self.file_diffs.get(selected) else {
+            return;
+        };
+        if area.width == 0 || area.height < 3 {
+            return;
+        }
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(2)])
+            .split(area);
+        let p = theme::palette();
+        let hint = if self.is_chinese_ui() {
+            "Diff 焦点：↑↓ 文件 · PgUp/PgDn 滚动 · a 接受 · r 拒绝 · d 关闭"
+        } else {
+            "Diff focus: ↑↓ file · PgUp/PgDn scroll · a accept · r reject · d close"
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(
+                hint,
+                Style::default().fg(p.secondary).bg(p.canvas),
+            )]))
+            .style(Style::default().bg(p.canvas)),
+            chunks[0],
+        );
+        diff_viewer::render_diff_viewer(
+            f,
+            chunks[1],
+            std::slice::from_ref(item),
+            Some(0),
+            self.diff_scroll,
+        );
     }
 
     fn should_render_minimal_runtime_surface(&self) -> bool {
@@ -4060,33 +4401,7 @@ impl TuiApp {
         } else {
             &self.subagents
         };
-        let queued_user_messages = self.queued_user_message_refs();
-        transcript_view::render_transcript(
-            f,
-            area,
-            transcript_view::TranscriptProps {
-                messages: &self.messages,
-                pending_user_message: self.pending_user_message.as_deref(),
-                queued_user_messages: &queued_user_messages,
-                scroll_offset: self.scroll_offset,
-                plan_summary: self.plan_summary.as_deref(),
-                plan_steps: &self.plan_steps,
-                plan_current_step: self.plan_current_step,
-                plan_total_steps: self.plan_total_steps,
-                plan_warnings: &self.plan_warnings,
-                subagents: visible_subagents,
-                global_elapsed_ms: elapsed,
-                diffs: &self.file_diffs,
-                selected_diff: self.selected_diff,
-                is_streaming: self.is_streaming,
-                show_streaming_placeholder: false,
-                stream_buffer: &self.stream_buffer,
-                reasoning_buffer: &self.reasoning_buffer,
-                reasoning_elapsed_ms: self.reasoning_elapsed_ms(),
-                reasoning_tokens: self.current_turn_reasoning_tokens,
-                show_reasoning: self.show_reasoning,
-            },
-        );
+        self.render_transcript_surface(f, area, visible_subagents, elapsed);
     }
 
     fn render_minimal_runtime_prompt(&self, f: &mut Frame, area: Rect) {
@@ -4112,9 +4427,6 @@ impl TuiApp {
                 chinese: self.is_chinese_ui(),
             },
         );
-        let (cursor_x, cursor_y) =
-            input::terminal_cursor_position(area, &self.input_text, self.cursor_pos, false);
-        f.set_cursor_position((cursor_x, cursor_y));
     }
 
     fn render_command_options(
@@ -4279,33 +4591,7 @@ impl TuiApp {
             } else {
                 &self.subagents
             };
-            let queued_user_messages = self.queued_user_message_refs();
-            transcript_view::render_transcript(
-                f,
-                content_area,
-                transcript_view::TranscriptProps {
-                    messages: &self.messages,
-                    pending_user_message: self.pending_user_message.as_deref(),
-                    queued_user_messages: &queued_user_messages,
-                    scroll_offset: self.scroll_offset,
-                    plan_summary: self.plan_summary.as_deref(),
-                    plan_steps: &self.plan_steps,
-                    plan_current_step: self.plan_current_step,
-                    plan_total_steps: self.plan_total_steps,
-                    plan_warnings: &self.plan_warnings,
-                    subagents: visible_subagents,
-                    global_elapsed_ms: elapsed,
-                    diffs: &self.file_diffs,
-                    selected_diff: self.selected_diff,
-                    is_streaming: self.is_streaming,
-                    show_streaming_placeholder: false,
-                    stream_buffer: &self.stream_buffer,
-                    reasoning_buffer: &self.reasoning_buffer,
-                    reasoning_elapsed_ms: self.reasoning_elapsed_ms(),
-                    reasoning_tokens: self.current_turn_reasoning_tokens,
-                    show_reasoning: self.show_reasoning,
-                },
-            );
+            self.render_transcript_surface(f, content_area, visible_subagents, elapsed);
         }
         if self.scroll_offset > 0 {
             render_jump_to_bottom_hint(f, content_area);
@@ -4447,14 +4733,6 @@ impl TuiApp {
                 },
             );
         }
-
-        let (cursor_x, cursor_y) = input::terminal_cursor_position(
-            input_area,
-            &self.input_text,
-            self.cursor_pos,
-            self.api_key_entry.is_some(),
-        );
-        f.set_cursor_position((cursor_x, cursor_y));
 
         if let Some((ref approval, _)) = self.approval {
             approval_popup::render_approval_popup(
@@ -4658,6 +4936,76 @@ fn recalculate_swarm_counts(swarm: &mut SwarmViewState) {
             _ => {}
         }
     }
+}
+
+fn plan_steps_hash(steps: &[plan_tracker::PlanStepItem]) -> u64 {
+    let state = steps
+        .iter()
+        .map(|step| {
+            (
+                step.description.as_str(),
+                plan_step_status_tag(step.status),
+                step.duration_ms,
+            )
+        })
+        .collect::<Vec<_>>();
+    stable_hash(&state)
+}
+
+fn plan_step_status_tag(status: plan_tracker::PlanStepStatus) -> u8 {
+    match status {
+        plan_tracker::PlanStepStatus::Pending => 0,
+        plan_tracker::PlanStepStatus::Running => 1,
+        plan_tracker::PlanStepStatus::Done => 2,
+        plan_tracker::PlanStepStatus::Failed => 3,
+    }
+}
+
+fn subagents_hash(cards: &[subagent_cards::SubagentCard]) -> u64 {
+    let state = cards
+        .iter()
+        .map(|card| {
+            (
+                card.agent_id.as_str(),
+                card.agent_type.as_str(),
+                card.description.as_str(),
+                subagent_status_tag(&card.status),
+                card.last_update.as_deref(),
+                card.summary.as_deref(),
+                card.duration_ms,
+                card.files_read,
+                card.files_written,
+                card.token_usage,
+                card.is_background,
+            )
+        })
+        .collect::<Vec<_>>();
+    stable_hash(&state)
+}
+
+fn subagent_status_tag(status: &subagent_cards::SubagentCardStatus) -> u8 {
+    match status {
+        subagent_cards::SubagentCardStatus::Running => 0,
+        subagent_cards::SubagentCardStatus::Done => 1,
+        subagent_cards::SubagentCardStatus::Failed => 2,
+    }
+}
+
+fn active_swarm_hash(swarm: Option<&SwarmViewState>) -> u64 {
+    swarm.map_or(0, |swarm| {
+        stable_hash(&(
+            swarm.run_id.as_str(),
+            swarm.summary.as_str(),
+            swarm.total,
+            swarm.running,
+            swarm.done,
+            swarm.failed,
+            swarm.cancelled,
+            swarm.status.as_str(),
+            swarm.cancel_requested,
+            swarm.detail_expanded,
+        ))
+    })
 }
 
 /// Actions sent from TUI to the async task handler.
@@ -4904,16 +5252,13 @@ struct TerminalEnvironment {
     stdin_is_terminal: bool,
     stdout_is_terminal: bool,
     term: Option<String>,
-    /// Terminal embedded in another CLI host that emulates a TTY but does not
-    /// answer cursor-position probes (CSI 6 n). Detected via host-injected env
-    /// vars from a known list of upstream wrappers.
+    /// Terminal embedded in another host that emulates a TTY but does not
+    /// answer cursor-position probes (CSI 6 n). Controlled by explicit opt-in.
     embedded_host: bool,
 }
 
-/// Set `OCTO_EMBEDDED_HOST=1` to tell octocode it's running inside another
-/// CLI host that emulates a TTY but doesn't answer CSI 6 n cursor-position
-/// probes (causes startup hangs). The classic renderer is used instead of
-/// the alt-screen full renderer.
+/// Terminals that emulate a TTY but don't answer CSI 6 n cursor-position
+/// probes can opt into the classic renderer with `OCTO_EMBEDDED_HOST=1`.
 const EMBEDDED_HOST_ENV_VARS: &[&str] = &["OCTO_EMBEDDED_HOST"];
 
 impl TerminalEnvironment {
@@ -5294,15 +5639,76 @@ fn char_to_byte_idx(text: &str, char_idx: usize) -> usize {
         .map_or(text.len(), |(idx, _)| idx)
 }
 
-fn mention_prefix_at_cursor(text: &str, cursor_pos: usize) -> Option<(usize, String)> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileMentionPrefix {
+    token_start: usize,
+    prefix: String,
+    quoted: bool,
+}
+
+fn mention_prefix_at_cursor(text: &str, cursor_pos: usize) -> Option<FileMentionPrefix> {
     let byte_cursor = char_to_byte_idx(text, cursor_pos);
     let before_cursor = &text[..byte_cursor];
+    if let Some(token_start) = quoted_mention_start(before_cursor) {
+        let prefix_start = token_start + 2;
+        return Some(FileMentionPrefix {
+            token_start,
+            prefix: before_cursor[prefix_start..].replace('\\', "/"),
+            quoted: true,
+        });
+    }
     let token_start = before_cursor
         .rfind(char::is_whitespace)
         .map_or(0, |idx| idx + 1);
     let token = &before_cursor[token_start..];
     let prefix = token.strip_prefix('@')?;
-    Some((token_start, prefix.replace('\\', "/")))
+    if prefix.starts_with('"') {
+        return None;
+    }
+    Some(FileMentionPrefix {
+        token_start,
+        prefix: prefix.replace('\\', "/"),
+        quoted: false,
+    })
+}
+
+fn quoted_mention_start(before_cursor: &str) -> Option<usize> {
+    let mut open_start = None;
+    for (start, _) in before_cursor.match_indices("@\"") {
+        if !is_mention_token_boundary(before_cursor, start) {
+            continue;
+        }
+        let content = &before_cursor[start + 2..];
+        if !content.contains('"') {
+            open_start = Some(start);
+        }
+    }
+    open_start
+}
+
+fn is_mention_token_boundary(text: &str, start: usize) -> bool {
+    start == 0
+        || text[..start]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_whitespace)
+}
+
+fn file_mention_replacement(path: &str, quoted: bool, complete: bool) -> String {
+    match (quoted, complete) {
+        (true, true) => format!("@\"{path}\" "),
+        (true, false) => format!("@\"{path}"),
+        (false, true) => format!("@{path} "),
+        (false, false) => format!("@{path}"),
+    }
+}
+
+fn file_mention_display(path: &str, quoted: bool) -> String {
+    if quoted {
+        format!("@\"{path}\"")
+    } else {
+        format!("@{path}")
+    }
 }
 
 fn render_status_notice(f: &mut Frame, area: Rect, notice: &str) {
@@ -5320,36 +5726,20 @@ fn render_status_notice(f: &mut Frame, area: Rect, notice: &str) {
     );
 }
 
-fn slash_command_group(name: &str, chinese: bool) -> &'static str {
-    let group = match name {
-        "/help" | "/features" | "/settings" | "/theme" | "/model" | "/status" => "core",
-        "/mcp" | "/hooks" | "/tools" | "/permissions" | "/sandbox" => "runtime",
-        "/agents" | "/swarm" | "/tasks" | "/plan" | "/mission" => "agents",
-        "/diff" | "/files" | "/search" | "/review" => "workspace",
-        _ => "commands",
-    };
-    if !chinese {
-        return group;
+fn diff_focus_height(area_height: u16) -> u16 {
+    if area_height <= 8 {
+        return area_height.saturating_sub(3).max(3);
     }
-    match group {
-        "core" => "核心",
-        "runtime" => "运行",
-        "agents" => "智能体",
-        "workspace" => "工作区",
-        _ => "命令",
-    }
+    (area_height / 2).clamp(6, 16)
 }
 
 fn recent_mention_paths(history: &[String]) -> Vec<String> {
     let mut paths = Vec::new();
     for entry in history.iter().rev().take(80) {
-        for token in entry.split_whitespace() {
-            let token = token.trim_matches(|ch: char| matches!(ch, ',' | ';' | ')' | ']' | '}'));
-            if let Some(path) = token.strip_prefix('@') {
-                let path = path.replace('\\', "/");
-                if !path.is_empty() && !paths.contains(&path) {
-                    paths.push(path);
-                }
+        for path in crate::tools::mentions::extract_mentions(entry) {
+            let path = path.replace('\\', "/");
+            if !path.is_empty() && !paths.contains(&path) {
+                paths.push(path);
             }
         }
     }
@@ -5361,10 +5751,12 @@ fn file_mention_candidates(
     prefix: &str,
     limit: usize,
     recent_paths: &[String],
+    allow_whitespace: bool,
 ) -> Vec<String> {
     let prefix = prefix.replace('\\', "/").to_lowercase();
     let mut candidates = indexed_paths
         .iter()
+        .filter(|path| allow_whitespace || !path.chars().any(char::is_whitespace))
         .filter(|path| file_mention_matches(path, &prefix))
         .cloned()
         .collect::<Vec<_>>();
@@ -5739,6 +6131,14 @@ fn append_brewed_line(stream_buffer: &mut String, duration_ms: u64) {
     stream_buffer.push('\n');
 }
 
+fn empty_visible_answer_notice(chinese: bool) -> &'static str {
+    if chinese {
+        "本轮模型只返回了隐藏推理内容，没有返回可显示的最终回答。Octocode 已隐藏 reasoning，所以之前看起来像没有输出。请重试，或切换模型/关闭 thinking 后再试。"
+    } else {
+        "The model returned hidden reasoning but no visible final answer. Octocode hides reasoning, so the turn looked blank. Retry, switch models, or disable thinking and try again."
+    }
+}
+
 fn contains_cjk(text: &str) -> bool {
     text.chars().any(|ch| {
         matches!(
@@ -5792,14 +6192,7 @@ fn approval_action_from_shortcut(c: char) -> Option<ApprovalAction> {
 }
 
 fn cycle_provider_kind(current: ProviderKind, delta: i32) -> ProviderKind {
-    let values = [
-        ProviderKind::DeepSeek,
-        ProviderKind::Qwen,
-        ProviderKind::Kimi,
-        ProviderKind::Zhipu,
-        ProviderKind::OpenRouter,
-        ProviderKind::OpenAiCompatible,
-    ];
+    let values = ProviderKind::all();
     values[cycle_index(
         values
             .iter()
@@ -5892,8 +6285,32 @@ fn cycle_theme_mode(current: theme::ThemeMode, delta: i32) -> theme::ThemeMode {
     )]
 }
 
+fn cycle_motion_level(current: motion::MotionLevel, delta: i32) -> motion::MotionLevel {
+    let values = [motion::MotionLevel::Subtle, motion::MotionLevel::Off];
+    values[cycle_index(
+        values
+            .iter()
+            .position(|value| *value == current)
+            .unwrap_or(0),
+        values.len(),
+        delta,
+    )]
+}
+
+fn cycle_renderer_mode(current: RendererMode, delta: i32) -> RendererMode {
+    let values = [RendererMode::Classic, RendererMode::Fullscreen];
+    values[cycle_index(
+        values
+            .iter()
+            .position(|value| *value == current)
+            .unwrap_or(0),
+        values.len(),
+        delta,
+    )]
+}
+
 fn cycle_ui_language(current: &str, delta: i32) -> String {
-    let values = ["auto", "zh-CN", "en-US"];
+    let values = ["auto", "zh-CN", "en-US", "ja-JP"];
     values[cycle_index(
         values
             .iter()
@@ -5905,6 +6322,19 @@ fn cycle_ui_language(current: &str, delta: i32) -> String {
     .to_string()
 }
 
+fn ui_language_display_name(value: &str) -> &'static str {
+    match value.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+        "auto" | "" => "Automatic",
+        "zh" | "zh-cn" | "zh-hans" | "zh-hans-cn" | "chinese" => "Chinese",
+        "en" | "en-us" | "en-gb" | "english" => "English",
+        "ja" | "ja-jp" | "jp" | "japanese" => "Japanese",
+        value if value.starts_with("zh") => "Chinese",
+        value if value.starts_with("en") => "English",
+        value if value.starts_with("ja") => "Japanese",
+        _ => "English",
+    }
+}
+
 fn cycle_index(current: usize, len: usize, delta: i32) -> usize {
     if len == 0 {
         return 0;
@@ -5914,6 +6344,32 @@ fn cycle_index(current: usize, len: usize, delta: i32) -> usize {
     } else {
         (current + 1) % len
     }
+}
+
+fn cycle_command_timeout_seconds(current: u64, delta: i32) -> u64 {
+    let values = [15, 30, 60, 120, 300, 600];
+    values[cycle_index(
+        values
+            .iter()
+            .position(|value| *value == current)
+            .unwrap_or_else(|| {
+                values
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, value)| value.abs_diff(current))
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(3)
+            }),
+        values.len(),
+        delta,
+    )]
+}
+
+fn is_todo_state_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "todo_write" | "task_create" | "task_update" | "task_stop"
+    )
 }
 
 fn settings_on_off(value: bool) -> &'static str {
@@ -6296,7 +6752,8 @@ pub async fn run_tui(
                 },
                 TuiAction::Submit(mut input) => {
                     // Slash commands
-                    let registry = crate::commands::CommandRegistry::new();
+                    let mut registry = crate::commands::CommandRegistry::new();
+                    registry.load_prompt_commands(&root);
                     let mcp_status = app.mcp_status.clone();
                     let background_tasks = orchestrator
                         .as_ref()
@@ -6838,7 +7295,7 @@ mod tests {
         let mut app = test_app();
         let (tx, _rx) = mpsc::unbounded_channel();
 
-        assert!(!app.is_showing_welcome());
+        assert!(app.is_showing_welcome());
         app.handle_key(key(KeyCode::Char('1'), KeyEventKind::Press), &tx);
 
         assert_eq!(app.input_text, "1");
@@ -7111,7 +7568,7 @@ mod tests {
     #[test]
     fn running_turn_renders_transcript_instead_of_welcome() {
         let mut app = test_app();
-        assert!(!app.is_showing_welcome());
+        assert!(app.is_showing_welcome());
 
         app.begin_running_turn("苹果怎么截图");
         app.apply_agent_event(AgentEvent::ContentDelta(
@@ -7132,7 +7589,7 @@ mod tests {
     }
 
     #[test]
-    fn app_places_terminal_cursor_in_input_area_for_ime() {
+    fn app_uses_inline_cursor_without_terminal_cursor() {
         let mut app = test_app();
         app.input_text = "测试".to_string();
         app.cursor_pos = app.input_text.chars().count();
@@ -7141,7 +7598,9 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal.draw(|f| app.render(f)).expect("draw");
 
-        terminal.backend_mut().assert_cursor_position((9, 29));
+        let snapshot = buffer_to_text(terminal.backend());
+        assert!(snapshot.contains("测试▌"));
+        terminal.backend_mut().assert_cursor_position((0, 0));
     }
 
     #[test]
@@ -7363,6 +7822,25 @@ mod tests {
         assert_eq!(app.current_turn_output_tokens, 24);
         assert_eq!(app.current_turn_tokens, app.current_turn_input_tokens + 24);
         assert!(app.stream_buffer.is_empty());
+    }
+
+    #[test]
+    fn reasoning_only_turn_shows_visible_notice() {
+        let mut app = test_app();
+        app.config.ui.language = "zh-CN".to_string();
+        app.begin_running_turn("检查一下这个 CLI");
+
+        app.apply_agent_event(AgentEvent::ReasoningDelta(
+            "I should inspect the CLI before answering.".to_string(),
+        ));
+        app.apply_agent_event(AgentEvent::TurnComplete {
+            session_id: app.session_id.unwrap_or_else(SessionId::new_v4),
+            total_tokens: 654,
+        });
+
+        assert!(app.stream_buffer.contains("只返回了隐藏推理内容"));
+        assert!(app.reasoning_buffer.is_empty());
+        assert!(!app.is_streaming);
     }
 
     #[test]
@@ -7705,6 +8183,10 @@ mod tests {
         assert!(suggestions
             .iter()
             .any(|(name, desc)| name == "/agents" && desc.contains("智能体")));
+        assert!(suggestions
+            .iter()
+            .filter(|(name, _)| name == "/doctor")
+            .all(|(_, desc)| !desc.starts_with("命令 ·")));
         assert!(!suggestions
             .iter()
             .any(|(name, desc)| name == "/agents" && desc.contains("List built-in")));
@@ -7848,7 +8330,7 @@ mod tests {
     }
 
     #[test]
-    fn file_mention_index_skips_hidden_and_whitespace_paths() {
+    fn unquoted_file_mention_suggestions_skip_hidden_and_whitespace_paths() {
         let root = tempfile::tempdir().expect("tempdir");
         let src = root.path().join("src");
         let docs = root.path().join("docs");
@@ -7866,6 +8348,27 @@ mod tests {
         assert!(suggestions.iter().any(|path| path == "src/lib.rs"));
         assert!(!suggestions.iter().any(|path| path == ".env"));
         assert!(!suggestions.iter().any(|path| path.contains("My Plan.md")));
+    }
+
+    #[test]
+    fn quoted_file_mention_completes_paths_with_spaces() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let docs = root.path().join("docs");
+        std::fs::create_dir_all(&docs).expect("create docs");
+        std::fs::write(docs.join("My Plan.md"), "# plan").expect("write spaced file");
+        let mut app = test_app_with_root(root.path().to_path_buf());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.input_text = "review @\"docs/My".to_string();
+        app.cursor_pos = app.input_text.chars().count();
+
+        let suggestions = app.file_mention_suggestions();
+        assert_eq!(suggestions, vec!["docs/My Plan.md"]);
+
+        app.handle_key(key(KeyCode::Tab, KeyEventKind::Press), &tx);
+
+        assert_eq!(app.input_text, "review @\"docs/My Plan.md\" ");
+        assert_eq!(app.cursor_pos, app.input_text.chars().count());
+        assert!(app.status_message.contains("@\"docs/My Plan.md\""));
     }
 
     #[test]
@@ -7960,6 +8463,82 @@ mod tests {
             .expect("settings should persist");
         assert!(local_config.contains("[ui]"));
         assert!(local_config.contains("language = \"en-US\""));
+    }
+
+    #[test]
+    fn settings_panel_can_edit_and_persist_safety_knobs() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut app = test_app_with_root(root.path().to_path_buf());
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        app.open_settings_panel();
+        app.settings_tab = settings_panel::SettingsTab::Safety;
+        app.settings_selected = 1;
+        app.handle_key(key(KeyCode::Enter, KeyEventKind::Press), &tx);
+        app.settings_selected = 7;
+        app.handle_key(key(KeyCode::Right, KeyEventKind::Press), &tx);
+
+        assert!(!app.config.policy.auto_approve_safe_read);
+        assert_eq!(app.config.policy.command_timeout_seconds, 300);
+        let local_config = std::fs::read_to_string(root.path().join(".octocode/local.toml"))
+            .expect("settings should persist");
+        assert!(local_config.contains("auto_approve_safe_read = false"));
+        assert!(local_config.contains("command_timeout_seconds = 300"));
+    }
+
+    #[test]
+    fn settings_panel_can_edit_and_persist_interface_runtime_knobs() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut app = test_app_with_root(root.path().to_path_buf());
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        app.open_settings_panel();
+        app.settings_tab = settings_panel::SettingsTab::Interface;
+        app.settings_selected = 2;
+        app.handle_key(key(KeyCode::Enter, KeyEventKind::Press), &tx);
+        app.settings_selected = 3;
+        app.handle_key(key(KeyCode::Right, KeyEventKind::Press), &tx);
+
+        assert_eq!(app.motion_level, motion::MotionLevel::Off);
+        assert_eq!(app.config.ui.motion, "off");
+        assert_eq!(app.renderer_mode, RendererMode::Fullscreen);
+        assert_eq!(app.config.ui.renderer, "fullscreen");
+        let local_config = std::fs::read_to_string(root.path().join(".octocode/local.toml"))
+            .expect("settings should persist");
+        assert!(local_config.contains("motion = \"off\""));
+        assert!(local_config.contains("renderer = \"fullscreen\""));
+    }
+
+    #[test]
+    fn settings_panel_can_edit_and_persist_agent_knobs() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut app = test_app_with_root(root.path().to_path_buf());
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        app.open_settings_panel();
+        app.settings_tab = settings_panel::SettingsTab::Agents;
+        app.settings_selected = 0;
+        app.handle_key(key(KeyCode::Enter, KeyEventKind::Press), &tx);
+        app.settings_selected = 5;
+        app.handle_key(key(KeyCode::Enter, KeyEventKind::Press), &tx);
+        app.settings_selected = 9;
+        app.handle_key(key(KeyCode::Enter, KeyEventKind::Press), &tx);
+
+        assert!(!app.config.router.enabled);
+        assert_ne!(
+            app.config.subagent.auto_decompose,
+            storage::Config::default().subagent.auto_decompose
+        );
+        assert_ne!(
+            app.config.telemetry.enabled,
+            storage::Config::default().telemetry.enabled
+        );
+        let local_config = std::fs::read_to_string(root.path().join(".octocode/local.toml"))
+            .expect("settings should persist");
+        assert!(local_config.contains("[router]"));
+        assert!(local_config.contains("enabled = false"));
+        assert!(local_config.contains("auto_decompose"));
+        assert!(local_config.contains("[telemetry]"));
     }
 
     #[tokio::test]
@@ -8335,7 +8914,7 @@ mod tests {
     }
 
     #[test]
-    fn swarm_finished_clears_live_task_ui_before_final_output() {
+    fn swarm_finished_preserves_compact_final_summary() {
         let mut app = test_app();
         app.begin_running_turn("开蜂群，审查代码");
         app.apply_agent_event(AgentEvent::SwarmStarted {
@@ -8349,6 +8928,28 @@ mod tests {
             description: "agent reviewer · 审查风险".to_string(),
             status: crate::agent::orchestrator::PlanStepStatus::Running,
         });
+        app.apply_agent_event(AgentEvent::SubagentStarted {
+            agent_id: "agent-1".to_string(),
+            agent_type: "reviewer".to_string(),
+            description: "审查风险".to_string(),
+            is_background: false,
+        });
+        app.apply_agent_event(AgentEvent::SubagentCompleted {
+            agent_id: "agent-1".to_string(),
+            result: crate::agent::subagent::SubagentResult {
+                success: true,
+                summary: "未发现阻断风险".to_string(),
+                output: "未发现阻断风险".to_string(),
+                tool_calls_used: vec!["read_file".to_string()],
+                files_read: vec!["src/tui/app.rs".to_string()],
+                files_written: Vec::new(),
+                duration_ms: 1_000,
+                token_usage: 128,
+                error: None,
+                started_at: chrono::Utc::now(),
+                completed_at: chrono::Utc::now(),
+            },
+        });
         app.apply_agent_event(AgentEvent::SwarmFinished {
             run_id: "swarm-1".to_string(),
             success: true,
@@ -8356,10 +8957,26 @@ mod tests {
         });
         app.apply_agent_event(AgentEvent::ContentDelta("蜂群任务已完成\n".to_string()));
 
-        assert!(app.active_swarm.is_none());
-        assert!(app.plan_steps.is_empty());
-        assert!(app.subagents.is_empty());
-        assert!(app.stream_buffer.contains("蜂群任务已完成"));
+        let swarm = app.active_swarm.as_ref().expect("swarm summary remains");
+        assert_eq!(swarm.status, "ok");
+        assert_eq!(swarm.running, 0);
+        assert_eq!(swarm.done, 1);
+        assert!(!swarm.detail_expanded);
+        assert_eq!(app.plan_steps.len(), 1);
+        assert_eq!(app.plan_steps[0].status, plan_tracker::PlanStepStatus::Done);
+        assert_eq!(app.subagents.len(), 1);
+        assert!(app
+            .activity_log
+            .iter()
+            .any(|entry| entry.contains("plan output: 蜂群任务已完成")));
+
+        let mut terminal =
+            Terminal::new(ratatui::backend::TestBackend::new(100, 24)).expect("terminal");
+        terminal.draw(|f| app.render(f)).expect("draw");
+        let rendered = buffer_to_text(terminal.backend());
+        assert!(rendered.contains("任务控制台"));
+        assert!(rendered.contains("1 完成"));
+        assert!(!rendered.contains("Agent Team"));
     }
 
     #[test]
@@ -8689,6 +9306,88 @@ mod tests {
     }
 
     #[test]
+    fn diff_focus_expands_selected_diff_and_keeps_status_ui_only() {
+        theme::set_active_theme(theme::ThemeMode::Light);
+        let mut app = test_app();
+        app.config.ui.language = "en-US".to_string();
+        app.welcome.display_language = app.config.ui.language.clone();
+        app.stream_buffer = "Reviewing diffs".to_string();
+        app.file_diffs = vec![
+            diff_viewer::FileDiffItem::new(
+                "src/a.rs",
+                "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+                "+1 -1",
+            ),
+            diff_viewer::FileDiffItem::new(
+                "src/b.rs",
+                "diff --git a/src/b.rs b/src/b.rs\n--- a/src/b.rs\n+++ b/src/b.rs\n@@ -1 +1 @@\n-left\n+right\n",
+                "+1 -1",
+            ),
+        ];
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        app.handle_key(key(KeyCode::Char('d'), KeyEventKind::Press), &tx);
+
+        assert!(app.diff_focused);
+        assert_eq!(app.selected_diff, Some(0));
+        assert_eq!(app.diff_scroll, 0);
+        assert!(app.status_message.contains("Diff focus"));
+
+        let mut terminal =
+            Terminal::new(ratatui::backend::TestBackend::new(110, 30)).expect("terminal");
+        terminal.draw(|f| app.render(f)).expect("draw");
+        let snapshot = buffer_to_text(terminal.backend());
+        assert!(snapshot.contains("Diff focus"));
+        assert!(snapshot.contains("src/a.rs"));
+        assert!(snapshot.contains("@@ -1 +1 @@"));
+        assert!(snapshot.contains("-old"));
+        assert!(snapshot.contains("+new"));
+
+        app.handle_key(key(KeyCode::PageDown, KeyEventKind::Press), &tx);
+        assert_eq!(app.diff_scroll, PAGE_SCROLL_LINES);
+
+        app.handle_key(key(KeyCode::PageUp, KeyEventKind::Press), &tx);
+        assert_eq!(app.diff_scroll, 0);
+
+        app.handle_key(key(KeyCode::PageDown, KeyEventKind::Press), &tx);
+        app.handle_key(key(KeyCode::Down, KeyEventKind::Press), &tx);
+        assert_eq!(app.selected_diff, Some(1));
+        assert_eq!(app.diff_scroll, 0);
+
+        app.handle_key(key(KeyCode::Char('a'), KeyEventKind::Press), &tx);
+        assert_eq!(app.file_diffs[1].status, diff_viewer::DiffStatus::Accepted);
+        assert_eq!(app.file_diffs[1].path, "src/b.rs");
+        assert!(app.status_message.contains("not applied"));
+
+        app.handle_key(key(KeyCode::Char('r'), KeyEventKind::Press), &tx);
+        assert_eq!(app.file_diffs[1].status, diff_viewer::DiffStatus::Rejected);
+        assert_eq!(app.file_diffs[0].status, diff_viewer::DiffStatus::Pending);
+        assert!(app.status_message.contains("not applied"));
+
+        app.handle_key(key(KeyCode::Up, KeyEventKind::Press), &tx);
+        assert_eq!(app.selected_diff, Some(0));
+
+        app.handle_key(key(KeyCode::Char('d'), KeyEventKind::Press), &tx);
+        assert!(!app.diff_focused);
+        assert_eq!(app.diff_scroll, 0);
+    }
+
+    #[test]
+    fn diff_focus_without_diffs_reports_empty_state() {
+        let mut app = test_app();
+        app.config.ui.language = "en-US".to_string();
+        app.welcome.display_language = app.config.ui.language.clone();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        app.handle_key(key(KeyCode::Char('d'), KeyEventKind::Press), &tx);
+
+        assert!(!app.diff_focused);
+        assert_eq!(app.selected_diff, None);
+        assert_eq!(app.diff_scroll, 0);
+        assert_eq!(app.status_message, "No diffs to review");
+    }
+
+    #[test]
     fn preview_snapshot_missing_api_key_shows_full_onboarding() {
         let snapshot = render_preview_snapshot(
             PathBuf::from("D:/octocode"),
@@ -8705,6 +9404,8 @@ mod tests {
         assert!(snapshot.contains("粘贴 API key"));
         assert!(!snapshot.contains("粘贴 API key..."));
         assert!(snapshot.contains("DeepSeek V4 Flash (auto)"));
+        assert!(snapshot.contains("octo"));
+        assert!(!snapshot.contains("octocode ·"));
         assert!(!snapshot.contains("Type below, or press 1-3"));
     }
 
@@ -8721,12 +9422,14 @@ mod tests {
         )
         .expect("render snapshot");
 
-        assert!(!snapshot.contains("今天要改什么？"));
-        assert!(!snapshot.contains("直接输入要做的事"));
+        assert!(snapshot.contains("今天要改什么？"));
+        assert!(snapshot.contains("直接输入要做的事"));
         assert!(!snapshot.contains("按 1-3"));
         assert!(snapshot.contains(">"));
         assert!(snapshot.contains("上下文") || snapshot.contains("Context"));
         assert!(snapshot.contains("V4 Flash"));
+        assert!(snapshot.contains("octo"));
+        assert!(!snapshot.contains("octocode ·"));
     }
 
     #[test]
@@ -8742,7 +9445,7 @@ mod tests {
         )
         .expect("render snapshot");
 
-        assert!(!snapshot.contains("Octocode 工作台"));
+        assert!(snapshot.contains("Octocode 工作台"));
         assert!(snapshot.contains("Context") || snapshot.contains("上下文"));
     }
 
@@ -8765,6 +9468,29 @@ mod tests {
         assert!(!snapshot.contains("octo "));
         assert!(!snapshot.contains("OCTOCODE"));
         assert!(!snapshot.contains("Model:"));
+    }
+
+    #[test]
+    fn preview_snapshot_workbench_compacts_agents_at_80_columns() {
+        let snapshot = render_preview_snapshot(
+            PathBuf::from("D:/octocode"),
+            false,
+            80,
+            22,
+            PreviewSnapshotScenario::Workbench,
+            theme::ThemeMode::Light,
+            0,
+        )
+        .expect("render snapshot");
+        let lines: Vec<&str> = snapshot.lines().collect();
+
+        assert!(snapshot.contains("Agents 3"));
+        assert!(snapshot.contains("running 2"));
+        assert!(snapshot.contains("done 1"));
+        assert!(snapshot.contains("Review multi-agent UI"));
+        assert!(!lines
+            .iter()
+            .any(|line| matches!(line.trim(), "W0" | "W1" | "tok")));
     }
 
     #[test]
@@ -9027,6 +9753,37 @@ mod tests {
 
         assert_eq!(app.todo_summary.total, 2);
         assert_eq!(app.todo_summary.active.as_deref(), Some("Implementing"));
+        assert_eq!(app.todo_items.len(), 2);
+        assert_eq!(app.todo_items[0].display_text(), "Implementing");
+    }
+
+    #[test]
+    fn task_tool_execution_refreshes_todo_board() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut app = test_app_with_root(temp.path().to_path_buf());
+
+        crate::tools::task_todo::task_create(
+            temp.path(),
+            crate::tools::task_todo::TaskCreateArgs {
+                id: Some("ui".to_string()),
+                content: "Build board".to_string(),
+                active_form: Some("Building board".to_string()),
+                status: Some("in_progress".to_string()),
+            },
+        )
+        .expect("create task");
+
+        assert!(app.todo_items.is_empty());
+        app.apply_agent_event(AgentEvent::ToolExecuted {
+            tool_name: "task_create".to_string(),
+            success: true,
+            summary: "Task created".to_string(),
+        });
+
+        assert_eq!(app.todo_summary.total, 1);
+        assert_eq!(app.todo_items.len(), 1);
+        assert_eq!(app.todo_items[0].id, "ui");
+        assert_eq!(app.todo_items[0].display_text(), "Building board");
     }
 
     #[test]

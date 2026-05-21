@@ -421,32 +421,83 @@ pub async fn execute_single_tool_with_config(
         "run_command" => {
             let command = args["command"].as_str().unwrap_or("");
             let cwd = args["cwd"].as_str();
-            let timeout_seconds = args["timeout_seconds"]
-                .as_u64()
-                .or_else(|| args["timeout"].as_u64())
-                .unwrap_or(dispatch_config.command_timeout_seconds)
-                .clamp(1, 600);
-            match tools::run_command_with_sandbox(
-                project_root,
-                command,
-                cwd,
-                timeout_seconds,
-                &dispatch_config.command_sandbox,
-            )
-            .await
-            {
-                Ok(result) => {
-                    if !result.is_success() {
-                        let mut summary = result.summary();
-                        if let Some(suggestion) = suggest_command_fix(&result) {
-                            summary.push_str(&format!("\n\nSuggestion: {suggestion}"));
-                        }
-                        (crate::policy::redact_all(&summary), true)
-                    } else {
-                        (crate::policy::redact_all(&result.summary()), false)
-                    }
+            let run_in_background = args["run_in_background"].as_bool().unwrap_or(false);
+            if run_in_background {
+                // Resolve cwd against the workspace just like the sync path.
+                let workspace_cwd = match cwd {
+                    Some(dir) => crate::workspace::paths::resolve_workspace_path(project_root, dir),
+                    None => Some(project_root.to_path_buf()),
+                };
+                let Some(workspace_cwd) = workspace_cwd else {
+                    return (
+                        format!("cwd not in workspace: {}", cwd.unwrap_or("<none>")),
+                        true,
+                    );
+                };
+                match crate::tools::background_shells::registry()
+                    .spawn(command, &workspace_cwd)
+                    .await
+                {
+                    Ok(shell_id) => (
+                        format!(
+                            "Started background shell {shell_id}.\n\
+                             Poll progress with bash_output(shell_id=\"{shell_id}\").\n\
+                             Terminate with kill_shell(shell_id=\"{shell_id}\")."
+                        ),
+                        false,
+                    ),
+                    Err(e) => (crate::policy::redact_all(&e.to_string()), true),
                 }
-                Err(e) => (crate::policy::redact_all(&e.to_string()), true),
+            } else {
+                let timeout_seconds = args["timeout_seconds"]
+                    .as_u64()
+                    .or_else(|| args["timeout"].as_u64())
+                    .unwrap_or(dispatch_config.command_timeout_seconds)
+                    .clamp(1, 600);
+                match tools::run_command_with_sandbox(
+                    project_root,
+                    command,
+                    cwd,
+                    timeout_seconds,
+                    &dispatch_config.command_sandbox,
+                )
+                .await
+                {
+                    Ok(result) => {
+                        if !result.is_success() {
+                            let mut summary = result.summary();
+                            if let Some(suggestion) = suggest_command_fix(&result) {
+                                summary.push_str(&format!("\n\nSuggestion: {suggestion}"));
+                            }
+                            (crate::policy::redact_all(&summary), true)
+                        } else {
+                            (crate::policy::redact_all(&result.summary()), false)
+                        }
+                    }
+                    Err(e) => (crate::policy::redact_all(&e.to_string()), true),
+                }
+            }
+        }
+        "bash_output" => {
+            let parsed: Result<crate::tools::bash_output::BashOutputArgs, _> =
+                serde_json::from_value(args);
+            match parsed {
+                Ok(args) => match crate::tools::bash_output::bash_output(args) {
+                    Ok(result) => (result, false),
+                    Err(e) => (e.to_string(), true),
+                },
+                Err(e) => (e.to_string(), true),
+            }
+        }
+        "kill_shell" => {
+            let parsed: Result<crate::tools::kill_shell::KillShellArgs, _> =
+                serde_json::from_value(args);
+            match parsed {
+                Ok(args) => match crate::tools::kill_shell::kill_shell(args).await {
+                    Ok(result) => (result, false),
+                    Err(e) => (e.to_string(), true),
+                },
+                Err(e) => (e.to_string(), true),
             }
         }
         "git_add" => {

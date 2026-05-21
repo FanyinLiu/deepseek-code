@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::cli::resolve_project_root;
+use crate::cli::resolve_project_root_or_cwd;
 use crate::storage;
 
 #[derive(Debug, Clone)]
@@ -23,7 +23,7 @@ pub async fn settings(
     command: SettingsCommand,
     project_root: Option<PathBuf>,
 ) -> Result<(), anyhow::Error> {
-    let root = resolve_project_root(project_root, "settings")?;
+    let root = resolve_project_root_or_cwd(project_root);
     match command {
         SettingsCommand::List { json } => list(&root, json),
         SettingsCommand::Get { key } => get(&root, &key),
@@ -138,14 +138,14 @@ fn validate_setting_value(key: &str, value: &str) -> Result<toml::Value, anyhow:
             "min" | "low" | "medium" | "high" | "max" => Ok(toml::Value::String(value.to_string())),
             _ => anyhow::bail!("model.reasoning_effort must be min, low, medium, high, or max"),
         },
-        "provider.default" => match value {
-            "deepseek" | "openrouter" | "openai-compatible" => {
-                Ok(toml::Value::String(value.to_string()))
-            }
-            _ => {
-                anyhow::bail!("provider.default must be deepseek, openrouter, or openai-compatible")
-            }
-        },
+        "provider.default" => crate::provider::ProviderKind::from_config_value(value)
+            .map(|provider| toml::Value::String(provider.as_str().to_string()))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "provider.default must be one of: {}",
+                    crate::provider::ProviderKind::allowed_values()
+                )
+            }),
         "ui.theme" => match value {
             "auto" | "light" | "dark" | "high-contrast" => {
                 Ok(toml::Value::String(value.to_string()))
@@ -154,7 +154,9 @@ fn validate_setting_value(key: &str, value: &str) -> Result<toml::Value, anyhow:
         },
         "ui.language" => normalize_ui_language(value)
             .map(|language| toml::Value::String(language.to_string()))
-            .ok_or_else(|| anyhow::anyhow!("ui.language must be auto, zh-CN, or en-US")),
+            .ok_or_else(|| {
+                anyhow::anyhow!("ui.language must be auto, Chinese, English, or Japanese")
+            }),
         "ui.show_reasoning_summary"
         | "ui.show_raw_reasoning"
         | "ui.show_cache_hud"
@@ -185,8 +187,9 @@ fn normalize_ui_language(value: &str) -> Option<&'static str> {
     let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
     match normalized.as_str() {
         "auto" => Some("auto"),
-        "zh" | "zh-cn" | "zh-hans" | "zh-hans-cn" => Some("zh-CN"),
-        "en" | "en-us" | "en-gb" => Some("en-US"),
+        "zh" | "zh-cn" | "zh-hans" | "zh-hans-cn" | "chinese" => Some("zh-CN"),
+        "en" | "en-us" | "en-gb" | "english" => Some("en-US"),
+        "ja" | "ja-jp" | "jp" | "japanese" => Some("ja-JP"),
         _ => None,
     }
 }

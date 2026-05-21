@@ -169,7 +169,9 @@ impl SubagentExecutor {
                 thinking,
                 response_format: None,
                 stream: true,
-                max_tokens: Some(8192),
+                // Same 32K budget rationale as the parent turn — reasoning
+                // can chew through 8K alone, leaving no room for the answer.
+                max_tokens: Some(32_768),
             };
 
             send_request_token_delta(event_tx, &request);

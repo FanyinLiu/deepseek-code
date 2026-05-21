@@ -22,8 +22,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Check API connectivity, auth, and configuration
-    Doctor,
+    /// Check provider auth, connectivity, and configuration
+    Doctor {
+        /// Run low-cost provider smoke checks beyond the basic chat probe
+        #[arg(long)]
+        smoke: bool,
+        /// Print provider/config diagnostics without reading credentials or making network calls
+        #[arg(long)]
+        no_network: bool,
+    },
 
     /// Store provider API key in system keyring
     Login {
@@ -1239,7 +1246,13 @@ pub async fn run() -> Result<(), anyhow::Error> {
     );
 
     match cli.command {
-        Some(Commands::Doctor) => cli::doctor(cli.project_root).await,
+        Some(Commands::Doctor { smoke, no_network }) => {
+            cli::doctor(
+                cli.project_root,
+                cli::doctor::DoctorOptions { smoke, no_network },
+            )
+            .await
+        }
         Some(Commands::Login { api_key }) => {
             let root = cli.project_root.or_else(crate::storage::find_project_root);
             cli::login(api_key, root.as_deref()).await
