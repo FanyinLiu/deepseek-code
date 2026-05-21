@@ -1,75 +1,94 @@
-# Octocode
+# Octo
 
-Octocode 是面向多模型、多智能体和本地工具编排的终端编程代理。
+Octo 是面向多模型、多智能体和本地工具编排的终端编程代理。项目名保留 Octocode，日常命令以 `octo` 为主；`octocode` 仅作为兼容入口。
 
 ## 安装
 
 ```bash
-# 从源码目录安装日常命令 octocode
+# 从源码目录安装日常命令 octo
 cd octocode
-cargo install --path . --bin octocode --force
-
-# 也可以安装短入口 octo
 cargo install --path . --bin octo --force
 
-# 不安装也可以直接运行
-cargo run --bin octocode -- tui
+# 也可直接用 npm 安装（需要联网并会拉取发布的二进制）
+npm install -g octo
+# 首次执行时会尝试从 GitHub Release 下载匹配版本的二进制。
+# 如果仓库还没发布该版本，命令会提示先用 cargo 或本地 release 产物先补齐。
 
-# 构建两个二进制：octocode + octo
+# 不安装也可以直接运行
+cargo run -- tui
+
+# 构建两个二进制：octo + octocode 兼容入口
 cargo build --release
 ```
+
+## 发布上传要求
+
+发布前请按 [发布上传清单](docs/release_upload_checklist.md) 执行。当前发布流程会在打 tag 时自动输出：
+- Linux/macOS：`octo-vX.Y.Z-<target>.tar.gz`
+- Windows：`octo-vX.Y.Z-<target>.zip`
+- `checksums-<target>.txt`
+
+本地也支持一键发布脚本：
+
+```powershell
+.\scripts\release.ps1 -Version 0.1.1
+```
+
+```bash
+./scripts/release.sh 0.1.1
+```
+
+默认主版本号可加 `v` 前缀，也可不加；脚本会自动统一处理为 `vX.Y.Z` tag。
 
 ## 快速开始
 
 ```bash
 # 登录，也可以首次打开 TUI 后直接粘贴 API key
-octocode login --api-key sk-xxx
+octo login --api-key sk-xxx
 
 # 诊断
-octocode doctor
+octo doctor
 
 # 对话
-octocode chat "解释这个项目"
+octo chat "解释这个项目"
 
 # 提问（含项目搜索上下文）
-octocode ask "auth middleware 在哪里"
+octo ask "auth middleware 在哪里"
 
 # 搜索代码
-octocode search "orchestrator"
+octo search "orchestrator"
 
 # 计划模式（只读分析）
-octocode plan "修复登录失败的问题"
+octo plan "修复登录失败的问题"
 
 # 执行任务
-octocode run "列出 src 目录"
+octo run "列出 src 目录"
 
 # 交互式 TUI（推荐）
-octocode
+octo
 
-# 兼容显式子命令
-octocode tui
+# 显式子命令
 octo tui
 
 # 不安装时从源码直接启动 TUI
-cargo run --bin octocode -- tui
+cargo run -- tui
 
 # 会话管理
-octocode resume
-octocode export <session-id>
+octo resume
+octo export <session-id>
 ```
 
-`octocode` 是主命令，`octo` 是短入口。如果 PowerShell 提示找不到 `octocode`，
-请确认 Cargo 的 bin 目录在 PATH 中，通常是 `%USERPROFILE%\.cargo\bin`。
+`octo` 是主命令，`octocode` 只做兼容入口。如果 PowerShell 提示找不到 `octo`，请确认 Cargo 或 npm 的 bin 目录在 PATH 中。Cargo 通常是 `%USERPROFILE%\.cargo\bin`。
 
 ## Feature Discovery
 
-`octocode features` 用来查看本地能力、竞争特性矩阵，以及根据任务描述推荐工作模式。
+`octo features` 用来查看本地能力、竞争特性矩阵，以及根据任务描述推荐工作模式。
 
 ```bash
-octocode features status
-octocode features matrix
-octocode features matrix --json
-octocode features recommend "review src/agent/orchestrator.rs"
+octo features status
+octo features matrix
+octo features matrix --json
+octo features recommend "review src/agent/orchestrator.rs"
 ```
 
 推荐模式只使用本地规则，不需要网络或 API key。可返回 `direct`、`plan`、
@@ -77,14 +96,14 @@ octocode features recommend "review src/agent/orchestrator.rs"
 
 ## Agent Commands
 
-`octocode agent` 暴露内置 subagent 和项目自定义 agent。
+`octo agent` 暴露内置 subagent 和项目自定义 agent。
 
 ```bash
-octocode agent list
-octocode agent list --json
-octocode agent show code-reviewer
-octocode agent show security-auditor
-octocode agent run code-explorer "explain src/agent" --focus src/agent
+octo agent list
+octo agent list --json
+octo agent show code-reviewer
+octo agent show security-auditor
+octo agent run code-explorer "explain src/agent" --focus src/agent
 ```
 
 内置 agent 包括 `code-explorer`、`code-reviewer`、`planner`、`test-runner`、
@@ -101,9 +120,9 @@ octocode agent run code-explorer "explain src/agent" --focus src/agent
 可以从模板创建，并在提交前验证：
 
 ```bash
-octocode agent create my-auditor --template auditor
-octocode agent validate --all
-octocode agent validate my-auditor --json
+octo agent create my-auditor --template auditor
+octo agent validate --all
+octo agent validate my-auditor --json
 ```
 
 模板使用 markdown 文件和 TOML frontmatter，支持 `explorer`、`reviewer`、
@@ -111,16 +130,16 @@ octocode agent validate my-auditor --json
 
 ## Mission Dry-Run Runtime
 
-`octocode mission` 是长任务的最小 dry-run 记录系统。它不会执行真实改动，而是生成本地规则计划，
+`octo mission` 是长任务的最小 dry-run 记录系统。它不会执行真实改动，而是生成本地规则计划，
 写入 mission 状态和事件，方便后续检查、恢复和回放。
 
 ```bash
-octocode mission new "refactor src/agent safely" --dry-run
-octocode mission status latest
-octocode mission inspect latest --json
-octocode mission inspect latest --events
-octocode mission replay latest
-octocode mission list
+octo mission new "refactor src/agent safely" --dry-run
+octo mission status latest
+octo mission inspect latest --json
+octo mission inspect latest --events
+octo mission replay latest
+octo mission list
 ```
 
 每个 mission 保存在：
@@ -150,6 +169,7 @@ Mission dry-run、feature recommendation 和 agent validation 都是本地操作
 - **Plan Mode**: 只读分析 → 生成计划 → 风险审查 → 用户确认后执行
 - **安全审批**: 路径保护、命令沙箱、风险分级、每次审批/会话授权
 - **会话持久化**: 项目级会话保存、恢复、导出、分叉
+- **任务闭环**: `todo_write`、`task_*` 工具和 `/task` 共用 `./.octocode/todos.json`
 - **缓存可视化**: 实时显示缓存命中率、token 用量、预估费用
 - **本地搜索**: ripgrep 全文搜索、文件 glob、符号搜索
 

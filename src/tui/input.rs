@@ -8,6 +8,13 @@ use ratatui::{
 
 use crate::tui::{motion::MotionFrame, theme};
 
+pub struct InputRenderOptions<'a> {
+    pub pending_options: Option<&'a [String]>,
+    pub motion: MotionFrame,
+    pub placeholder: &'a str,
+    pub chinese: bool,
+}
+
 /// Quiet terminal input: no border, just a clean prompt.
 pub fn render_input(
     f: &mut Frame,
@@ -34,13 +41,54 @@ pub fn render_input_with_motion(
     pending_options: Option<&[String]>,
     motion: MotionFrame,
 ) {
+    render_input_with_motion_and_placeholder(
+        f,
+        area,
+        input_text,
+        cursor_position,
+        pending_options,
+        motion,
+        &input_placeholder(),
+    );
+}
+
+pub fn render_input_with_motion_and_placeholder(
+    f: &mut Frame,
+    area: Rect,
+    input_text: &str,
+    cursor_position: usize,
+    pending_options: Option<&[String]>,
+    motion: MotionFrame,
+    placeholder: &str,
+) {
+    render_input_with_options(
+        f,
+        area,
+        input_text,
+        cursor_position,
+        InputRenderOptions {
+            pending_options,
+            motion,
+            placeholder,
+            chinese: false,
+        },
+    );
+}
+
+pub fn render_input_with_options(
+    f: &mut Frame,
+    area: Rect,
+    input_text: &str,
+    cursor_position: usize,
+    options: InputRenderOptions<'_>,
+) {
     let lines: Vec<Line> = if input_text.is_empty() {
         vec![Line::from(vec![
             prompt_span(),
-            cursor_span(motion),
+            cursor_span(options.motion),
             Span::styled("  ", muted_style()),
-            Span::styled(input_placeholder(), muted_style()),
-            render_context_suggestions(pending_options),
+            Span::styled(options.placeholder.to_string(), muted_style()),
+            render_context_suggestions(options.pending_options, options.chinese),
         ])]
     } else {
         let mut line_start = 0usize;
@@ -59,7 +107,7 @@ pub fn render_input_with_motion(
                 } else {
                     spans.push(Span::styled("  ", input_style()));
                 }
-                spans.extend(edit_spans(line, local_cursor, motion));
+                spans.extend(edit_spans(line, local_cursor, options.motion));
                 line_start += line_len + 1;
                 Line::from(spans)
             })
@@ -72,15 +120,19 @@ pub fn render_input_with_motion(
 }
 
 fn input_placeholder() -> String {
-    "type message...".to_string()
+    String::new()
 }
 
-fn render_context_suggestions(pending_options: Option<&[String]>) -> Span<'static> {
+fn render_context_suggestions(pending_options: Option<&[String]>, chinese: bool) -> Span<'static> {
     if pending_options.is_some() {
         let opts = pending_options.unwrap_or(&[]);
         if opts.is_empty() {
             return Span::styled(
-                "  (option list active)",
+                if chinese {
+                    "  (选项列表已激活)"
+                } else {
+                    "  (option list active)"
+                },
                 muted_style().add_modifier(Modifier::ITALIC),
             );
         }
@@ -95,10 +147,8 @@ fn render_context_suggestions(pending_options: Option<&[String]>) -> Span<'stati
         );
     }
 
-    Span::styled(
-        "  /help · /agents · @file · !cmd",
-        muted_style().add_modifier(Modifier::ITALIC),
-    )
+    let _ = chinese;
+    Span::styled("", muted_style().add_modifier(Modifier::ITALIC))
 }
 
 pub fn render_api_key_input(f: &mut Frame, area: Rect, input_text: &str, cursor_position: usize) {
@@ -118,6 +168,24 @@ pub fn render_api_key_input_with_motion(
     cursor_position: usize,
     motion: MotionFrame,
 ) {
+    render_api_key_input_with_motion_and_placeholder(
+        f,
+        area,
+        input_text,
+        cursor_position,
+        motion,
+        "paste API key",
+    );
+}
+
+pub fn render_api_key_input_with_motion_and_placeholder(
+    f: &mut Frame,
+    area: Rect,
+    input_text: &str,
+    cursor_position: usize,
+    motion: MotionFrame,
+    placeholder: &str,
+) {
     let display = mask_secret(input_text);
     let cursor = cursor_position.min(display.chars().count());
     let lines = if display.is_empty() {
@@ -125,7 +193,7 @@ pub fn render_api_key_input_with_motion(
             prompt_span(),
             cursor_span(motion),
             Span::styled(" ", input_style()),
-            Span::styled("paste API key...", muted_style()),
+            Span::styled(placeholder.to_string(), muted_style()),
         ])]
     } else {
         vec![Line::from({
@@ -279,8 +347,8 @@ mod tests {
 
         let rendered = buffer_text(terminal.backend());
         assert!(rendered.contains("> ▌"));
-        assert!(rendered.contains("type message..."));
-        assert!(rendered.contains("/help"));
+        assert!(!rendered.contains("type message"));
+        assert!(!rendered.contains("/help"));
     }
 
     #[test]

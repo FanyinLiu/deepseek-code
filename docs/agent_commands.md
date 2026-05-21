@@ -1,20 +1,43 @@
 # Agent Commands
 
-`octocode agent` turns the existing subagent runtime into an explicit CLI product
+`octo agent` turns the existing subagent runtime into an explicit CLI product
 surface. It lists built-ins, shows their defaults, creates project custom
 agents, validates agent files, and can run a named agent on a task.
+
+`octocode agent` remains available as a compatibility entrypoint, but examples
+and new documentation should use `octo`.
 
 ## Commands
 
 ```bash
-octocode agent list
-octocode agent list --json
-octocode agent show code-reviewer
-octocode agent show security-auditor --json
-octocode agent run code-explorer "explain src/agent" --focus src/agent
-octocode agent create my-auditor --template auditor
-octocode agent validate --all
-octocode agent validate my-auditor --json
+octo agent list
+octo agent list --json
+octo agent show code-reviewer
+octo agent show security-auditor --json
+octo agent run code-explorer "explain src/agent" --focus src/agent
+octo agent create my-auditor --template auditor
+octo agent validate --all
+octo agent validate my-auditor --json
+```
+
+## Operator Conventions
+
+Use the narrowest agent that fits the task:
+
+- `code-explorer`: read-only codebase orientation, module mapping, and locating
+  relevant files before edits.
+- `code-reviewer`: read-only bug, regression, missing-test, and maintainability
+  review.
+- `security-auditor`: read-only security review with VETO-style findings.
+- `planner`: implementation planning when the user asks for a plan before
+  edits.
+- `test-runner`: focused test execution and failure analysis.
+- `general-purpose`: fallback for broad tasks that do not fit a narrower role.
+
+For custom agent changes under `.octocode/agents/*.md`, run:
+
+```bash
+octo agent validate --all
 ```
 
 ## Built-In Agents
@@ -71,7 +94,7 @@ phrases are reported as warnings.
 
 ## Non-Interactive Run Behavior
 
-`octocode agent run` uses the real subagent executor. If a tool requires interactive
+`octo agent run` uses the real subagent executor. If a tool requires interactive
 approval in this plain terminal mode, the command denies the request rather than
 auto-approving it. Use read-only agents for unattended inspection and keep
 write-capable work behind normal project policy.

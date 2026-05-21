@@ -44,6 +44,28 @@ fn settings_get_and_set_use_project_local_config() {
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "light");
 }
 
+#[test]
+fn settings_can_set_ui_language() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let output = octocode_command(root.path())
+        .args(["settings", "set", "ui.language", "en-us"])
+        .output()
+        .expect("run octocode settings set");
+
+    assert!(output.status.success(), "stderr={}", stderr(&output));
+    let local = root.path().join(".octocode").join("local.toml");
+    let local_content = std::fs::read_to_string(&local).expect("local config");
+    assert!(local_content.contains("language = \"en-US\""));
+
+    let output = octocode_command(root.path())
+        .args(["settings", "get", "ui.language"])
+        .output()
+        .expect("run octocode settings get");
+
+    assert!(output.status.success(), "stderr={}", stderr(&output));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "en-US");
+}
+
 fn stderr(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stderr).to_string()
 }

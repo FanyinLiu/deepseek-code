@@ -1,10 +1,10 @@
 use std::process::Command;
 
-fn octocode(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_octocode"))
+fn octo(args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_octo"))
         .args(args)
         .output()
-        .expect("run octocode help command")
+        .expect("run octo help command")
 }
 
 fn assert_success(output: &std::process::Output) {
@@ -34,10 +34,11 @@ fn assert_stdout_contains_any(output: &std::process::Output, needles: &[&str]) {
 
 #[test]
 fn root_help_lists_core_discoverability_commands() {
-    let output = octocode(&["--help"]);
+    let output = octo(&["--help"]);
     assert_success(&output);
 
     assert_stdout_contains(&output, "Multi-model, multi-agent coding CLI");
+    assert_stdout_contains(&output, "Usage: octo");
     assert_stdout_contains(
         &output,
         "features   Discover available features and recommended operating modes",
@@ -58,14 +59,14 @@ fn root_help_lists_core_discoverability_commands() {
 
 #[test]
 fn agent_help_lists_agent_management_commands() {
-    let output = octocode(&["agent", "--help"]);
+    let output = octo(&["agent", "--help"]);
     assert_success(&output);
 
     assert_stdout_contains_any(
         &output,
         &[
-            "Usage: octocode agent [OPTIONS] <COMMAND>",
-            "Usage: octocode.exe agent [OPTIONS] <COMMAND>",
+            "Usage: octo agent [OPTIONS] <COMMAND>",
+            "Usage: octo.exe agent [OPTIONS] <COMMAND>",
         ],
     );
     assert_stdout_contains(&output, "list      List built-in and project custom agents");
@@ -86,7 +87,7 @@ fn agent_help_lists_agent_management_commands() {
 
 #[test]
 fn features_help_lists_discovery_commands() {
-    let output = octocode(&["features", "--help"]);
+    let output = octo(&["features", "--help"]);
     assert_success(&output);
 
     assert_stdout_contains(
@@ -106,7 +107,7 @@ fn features_help_lists_discovery_commands() {
 
 #[test]
 fn mission_help_lists_dry_run_replay_commands() {
-    let output = octocode(&["mission", "--help"]);
+    let output = octo(&["mission", "--help"]);
     assert_success(&output);
 
     assert_stdout_contains(&output, "Record and inspect long-running mission dry-runs");

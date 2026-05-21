@@ -17,6 +17,10 @@ pub enum ApiKeyStoreLocation {
     KeyringAndProjectLocalConfig {
         path: PathBuf,
     },
+    UserGlobalConfig {
+        path: PathBuf,
+        keyring_error: String,
+    },
     ProjectLocalConfig {
         path: PathBuf,
         keyring_error: String,
@@ -30,6 +34,13 @@ impl ApiKeyStoreLocation {
             Self::Keyring => "API key stored in system keyring.".to_string(),
             Self::KeyringAndProjectLocalConfig { path } => format!(
                 "API key stored in system keyring and local project fallback: {}",
+                path.display()
+            ),
+            Self::UserGlobalConfig {
+                path,
+                keyring_error,
+            } => format!(
+                "System keyring was unavailable ({keyring_error}). API key saved to user-global config: {}",
                 path.display()
             ),
             Self::ProjectLocalConfig {
@@ -213,11 +224,20 @@ pub fn store_api_key_with_project_fallback(
         }
     };
 
-    tracing::info!("falling back to project-local config after keyring verification failure");
+    tracing::info!("falling back to user-global config after keyring verification failure");
+
+    // Prefer user-global ~/.octocode/config.toml so the key works from any cwd.
+    // Only fall back to project-local when there is no home dir.
+    if let Some(path) = store_api_key_in_user_global_config(trimmed)? {
+        return Ok(ApiKeyStoreLocation::UserGlobalConfig {
+            path,
+            keyring_error,
+        });
+    }
 
     let Some(root) = project_root else {
         return Err(anyhow::anyhow!(
-            "failed to store API key in system keyring and no project root was available for local fallback"
+            "failed to store API key in system keyring and no home or project root available for fallback"
         ));
     };
     let path = store_api_key_in_project_local_config(root, trimmed)?;
@@ -225,6 +245,37 @@ pub fn store_api_key_with_project_fallback(
         path,
         keyring_error,
     })
+}
+
+/// Store the API key in `~/.octocode/config.toml` (user-global config).
+/// Returns `Ok(None)` if no home directory is available.
+pub fn store_api_key_in_user_global_config(key: &str) -> Result<Option<PathBuf>, anyhow::Error> {
+    let Some(home) = dirs::home_dir() else {
+        return Ok(None);
+    };
+    let config_dir = home.join(".octocode");
+    std::fs::create_dir_all(&config_dir)?;
+    let path = config_dir.join("config.toml");
+
+    let mut table = if path.exists() {
+        let content = std::fs::read_to_string(&path)?;
+        let value: toml::Value = toml::from_str(&content)?;
+        value
+            .as_table()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("{} is not a TOML table", path.display()))?
+    } else {
+        toml::map::Map::new()
+    };
+
+    table.insert(
+        "api_key".to_string(),
+        toml::Value::String(key.trim().to_string()),
+    );
+    let rendered = toml::to_string_pretty(&toml::Value::Table(table))?;
+    std::fs::write(&path, rendered)?;
+    tracing::warn!("API key stored in user-global config: {}", path.display());
+    Ok(Some(path))
 }
 
 fn maybe_store_windows_project_fallback(

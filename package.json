@@ -1,0 +1,49 @@
+{
+  "name": "octo",
+  "version": "0.1.0",
+  "description": "Octo and Octocode CLI distribution entrypoint.",
+  "main": "bin/octo.js",
+  "license": "MIT",
+  "type": "commonjs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FanyinLiu/octo.git"
+  },
+  "keywords": [
+    "cli",
+    "deepseek",
+    "agent",
+    "terminal"
+  ],
+  "homepage": "https://github.com/FanyinLiu/octo",
+  "bugs": {
+    "url": "https://github.com/FanyinLiu/octo/issues"
+  },
+  "author": "octo contributors",
+  "private": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "octo": "bin/octo.js",
+    "octocode": "bin/octo.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/npm-bootstrap.js --postinstall",
+    "bootstrap:dry-run": "node scripts/npm-bootstrap.js --dry-run",
+    "pack:dry-run": "npm pack --dry-run"
+  },
+  "files": [
+    "bin/octo.js",
+    "scripts/npm-bootstrap.js",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "directories": {
+    "doc": "docs"
+  },
+  "dependencies": {}
+}

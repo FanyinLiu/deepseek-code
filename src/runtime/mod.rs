@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod tool_runtime;
+
 /// Shared services that every execution surface should acquire from runtime.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeKernel {

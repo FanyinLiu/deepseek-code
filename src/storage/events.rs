@@ -58,6 +58,23 @@ pub enum SessionEventKind {
         duration_ms: u64,
         changed_files: Vec<String>,
     },
+    UserQuestionRequested {
+        tool_call_id: String,
+        name: String,
+        title: String,
+        options: Vec<String>,
+        summary: String,
+    },
+    ContextCompacted {
+        before_tokens: u64,
+        after_tokens: u64,
+        before_messages: usize,
+        after_messages: usize,
+        retained_start: usize,
+        retained_count: usize,
+        summary: String,
+        reason: String,
+    },
     HookExecuted {
         event: String,
         success: bool,
@@ -423,6 +440,33 @@ mod tests {
         );
 
         store.append(&root, &event).expect("append event");
+        let events = store.load(&root, &session_id).expect("load events");
+
+        assert_eq!(events, vec![event]);
+    }
+
+    #[test]
+    fn context_compacted_event_jsonl_roundtrips() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = EventLogStore::new(temp.path().to_path_buf());
+        let root = temp.path().join("project");
+        let session_id = SessionId::new_v4();
+        let event = SessionEvent::new(
+            session_id,
+            None,
+            SessionEventKind::ContextCompacted {
+                before_tokens: 10_000,
+                after_tokens: 2_000,
+                before_messages: 80,
+                after_messages: 20,
+                retained_start: 60,
+                retained_count: 20,
+                summary: "deterministic compact summary".into(),
+                reason: "manual /compact".into(),
+            },
+        );
+
+        store.append(&root, &event).expect("append compact event");
         let events = store.load(&root, &session_id).expect("load events");
 
         assert_eq!(events, vec![event]);

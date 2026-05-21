@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{bail, Context};
 use serde::Serialize;
@@ -12,7 +12,6 @@ use crate::agent::subagent::{
     PermissionMode, SubagentConfig, SubagentExecutor, SubagentRegistry, SubagentResult,
     SubagentTask,
 };
-use crate::cli::inline_popup::{self, ApprovalChoice};
 use crate::cli::resolve_project_root;
 use crate::provider::{build_provider, Provider};
 use crate::storage;
@@ -173,6 +172,16 @@ pub struct AgentRunPayload {
     pub duration_ms: u64,
     pub token_usage: u64,
     pub error: Option<String>,
+    pub approval_denials: Vec<AgentApprovalDenialPayload>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentApprovalDenialPayload {
+    pub agent_id: String,
+    pub tool: String,
+    pub reason: String,
+    pub arguments: String,
+    pub details: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -434,6 +443,8 @@ async fn run_agent(
         async move { executor.run(&task, &event_tx).await },
     ));
 
+    let mut auto_approve_session = false;
+    let mut approval_denials = Vec::new();
     let result = loop {
         tokio::select! {
             joined = &mut handle => {
@@ -441,16 +452,41 @@ async fn run_agent(
             }
             event = event_rx.recv() => {
                 if let Some(event) = event {
-                    handle_run_event(event, show_events).await;
+                    handle_run_event(
+                        event,
+                        show_events,
+                        &mut auto_approve_session,
+                        &mut approval_denials,
+                    )
+                    .await;
                 }
             }
         }
     };
+    while let Ok(event) = event_rx.try_recv() {
+        handle_run_event(
+            event,
+            show_events,
+            &mut auto_approve_session,
+            &mut approval_denials,
+        )
+        .await;
+    }
 
-    Ok(run_payload_from_result(name, task_text, result))
+    Ok(run_payload_from_result(
+        name,
+        task_text,
+        result,
+        approval_denials,
+    ))
 }
 
-async fn handle_run_event(event: AgentEvent, show_events: bool) {
+async fn handle_run_event(
+    event: AgentEvent,
+    show_events: bool,
+    auto_approve_session: &mut bool,
+    approval_denials: &mut Vec<AgentApprovalDenialPayload>,
+) {
     match event {
         AgentEvent::SubagentStarted {
             agent_type,
@@ -466,34 +502,47 @@ async fn handle_run_event(event: AgentEvent, show_events: bool) {
             agent_id,
             tool_name,
             arguments,
+            policy_decision,
             respond,
         } => {
-            let is_tty = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-            let approved = if show_events && is_tty {
-                let display = crate::policy::ApprovalDisplay {
-                    title: format!("Subagent tool: {tool_name}"),
-                    description: "Agent run requested a tool call".to_string(),
-                    risk_level: crate::policy::RiskLevel::CommandExecution,
-                    details: format!("Agent: {agent_id}\nArguments: {arguments}"),
-                };
-                matches!(
-                    inline_popup::prompt_approval_inline(&display)
-                        .await
-                        .unwrap_or(ApprovalChoice::Deny),
-                    ApprovalChoice::ApproveOnce | ApprovalChoice::ApproveSession
-                )
-            } else {
-                if show_events {
-                    tracing::warn!("tool approval requested without tty; denying");
-                }
-                false
+            let is_tty = show_events && crate::cli::approval::cli_prompt_tty();
+            let decision = match tokio::time::timeout(
+                Duration::from_secs(55),
+                crate::cli::approval::resolve_subagent_tool_approval(
+                    &policy_decision,
+                    crate::cli::ToolApprovalPolicy::Ask,
+                    auto_approve_session,
+                    is_tty,
+                ),
+            )
+            .await
+            {
+                Ok(decision) => decision,
+                Err(_) => crate::cli::approval::ToolApprovalDecision::denied(
+                    crate::cli::approval::DENIAL_REASON_APPROVAL_TIMEOUT,
+                ),
             };
-            if show_events && !approved {
+            if show_events && !decision.approved {
                 println!(
-                    "tool approval required for {tool_name}; denied in non-interactive agent run"
+                    "tool approval required for {tool_name}; denied ({})",
+                    decision.denial_reason.unwrap_or("unknown")
                 );
             }
-            let _ = respond.send(approved);
+            let send_result = respond.send(decision.approved);
+            let denial_reason = if send_result.is_err() {
+                Some(crate::cli::approval::DENIAL_REASON_APPROVAL_RESPONSE_CLOSED)
+            } else {
+                decision.denial_reason
+            };
+            if let Some(reason) = denial_reason {
+                approval_denials.push(AgentApprovalDenialPayload {
+                    agent_id,
+                    tool: tool_name.clone(),
+                    reason: reason.to_string(),
+                    arguments,
+                    details: policy_decision.display.details,
+                });
+            }
         }
         AgentEvent::SubagentCompleted { result, .. } if show_events => {
             let status = if result.success { "ok" } else { "failed" };
@@ -506,7 +555,12 @@ async fn handle_run_event(event: AgentEvent, show_events: bool) {
     }
 }
 
-fn run_payload_from_result(name: &str, task: &str, result: SubagentResult) -> AgentRunPayload {
+fn run_payload_from_result(
+    name: &str,
+    task: &str,
+    result: SubagentResult,
+    approval_denials: Vec<AgentApprovalDenialPayload>,
+) -> AgentRunPayload {
     AgentRunPayload {
         agent: name.to_string(),
         task: task.to_string(),
@@ -519,6 +573,7 @@ fn run_payload_from_result(name: &str, task: &str, result: SubagentResult) -> Ag
         duration_ms: result.duration_ms,
         token_usage: result.token_usage,
         error: result.error,
+        approval_denials,
     }
 }
 
@@ -603,6 +658,15 @@ fn print_run_result(payload: &AgentRunPayload) {
     }
     if let Some(error) = &payload.error {
         println!("Error: {error}");
+    }
+    if !payload.approval_denials.is_empty() {
+        println!("Approval denials:");
+        for denial in &payload.approval_denials {
+            println!(
+                "  {}:{} denied ({})",
+                denial.agent_id, denial.tool, denial.reason
+            );
+        }
     }
     println!();
     println!("{}", payload.output);
@@ -820,6 +884,38 @@ mod tests {
         assert!(names.contains("code-reviewer"));
         assert!(names.contains("security-auditor"));
         serde_json::to_string(&payload).expect("serialize list");
+    }
+
+    #[test]
+    fn run_payload_serializes_approval_denials() {
+        let payload = AgentRunPayload {
+            agent: "code-reviewer".to_string(),
+            task: "review".to_string(),
+            success: false,
+            summary: String::new(),
+            output: String::new(),
+            tool_calls_used: Vec::new(),
+            files_read: Vec::new(),
+            files_written: Vec::new(),
+            duration_ms: 0,
+            token_usage: 0,
+            error: Some("approval denied".to_string()),
+            approval_denials: vec![AgentApprovalDenialPayload {
+                agent_id: "agent-1".to_string(),
+                tool: "run_command".to_string(),
+                reason: "policy=ask-no-tty".to_string(),
+                arguments: "{\"command\":\"echo hi\"}".to_string(),
+                details: "Command: echo hi".to_string(),
+            }],
+        };
+
+        let value = serde_json::to_value(&payload).expect("serialize payload");
+        assert_eq!(value["approval_denials"][0]["reason"], "policy=ask-no-tty");
+        assert_eq!(
+            value["approval_denials"][0]["arguments"],
+            "{\"command\":\"echo hi\"}"
+        );
+        assert_eq!(value["approval_denials"][0]["details"], "Command: echo hi");
     }
 
     #[test]

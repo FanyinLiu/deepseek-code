@@ -3193,7 +3193,15 @@ impl TuiApp {
                     self.current_turn_usage_finalized = true;
                     self.total_tokens = self.total_tokens.saturating_add(turn_tokens);
                     self.total_cost += u.estimate_cost_cny(&self.model);
-                    self.cache = cache;
+                    if let Some(c) = cache {
+                        let agg = self.cache.get_or_insert_with(CacheUsage::default);
+                        agg.prompt_cache_hit_tokens = agg
+                            .prompt_cache_hit_tokens
+                            .saturating_add(c.prompt_cache_hit_tokens);
+                        agg.prompt_cache_miss_tokens = agg
+                            .prompt_cache_miss_tokens
+                            .saturating_add(c.prompt_cache_miss_tokens);
+                    }
                     self.push_activity(format!(
                         "usage: total={} prompt={} completion={} ¥{:.3}",
                         u.total_tokens,
@@ -3461,31 +3469,23 @@ impl TuiApp {
                 agent_id,
                 tool_name,
                 arguments,
+                policy_decision,
                 respond,
             } => {
                 let short_id: String = agent_id.chars().take(8).collect();
                 self.push_activity(format!("subagent {short_id} needs approval: {tool_name}"));
-                let policy = storage::Config::load(Some(&self.file_tree.root))
-                    .map(|config| config.policy)
-                    .unwrap_or_default();
-                let decision = crate::policy::evaluate_tool(
-                    &tool_name,
-                    &arguments,
-                    &self.file_tree.root,
-                    &policy,
-                );
-                if decision.action == crate::policy::PolicyAction::Allow {
+                if policy_decision.action == crate::policy::PolicyAction::Allow {
                     let _ = respond.send(true);
                     self.push_activity(format!(
                         "subagent {short_id} auto-approved safe tool: {tool_name}"
                     ));
                     return;
                 }
-                if decision.action == crate::policy::PolicyAction::Deny {
+                if policy_decision.action == crate::policy::PolicyAction::Deny {
                     let _ = respond.send(false);
                     self.status_message = format!(
                         "Subagent tool blocked: {}",
-                        truncate_for_activity(&decision.reason, 80)
+                        truncate_for_activity(&policy_decision.reason, 80)
                     );
                     return;
                 }
@@ -3494,7 +3494,7 @@ impl TuiApp {
                         &agent_id,
                         &tool_name,
                         &arguments,
-                        &decision.display,
+                        &policy_decision.display,
                     ),
                     respond,
                 );
@@ -4904,8 +4904,17 @@ struct TerminalEnvironment {
     stdin_is_terminal: bool,
     stdout_is_terminal: bool,
     term: Option<String>,
-    codex_shell: bool,
+    /// Terminal embedded in another CLI host that emulates a TTY but does not
+    /// answer cursor-position probes (CSI 6 n). Detected via host-injected env
+    /// vars from a known list of upstream wrappers.
+    embedded_host: bool,
 }
+
+/// Set `OCTO_EMBEDDED_HOST=1` to tell octocode it's running inside another
+/// CLI host that emulates a TTY but doesn't answer CSI 6 n cursor-position
+/// probes (causes startup hangs). The classic renderer is used instead of
+/// the alt-screen full renderer.
+const EMBEDDED_HOST_ENV_VARS: &[&str] = &["OCTO_EMBEDDED_HOST"];
 
 impl TerminalEnvironment {
     fn current() -> Self {
@@ -4913,8 +4922,9 @@ impl TerminalEnvironment {
             stdin_is_terminal: io::stdin().is_terminal(),
             stdout_is_terminal: io::stdout().is_terminal(),
             term: std::env::var("TERM").ok(),
-            codex_shell: std::env::var_os("CODEX_SHELL").is_some()
-                || std::env::var_os("CODEX_THREAD_ID").is_some(),
+            embedded_host: EMBEDDED_HOST_ENV_VARS
+                .iter()
+                .any(|var| std::env::var_os(var).is_some()),
         }
     }
 
@@ -4941,7 +4951,7 @@ Run `octo` from a real terminal/PTY, or use `octo preview-tui` for a non-interac
     }
 
     fn skips_cursor_position_probe(&self) -> bool {
-        self.codex_shell
+        self.embedded_host
             || match self.term.as_deref() {
                 Some(term) => {
                     let normalized = term.trim().to_ascii_lowercase();
@@ -6552,6 +6562,20 @@ mod tests {
         app
     }
 
+    fn subagent_policy_decision(
+        tool_name: &str,
+        arguments: &str,
+        project_root: &std::path::Path,
+    ) -> crate::policy::PolicyDecision {
+        crate::policy::evaluate_tool(
+            tool_name,
+            arguments,
+            project_root,
+            &crate::storage::config::PolicyConfig::default(),
+        )
+        .with_source(crate::policy::ToolCallSource::Subagent)
+    }
+
     fn test_session(reasoning_state: ReasoningState) -> Session {
         Session {
             id: SessionId::new_v4(),
@@ -6700,18 +6724,18 @@ mod tests {
     }
 
     #[test]
-    fn renderer_mode_auto_uses_fullscreen_in_normal_terminals_and_classic_in_codex() {
+    fn renderer_mode_auto_uses_fullscreen_in_normal_terminals_and_classic_in_embedded() {
         let normal = TerminalEnvironment {
             stdin_is_terminal: true,
             stdout_is_terminal: true,
             term: Some("xterm-256color".to_string()),
-            codex_shell: false,
+            embedded_host: false,
         };
-        let codex = TerminalEnvironment {
+        let embedded = TerminalEnvironment {
             stdin_is_terminal: true,
             stdout_is_terminal: true,
             term: Some("xterm-256color".to_string()),
-            codex_shell: true,
+            embedded_host: true,
         };
 
         // Auto now defaults to Classic (inline viewport) for both normal and
@@ -6725,7 +6749,7 @@ mod tests {
             RendererMode::Classic
         );
         assert_eq!(
-            RendererMode::from_config_for_environment("auto", &codex),
+            RendererMode::from_config_for_environment("auto", &embedded),
             RendererMode::Classic
         );
         assert_eq!(
@@ -6733,7 +6757,7 @@ mod tests {
             RendererMode::Classic
         );
         assert_eq!(
-            RendererMode::from_config_for_environment("fullscreen", &codex),
+            RendererMode::from_config_for_environment("fullscreen", &embedded),
             RendererMode::Fullscreen
         );
         assert_eq!(
@@ -6764,7 +6788,7 @@ mod tests {
             stdin_is_terminal: false,
             stdout_is_terminal: true,
             term: Some("xterm-256color".to_string()),
-            codex_shell: false,
+            embedded_host: false,
         };
 
         let error = env
@@ -6777,22 +6801,22 @@ mod tests {
     }
 
     #[test]
-    fn codex_and_dumb_term_skip_cursor_position_probe() {
-        let codex = TerminalEnvironment {
+    fn embedded_and_dumb_term_skip_cursor_position_probe() {
+        let embedded = TerminalEnvironment {
             stdin_is_terminal: true,
             stdout_is_terminal: true,
             term: Some("xterm-256color".to_string()),
-            codex_shell: true,
+            embedded_host: true,
         };
         let dumb = TerminalEnvironment {
             stdin_is_terminal: true,
             stdout_is_terminal: true,
             term: Some("dumb".to_string()),
-            codex_shell: false,
+            embedded_host: false,
         };
 
-        assert!(codex.ensure_tui_supported().is_ok());
-        assert!(codex.skips_cursor_position_probe());
+        assert!(embedded.ensure_tui_supported().is_ok());
+        assert!(embedded.skips_cursor_position_probe());
         assert!(dumb.ensure_tui_supported().is_ok());
         assert!(dumb.skips_cursor_position_probe());
     }
@@ -7346,11 +7370,13 @@ mod tests {
         let root = tempfile::tempdir().expect("workspace");
         let mut app = test_app_with_root(root.path().to_path_buf());
         let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let arguments = serde_json::json!({ "path": ".", "recursive": true }).to_string();
 
         app.apply_agent_event(AgentEvent::SubagentToolApprovalNeeded {
             agent_id: "subagent-12345678".to_string(),
             tool_name: "list_dir".to_string(),
-            arguments: serde_json::json!({ "path": ".", "recursive": true }).to_string(),
+            arguments: arguments.clone(),
+            policy_decision: subagent_policy_decision("list_dir", &arguments, root.path()),
             respond: tx,
         });
 
@@ -7364,11 +7390,13 @@ mod tests {
         let outside = tempfile::NamedTempFile::new().expect("outside file");
         let mut app = test_app_with_root(root.path().to_path_buf());
         let (tx, _rx) = tokio::sync::oneshot::channel();
+        let arguments = serde_json::json!({ "path": outside.path().to_string_lossy() }).to_string();
 
         app.apply_agent_event(AgentEvent::SubagentToolApprovalNeeded {
             agent_id: "subagent-abcdef123456".to_string(),
             tool_name: "read_file".to_string(),
-            arguments: serde_json::json!({ "path": outside.path().to_string_lossy() }).to_string(),
+            arguments: arguments.clone(),
+            policy_decision: subagent_policy_decision("read_file", &arguments, root.path()),
             respond: tx,
         });
 
@@ -7392,19 +7420,23 @@ mod tests {
         let mut app = test_app_with_root(root.path().to_path_buf());
         let (tx_one, mut rx_one) = tokio::sync::oneshot::channel();
         let (tx_two, mut rx_two) = tokio::sync::oneshot::channel();
+        let arguments_one =
+            serde_json::json!({ "path": outside_one.path().to_string_lossy() }).to_string();
+        let arguments_two =
+            serde_json::json!({ "path": outside_two.path().to_string_lossy() }).to_string();
 
         app.apply_agent_event(AgentEvent::SubagentToolApprovalNeeded {
             agent_id: "subagent-one".to_string(),
             tool_name: "read_file".to_string(),
-            arguments: serde_json::json!({ "path": outside_one.path().to_string_lossy() })
-                .to_string(),
+            arguments: arguments_one.clone(),
+            policy_decision: subagent_policy_decision("read_file", &arguments_one, root.path()),
             respond: tx_one,
         });
         app.apply_agent_event(AgentEvent::SubagentToolApprovalNeeded {
             agent_id: "subagent-two".to_string(),
             tool_name: "read_file".to_string(),
-            arguments: serde_json::json!({ "path": outside_two.path().to_string_lossy() })
-                .to_string(),
+            arguments: arguments_two.clone(),
+            policy_decision: subagent_policy_decision("read_file", &arguments_two, root.path()),
             respond: tx_two,
         });
 

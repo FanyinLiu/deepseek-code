@@ -77,6 +77,7 @@ fn setting_items(config: &storage::Config) -> Vec<SettingItem> {
             config.model.reasoning_effort.to_string(),
         ),
         item("provider.default", config.provider.default.as_str()),
+        item("ui.language", &config.ui.language),
         item("ui.theme", &config.ui.theme),
         item(
             "ui.show_reasoning_summary",
@@ -151,6 +152,9 @@ fn validate_setting_value(key: &str, value: &str) -> Result<toml::Value, anyhow:
             }
             _ => anyhow::bail!("ui.theme must be auto, light, dark, or high-contrast"),
         },
+        "ui.language" => normalize_ui_language(value)
+            .map(|language| toml::Value::String(language.to_string()))
+            .ok_or_else(|| anyhow::anyhow!("ui.language must be auto, zh-CN, or en-US")),
         "ui.show_reasoning_summary"
         | "ui.show_raw_reasoning"
         | "ui.show_cache_hud"
@@ -177,6 +181,16 @@ fn validate_setting_value(key: &str, value: &str) -> Result<toml::Value, anyhow:
     }
 }
 
+fn normalize_ui_language(value: &str) -> Option<&'static str> {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    match normalized.as_str() {
+        "auto" => Some("auto"),
+        "zh" | "zh-cn" | "zh-hans" | "zh-hans-cn" => Some("zh-CN"),
+        "en" | "en-us" | "en-gb" => Some("en-US"),
+        _ => None,
+    }
+}
+
 fn parse_bool(value: &str) -> Result<bool, anyhow::Error> {
     match value {
         "true" | "on" | "1" | "yes" => Ok(true),
@@ -191,9 +205,14 @@ fn local_config_path(root: &Path) -> PathBuf {
 
 fn read_toml_value(path: &Path) -> Result<toml::Value, anyhow::Error> {
     if path.exists() {
-        Ok(std::fs::read_to_string(path)?
-            .parse::<toml::Value>()
-            .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new())))
+        let text = std::fs::read_to_string(path)?;
+        text.parse::<toml::Value>().map_err(|e| {
+            anyhow::anyhow!(
+                "settings file {} is corrupted: {}. Refusing to overwrite; fix or remove it first.",
+                path.display(),
+                e
+            )
+        })
     } else {
         Ok(toml::Value::Table(toml::map::Map::new()))
     }

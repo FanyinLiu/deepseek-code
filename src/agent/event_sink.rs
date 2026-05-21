@@ -100,6 +100,36 @@ impl<'a> EventSink<'a> {
                     changed_files: Vec::new(),
                 });
             }
+            AgentEvent::UserQuestionRequested {
+                title,
+                options,
+                summary,
+            } => {
+                self.record(SessionEventKind::UserQuestionRequested {
+                    tool_call_id: String::new(),
+                    name: "ask_user".to_string(),
+                    title: title.clone(),
+                    options: options.clone(),
+                    summary: summary.clone(),
+                });
+            }
+            AgentEvent::ContextCompacted {
+                summary,
+                reason,
+                before_tokens,
+                after_tokens,
+            } => {
+                self.record(SessionEventKind::ContextCompacted {
+                    before_tokens: *before_tokens,
+                    after_tokens: *after_tokens,
+                    before_messages: 0,
+                    after_messages: 0,
+                    retained_start: 0,
+                    retained_count: 0,
+                    summary: summary.clone(),
+                    reason: reason.clone(),
+                });
+            }
             AgentEvent::HookExecuted {
                 event,
                 success,

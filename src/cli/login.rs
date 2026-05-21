@@ -35,7 +35,7 @@ pub fn resolve_api_key_non_interactive(
 ) -> Result<String, anyhow::Error> {
     storage::get_effective_api_key(project_root).ok_or_else(|| {
         anyhow::anyhow!(
-            "No API key configured. Run `octocode login --api-key sk-...` or set DEEPSEEK_API_KEY."
+            "No API key configured. Run `octo login --api-key sk-...` or set DEEPSEEK_API_KEY."
         )
     })
 }
@@ -44,7 +44,7 @@ pub fn resolve_api_key_non_interactive(
 pub fn prompt_and_store_api_key(project_root: Option<&Path>) -> Result<String, anyhow::Error> {
     if !std::io::stdin().is_terminal() {
         anyhow::bail!(
-            "No API key configured. Run `octocode login --api-key <key>` or set a provider API key env var."
+            "No API key configured. Run `octo login --api-key <key>` or set a provider API key env var."
         );
     }
 
@@ -83,7 +83,7 @@ pub async fn login(
         let trimmed = validate_api_key(&key)?;
         let location = storage::store_api_key_with_project_fallback(trimmed, project_root)?;
         println!("✅ {}", location.user_message());
-        println!("   Run `octocode doctor` to verify.");
+        println!("   Run `octo doctor` to verify.");
     } else {
         prompt_and_store_api_key(project_root)?;
     }

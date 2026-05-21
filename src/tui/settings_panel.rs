@@ -70,12 +70,17 @@ pub fn render_settings_panel(f: &mut Frame, area: Rect, props: SettingsPanelProp
     }
 
     let p = theme::palette();
+    let chinese = crate::tui::welcome::is_chinese_display_language(&props.config.ui.language);
     let mut lines = vec![
         Line::from(""),
-        tab_line(props.selected_tab),
+        tab_line(props.selected_tab, chinese),
         Line::from(""),
         Line::from(vec![Span::styled(
-            "Current settings",
+            if chinese {
+                "当前设置"
+            } else {
+                "Current settings"
+            },
             Style::default()
                 .fg(p.text)
                 .bg(p.canvas)
@@ -87,17 +92,37 @@ pub fn render_settings_panel(f: &mut Frame, area: Rect, props: SettingsPanelProp
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled("↑↓", Style::default().fg(p.text).bg(p.canvas)),
-        Span::styled(" navigate   ", Style::default().fg(p.muted).bg(p.canvas)),
+        Span::styled(
+            if chinese {
+                " 导航   "
+            } else {
+                " navigate   "
+            },
+            Style::default().fg(p.muted).bg(p.canvas),
+        ),
         Span::styled("Tab", Style::default().fg(p.text).bg(p.canvas)),
-        Span::styled(" switch tab   ", Style::default().fg(p.muted).bg(p.canvas)),
+        Span::styled(
+            if chinese {
+                " 切换页签   "
+            } else {
+                " switch tab   "
+            },
+            Style::default().fg(p.muted).bg(p.canvas),
+        ),
         Span::styled("Enter/Space", Style::default().fg(p.text).bg(p.canvas)),
-        Span::styled(" edit   ", Style::default().fg(p.muted).bg(p.canvas)),
+        Span::styled(
+            if chinese { " 修改   " } else { " edit   " },
+            Style::default().fg(p.muted).bg(p.canvas),
+        ),
         Span::styled("Esc", Style::default().fg(p.text).bg(p.canvas)),
-        Span::styled(" close", Style::default().fg(p.muted).bg(p.canvas)),
+        Span::styled(
+            if chinese { " 关闭" } else { " close" },
+            Style::default().fg(p.muted).bg(p.canvas),
+        ),
     ]));
 
     let block = Block::default()
-        .title(" Settings ")
+        .title(if chinese { " 设置 " } else { " Settings " })
         .borders(Borders::ALL)
         .border_style(Style::default().fg(p.divider).bg(p.canvas))
         .style(Style::default().fg(p.text).bg(p.canvas));
@@ -108,7 +133,7 @@ pub fn render_settings_panel(f: &mut Frame, area: Rect, props: SettingsPanelProp
     f.render_widget(panel, area);
 }
 
-fn tab_line(selected: SettingsTab) -> Line<'static> {
+fn tab_line(selected: SettingsTab, chinese: bool) -> Line<'static> {
     let p = theme::palette();
     let mut spans = Vec::new();
     for tab in SettingsTab::ALL {
@@ -120,7 +145,7 @@ fn tab_line(selected: SettingsTab) -> Line<'static> {
                 .bg(p.canvas),
         ));
         spans.push(Span::styled(
-            tab.label(),
+            tab_label(tab, chinese),
             Style::default()
                 .fg(if active { p.accent } else { p.secondary })
                 .bg(p.canvas)
@@ -136,23 +161,36 @@ fn tab_line(selected: SettingsTab) -> Line<'static> {
 }
 
 fn settings_rows(props: &SettingsPanelProps<'_>) -> Vec<Line<'static>> {
+    let chinese = crate::tui::welcome::is_chinese_display_language(&props.config.ui.language);
     match props.selected_tab {
         SettingsTab::Model => rows(
             &[
                 (
-                    "Provider",
+                    label("Provider", "提供方", chinese),
                     props.config.provider.default.as_str().to_string(),
                 ),
-                ("Active model", format!("{}", props.active_model)),
-                ("Default model", format!("{}", props.config.model.default)),
-                ("Heavy model", format!("{}", props.config.model.heavy)),
-                ("Active thinking", format!("{}", props.active_thinking)),
                 (
-                    "Default thinking",
+                    label("Active model", "当前模型", chinese),
+                    format!("{}", props.active_model),
+                ),
+                (
+                    label("Default model", "默认模型", chinese),
+                    format!("{}", props.config.model.default),
+                ),
+                (
+                    label("Heavy model", "复杂任务模型", chinese),
+                    format!("{}", props.config.model.heavy),
+                ),
+                (
+                    label("Active thinking", "当前思考模式", chinese),
+                    format!("{}", props.active_thinking),
+                ),
+                (
+                    label("Default thinking", "默认思考模式", chinese),
                     format!("{}", props.config.model.thinking_mode),
                 ),
                 (
-                    "Reasoning effort",
+                    label("Reasoning effort", "推理强度", chinese),
                     format!("{}", props.config.model.reasoning_effort),
                 ),
             ],
@@ -161,33 +199,39 @@ fn settings_rows(props: &SettingsPanelProps<'_>) -> Vec<Line<'static>> {
         SettingsTab::Safety => rows(
             &[
                 (
-                    "Autonomy level",
+                    label("Autonomy level", "自主级别", chinese),
                     props.config.policy.autonomy_level.as_str().to_string(),
                 ),
                 (
-                    "Safe reads",
-                    on_off(props.config.policy.auto_approve_safe_read),
-                ),
-                ("Auto mode", on_off(props.config.policy.auto_mode)),
-                (
-                    "Write approval",
-                    required(props.config.policy.require_approval_for_write),
+                    label("Safe reads", "安全读取", chinese),
+                    on_off(props.config.policy.auto_approve_safe_read, chinese),
                 ),
                 (
-                    "Command approval",
-                    required(props.config.policy.require_approval_for_command),
+                    label("Auto mode", "自动模式", chinese),
+                    on_off(props.config.policy.auto_mode, chinese),
                 ),
-                ("Network access", on_off(props.config.policy.network_access)),
                 (
-                    "Protected paths",
+                    label("Write approval", "写入审批", chinese),
+                    required(props.config.policy.require_approval_for_write, chinese),
+                ),
+                (
+                    label("Command approval", "命令审批", chinese),
+                    required(props.config.policy.require_approval_for_command, chinese),
+                ),
+                (
+                    label("Network access", "网络访问", chinese),
+                    on_off(props.config.policy.network_access, chinese),
+                ),
+                (
+                    label("Protected paths", "受保护路径", chinese),
                     format!(
                         "{} ({})",
-                        on_off(props.config.policy.block_protected_paths),
+                        on_off(props.config.policy.block_protected_paths, chinese),
                         props.config.paths.protected.len()
                     ),
                 ),
                 (
-                    "Command timeout",
+                    label("Command timeout", "命令超时", chinese),
                     format!("{}s", props.config.policy.command_timeout_seconds),
                 ),
             ],
@@ -195,62 +239,127 @@ fn settings_rows(props: &SettingsPanelProps<'_>) -> Vec<Line<'static>> {
         ),
         SettingsTab::Interface => rows(
             &[
-                ("Language", props.config.ui.language.clone()),
-                ("Theme", props.theme_label.to_string()),
-                ("Motion", props.config.ui.motion.clone()),
-                ("Renderer", props.renderer.label().to_string()),
                 (
-                    "Reasoning summary",
-                    on_off(props.config.ui.show_reasoning_summary),
+                    label("Language", "语言", chinese),
+                    props.config.ui.language.clone(),
                 ),
-                ("Raw reasoning", on_off(props.config.ui.show_raw_reasoning)),
-                ("Cache HUD", on_off(props.config.ui.show_cache_hud)),
+                (
+                    label("Theme", "主题", chinese),
+                    props.theme_label.to_string(),
+                ),
+                (
+                    label("Motion", "动画", chinese),
+                    props.config.ui.motion.clone(),
+                ),
+                (
+                    label("Renderer", "渲染器", chinese),
+                    props.renderer.label().to_string(),
+                ),
+                (
+                    label("Reasoning summary", "思考摘要", chinese),
+                    on_off(props.config.ui.show_reasoning_summary, chinese),
+                ),
+                (
+                    label("Raw reasoning", "原始思考", chinese),
+                    on_off(props.config.ui.show_raw_reasoning, chinese),
+                ),
+                (
+                    label("Cache HUD", "缓存 HUD", chinese),
+                    on_off(props.config.ui.show_cache_hud, chinese),
+                ),
             ],
             props.selected_row,
         ),
         SettingsTab::Agents => rows(
             &[
-                ("Router", on_off(props.config.router.enabled)),
                 (
-                    "Model classifier",
-                    on_off(props.config.router.use_model_classifier),
+                    label("Router", "路由器", chinese),
+                    on_off(props.config.router.enabled, chinese),
                 ),
-                ("Subagents", on_off(props.config.subagent.enabled)),
-                ("Swarm", on_off(props.config.subagent.swarm_enabled)),
                 (
-                    "Max parallel",
+                    label("Model classifier", "模型分类器", chinese),
+                    on_off(props.config.router.use_model_classifier, chinese),
+                ),
+                (
+                    label("Subagents", "子智能体", chinese),
+                    on_off(props.config.subagent.enabled, chinese),
+                ),
+                (
+                    label("Swarm", "群组", chinese),
+                    on_off(props.config.subagent.swarm_enabled, chinese),
+                ),
+                (
+                    label("Max parallel", "最大并发", chinese),
                     props.config.subagent.max_parallel.to_string(),
                 ),
                 (
-                    "Auto decompose",
-                    on_off(props.config.subagent.auto_decompose),
+                    label("Auto decompose", "自动拆解", chinese),
+                    on_off(props.config.subagent.auto_decompose, chinese),
                 ),
                 (
-                    "Custom agents",
-                    on_off(props.config.subagent.allow_custom_agents),
+                    label("Custom agents", "自定义智能体", chinese),
+                    on_off(props.config.subagent.allow_custom_agents, chinese),
                 ),
                 (
                     "MCP",
                     format!(
                         "{} ({})",
-                        on_off(props.config.mcp.enabled),
+                        on_off(props.config.mcp.enabled, chinese),
                         props.config.mcp.servers.len()
                     ),
                 ),
-                ("Hooks", hook_count(&props.config.hooks).to_string()),
-                ("Telemetry", on_off(props.config.telemetry.enabled)),
+                (
+                    label("Hooks", "Hooks", chinese),
+                    hook_count(&props.config.hooks).to_string(),
+                ),
+                (
+                    label("Telemetry", "遥测", chinese),
+                    on_off(props.config.telemetry.enabled, chinese),
+                ),
             ],
             props.selected_row,
         ),
     }
 }
 
-fn on_off(value: bool) -> String {
-    if value { "on" } else { "off" }.to_string()
+fn tab_label(tab: SettingsTab, chinese: bool) -> &'static str {
+    if !chinese {
+        return tab.label();
+    }
+    match tab {
+        SettingsTab::Model => "模型",
+        SettingsTab::Safety => "安全",
+        SettingsTab::Interface => "界面",
+        SettingsTab::Agents => "智能体",
+    }
 }
 
-fn required(value: bool) -> String {
-    if value { "required" } else { "skipped" }.to_string()
+fn label(english: &'static str, chinese_label: &'static str, chinese: bool) -> &'static str {
+    if chinese {
+        chinese_label
+    } else {
+        english
+    }
+}
+
+fn on_off(value: bool, chinese: bool) -> String {
+    match (value, chinese) {
+        (true, true) => "开启",
+        (false, true) => "关闭",
+        (true, false) => "on",
+        (false, false) => "off",
+    }
+    .to_string()
+}
+
+fn required(value: bool, chinese: bool) -> String {
+    match (value, chinese) {
+        (true, true) => "需要",
+        (false, true) => "跳过",
+        (true, false) => "required",
+        (false, false) => "skipped",
+    }
+    .to_string()
 }
 
 fn hook_count(hooks: &storage::config::HooksConfig) -> usize {
@@ -294,6 +403,8 @@ mod tests {
 
     #[test]
     fn settings_panel_renders_tabs_and_selected_section() {
+        let mut config = storage::Config::default();
+        config.ui.language = "en-US".to_string();
         let mut terminal = Terminal::new(TestBackend::new(100, 18)).expect("terminal");
         terminal
             .draw(|f| {
@@ -306,7 +417,7 @@ mod tests {
                         active_model: &DeepSeekModel::Flash,
                         active_thinking: &ThinkingMode::Auto,
                         renderer: RendererMode::Classic,
-                        config: &storage::Config::default(),
+                        config: &config,
                         theme_label: "light",
                     },
                 );
@@ -333,6 +444,7 @@ mod tests {
     #[test]
     fn settings_panel_shows_policy_values_from_config() {
         let mut config = storage::Config::default();
+        config.ui.language = "en-US".to_string();
         config.policy.autonomy_level = storage::config::AutonomyLevel::Medium;
         let mut terminal = Terminal::new(TestBackend::new(100, 18)).expect("terminal");
         terminal

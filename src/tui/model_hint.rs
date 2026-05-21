@@ -1,6 +1,6 @@
 use ratatui::{
     layout::{Alignment, Rect},
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::Paragraph,
     Frame,
@@ -27,10 +27,7 @@ pub fn render_model_hint(
     let p = theme::palette();
     let line = Line::from(vec![Span::styled(
         model_hint_text(model, thinking),
-        Style::default()
-            .fg(p.text)
-            .bg(p.canvas)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(p.dim).bg(p.canvas),
     )]);
     f.render_widget(
         Paragraph::new(line)
@@ -65,7 +62,7 @@ pub fn render_composer_hint_with_motion(
     model: &DeepSeekModel,
     thinking: &ThinkingMode,
     activity: Option<status_bar::StatusActivity<'_>>,
-    mode: status_bar::AppMode,
+    _mode: status_bar::AppMode,
     frame: motion::MotionFrame,
 ) {
     if area.width == 0 || area.height == 0 {
@@ -90,10 +87,7 @@ pub fn render_composer_hint_with_motion(
     if !activity_text.is_empty() {
         spans.push(Span::styled(
             activity_text,
-            Style::default()
-                .fg(mode.color())
-                .bg(p.canvas)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(p.dim).bg(p.canvas),
         ));
     }
     if gap > 0 {
@@ -101,10 +95,7 @@ pub fn render_composer_hint_with_motion(
     }
     spans.push(Span::styled(
         model_text,
-        Style::default()
-            .fg(p.text)
-            .bg(p.canvas)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(p.dim).bg(p.canvas),
     ));
 
     f.render_widget(
@@ -195,7 +186,7 @@ mod tests {
             .expect("draw");
 
         let cell = terminal.backend().buffer().cell((22, 0)).expect("cell");
-        assert_eq!(cell.fg, theme::LIGHT_PALETTE.text);
+        assert_eq!(cell.fg, theme::LIGHT_PALETTE.dim);
         assert_eq!(cell.bg, theme::LIGHT_PALETTE.canvas);
     }
 
@@ -230,7 +221,7 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect();
-        assert!(rendered.contains("⠴ Fix input colors... (2s · ↓ 578 tokens · reasoning"));
+        assert!(rendered.contains("Fix input colors… (2s · ↓ 578 tokens · reasoning"));
         assert!(!rendered.contains("↑ 41 tokens"));
         assert!(rendered.contains("DeepSeek V4 Flash (on)"));
     }

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DeepSeekError {
-    #[error("authentication failed — run `octocode login`")]
+    #[error("authentication failed — run `octo login`")]
     Unauthorized,
 
     #[error("insufficient balance or quota exceeded")]

@@ -1,6 +1,7 @@
 //! Slash command system for the TUI.
 use std::collections::HashMap;
 use std::io::Write;
+use unicode_width::UnicodeWidthStr;
 
 /// Context available when executing a slash command.
 pub struct CommandContext<'a> {
@@ -21,6 +22,86 @@ pub struct SlashCommand {
 }
 
 pub type CommandResult = Result<Option<String>, String>;
+
+#[must_use]
+pub fn localized_command_description(
+    name: &str,
+    fallback: &'static str,
+    language: &str,
+) -> &'static str {
+    if !crate::tui::welcome::is_chinese_display_language(language) {
+        return fallback;
+    }
+    match name {
+        "/yolo" => "切换自动批准模式",
+        "/clear" => "清空对话并重置屏幕",
+        "/exit" => "退出交互式 TUI",
+        "/copy" => "复制上一条助手回复",
+        "/undo" => "撤销上一次文件修改",
+        "/image" => "给下一条消息附加图片",
+        "/commit" => "暂存并提交全部更改",
+        "/test" => "运行项目测试",
+        "/fix" => "让智能体修复问题",
+        "/explain" => "解释代码",
+        "/review" => "开始代码审查",
+        "/security-review" => "开始安全审查",
+        "/simplify" => "审查变更的复用、质量和效率",
+        "/wiki" => "生成代码库文档",
+        "/readiness-report" => "评估仓库的智能体工作流就绪度",
+        "/run" => "让智能体执行任务",
+        "/ask" => "提只读问题",
+        "/plan" => "先规划再执行",
+        "/todo" => "查看和维护本次工作待办",
+        "/task" => "管理本地可恢复任务",
+        "/glob" => "按模式查找文件",
+        "/grep" => "搜索文件内容",
+        "/search" => "语义搜索代码库",
+        "/status" => "查看当前会话状态",
+        "/context" => "查看上下文、token、缓存和费用",
+        "/cwd" => "查看或验证工作目录",
+        "/mcp" => "查看 MCP 服务状态",
+        "/usage" => "查看会话 token 与费用",
+        "/doctor" => "运行本地环境诊断",
+        "/checkpoint" => "查看最近检查点",
+        "/restore" => "恢复最近 N 次文件更改",
+        "/auto" => "查看自动批准模式",
+        "/permissions" => "查看审批和沙箱策略",
+        "/theme" => "查看或切换界面主题",
+        "/tui" => "查看或切换终端渲染器",
+        "/settings" => "打开可编辑设置",
+        "/output-style" => "查看或切换输出风格",
+        "/keybindings" => "查看或写入快捷键配置",
+        "/language" => "查看或切换界面语言",
+        "/mode" => "切换交互模式",
+        "/model" => "查看或切换当前模型",
+        "/config" => "查看解析后的配置摘要",
+        "/memory" => "查看项目记忆文件",
+        "/sessions" => "列出项目会话",
+        "/init" => "创建 AGENTS.md 协作说明",
+        "/compact" => "压缩本地对话记录",
+        "/add-dir" => "验证额外工作目录",
+        "/agents" => "列出内置和已配置智能体",
+        "/swarm" => "控制自动本地智能体群组",
+        "/schedule" => "管理本地计划任务",
+        "/tasks" => "列出后台智能体任务",
+        "/commands" => "查看自定义命令目录和内置数量",
+        "/skills" => "列出项目和用户技能",
+        "/hooks" => "查看工具 hook 配置",
+        "/plugins" => "查看插件扩展状态",
+        "/statusline" => "查看状态栏配置摘要",
+        "/help" => "查看所有命令",
+        _ => fallback,
+    }
+}
+
+#[must_use]
+pub fn localized_command_usage(usage: &str, language: &str) -> String {
+    if crate::tui::welcome::is_chinese_display_language(language) {
+        usage.replace(" or ", " 或 ")
+    } else {
+        usage.to_string()
+    }
+}
 
 /// Registry of all slash commands.
 pub struct CommandRegistry {
@@ -232,7 +313,7 @@ fn cmd_image(args: &str, ctx: &mut CommandContext) -> CommandResult {
 
 fn cmd_commit(args: &str, ctx: &mut CommandContext) -> CommandResult {
     let message = if args.trim().is_empty() {
-        "Auto-commit by octocode"
+        "Auto-commit by octo"
     } else {
         args.trim()
     };
@@ -259,7 +340,7 @@ pub fn forwarded_agent_input(input: &str) -> Option<String> {
     match name {
         "/commit" => {
             let message = if args.is_empty() {
-                "Auto-commit by octocode"
+                "Auto-commit by octo"
             } else {
                 args
             };
@@ -379,6 +460,298 @@ fn cmd_search(args: &str, ctx: &mut CommandContext) -> CommandResult {
     }
 }
 
+fn cmd_glob(args: &str, ctx: &mut CommandContext) -> CommandResult {
+    let mut parts = args.split_whitespace();
+    let Some(pattern) = parts.next() else {
+        return Err("Usage: /glob <pattern> [limit]".to_string());
+    };
+    let limit = parts
+        .next()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(50);
+    let matches = crate::search::search_files(ctx.project_root, pattern, limit)
+        .map_err(|e| format!("Glob failed: {e}"))?;
+    if matches.is_empty() {
+        return Ok(Some("No files matched.".to_string()));
+    }
+    let mut lines = vec![
+        manager_header("glob", "ready"),
+        format!("count     {}", matches.len()),
+    ];
+    for item in matches {
+        lines.push(item.path.display().to_string());
+    }
+    Ok(Some(lines.join("\n")))
+}
+
+fn cmd_grep(args: &str, ctx: &mut CommandContext) -> CommandResult {
+    let mut parts = args.split_whitespace();
+    let Some(pattern) = parts.next() else {
+        return Err("Usage: /grep <pattern> [glob]".to_string());
+    };
+    let glob = parts.next();
+    let matches = crate::search::search_code(ctx.project_root, pattern, glob, false, 50)
+        .map_err(|e| format!("Grep failed: {e}"))?;
+    if matches.is_empty() {
+        return Ok(Some("No matches found.".to_string()));
+    }
+    let mut lines = vec![
+        manager_header("grep", "ready"),
+        format!("count     {}", matches.len()),
+    ];
+    for item in matches {
+        lines.push(format!(
+            "{}:{}: {}",
+            item.path.display(),
+            item.line_number.unwrap_or(0),
+            item.matched_text
+        ));
+    }
+    Ok(Some(lines.join("\n")))
+}
+
+fn read_todo_items(project_root: &std::path::Path) -> Result<Vec<serde_json::Value>, String> {
+    crate::tools::todo_state::read_todo_items(project_root)
+        .map_err(|e| format!("Failed to read todos: {e}"))
+}
+
+fn write_todo_items(
+    project_root: &std::path::Path,
+    todos: Vec<serde_json::Value>,
+) -> Result<(), String> {
+    crate::tools::todo_state::write_todo_items(project_root, todos)
+        .map(|_| ())
+        .map_err(|e| format!("Failed to write todos: {e}"))
+}
+
+fn render_todos(project_root: &std::path::Path, language: &str) -> Result<String, String> {
+    let todos = read_todo_items(project_root)?;
+    if todos.is_empty() {
+        return Ok(format!(
+            "{}\nstatus    no todos",
+            localized_manager_header("todo", "empty", language)
+        ));
+    }
+    let mut lines = vec![
+        localized_manager_header("todo", "ready", language),
+        format!("count     {}", todos.len()),
+    ];
+    for (idx, todo) in todos.iter().enumerate() {
+        let status = todo
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("pending");
+        let content = todo
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("(empty)");
+        lines.push(format!("{:>2}. {:<11} {}", idx + 1, status, content));
+    }
+    Ok(lines.join("\n"))
+}
+
+fn cmd_todo(args: &str, ctx: &mut CommandContext) -> CommandResult {
+    let mut parts = args.trim().splitn(2, ' ');
+    let action = parts.next().unwrap_or("");
+    let rest = parts.next().unwrap_or("").trim();
+    match action {
+        "" | "list" => render_todos(ctx.project_root, &ctx.app.config.ui.language).map(Some),
+        "add" => {
+            if rest.is_empty() {
+                return Err("Usage: /todo add <item>".to_string());
+            }
+            let mut todos = read_todo_items(ctx.project_root)?;
+            todos.push(serde_json::json!({
+                "content": rest,
+                "status": "pending",
+                "priority": "medium"
+            }));
+            write_todo_items(ctx.project_root, todos)?;
+            ctx.app.refresh_todo_summary();
+            render_todos(ctx.project_root, &ctx.app.config.ui.language).map(Some)
+        }
+        "clear" => {
+            write_todo_items(ctx.project_root, Vec::new())?;
+            ctx.app.refresh_todo_summary();
+            Ok(Some("Todo list cleared.".to_string()))
+        }
+        "start" | "done" | "cancel" => {
+            let index = rest
+                .parse::<usize>()
+                .map_err(|_| format!("Usage: /todo {action} <number>"))?;
+            let mut todos = read_todo_items(ctx.project_root)?;
+            let Some(todo) = todos.get_mut(index.saturating_sub(1)) else {
+                return Err(format!("Todo not found: {index}"));
+            };
+            let status = match action {
+                "start" => "in_progress",
+                "done" => "completed",
+                _ => "cancelled",
+            };
+            if let Some(object) = todo.as_object_mut() {
+                object.insert(
+                    "status".to_string(),
+                    serde_json::Value::String(status.to_string()),
+                );
+            }
+            write_todo_items(ctx.project_root, todos)?;
+            ctx.app.refresh_todo_summary();
+            render_todos(ctx.project_root, &ctx.app.config.ui.language).map(Some)
+        }
+        _ => Err("Usage: /todo list|add|start|done|cancel|clear".to_string()),
+    }
+}
+
+fn render_tasks(project_root: &std::path::Path, language: &str) -> Result<String, String> {
+    let todos = read_todo_items(project_root)?;
+    if todos.is_empty() {
+        return Ok(format!(
+            "{}\nstatus    no local tasks\nusage     /task list|create|get|update|stop",
+            localized_manager_header("task", "empty", language)
+        ));
+    }
+    let mut lines = vec![
+        localized_manager_header("task", "ready", language),
+        format!("count     {}", todos.len()),
+    ];
+    for (idx, todo) in todos.iter().enumerate() {
+        let id = todo
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("#{}", idx + 1));
+        let status = todo
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("pending");
+        let content = todo
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("(empty)");
+        lines.push(format!("{id:<12} {status:<11} {content}"));
+    }
+    lines.push("usage     /task list|create|get|update|stop".to_string());
+    Ok(lines.join("\n"))
+}
+
+fn parse_task_update_args(rest: &str) -> Result<crate::tools::task_todo::TaskUpdateArgs, String> {
+    let mut parts = rest.trim().splitn(3, ' ');
+    let id = parts.next().unwrap_or("").trim();
+    let field = parts.next().unwrap_or("").trim();
+    let value = parts.next().unwrap_or("").trim();
+    if id.is_empty() || field.is_empty() {
+        return Err("Usage: /task update <id> status|content|active_form <value>".to_string());
+    }
+    let mut args = crate::tools::task_todo::TaskUpdateArgs {
+        id: id.to_string(),
+        content: None,
+        active_form: None,
+        status: None,
+    };
+    match field {
+        "status" => args.status = Some(value.to_string()),
+        "content" => args.content = Some(value.to_string()),
+        "active_form" | "active-form" => args.active_form = Some(value.to_string()),
+        "pending" | "in_progress" | "in-progress" | "active" | "running" | "completed" | "done"
+        | "cancelled" | "canceled" | "stop" | "stopped" => {
+            args.status = Some(field.to_string());
+        }
+        _ => return Err("Usage: /task update <id> status|content|active_form <value>".to_string()),
+    }
+    Ok(args)
+}
+
+fn cmd_task(args: &str, ctx: &mut CommandContext) -> CommandResult {
+    let mut parts = args.trim().splitn(2, ' ');
+    let action = parts.next().unwrap_or("");
+    let rest = parts.next().unwrap_or("").trim();
+    match action {
+        "help" => Ok(Some(
+            "Usage: /task list|create|get|update|start|done|stop\nState: .octocode/todos.json"
+                .to_string(),
+        )),
+        "" | "list" => render_tasks(ctx.project_root, &ctx.app.config.ui.language).map(Some),
+        "add" | "create" => {
+            if rest.is_empty() {
+                return Err("Usage: /task create <content>".to_string());
+            }
+            let output = crate::tools::task_todo::task_create(
+                ctx.project_root,
+                crate::tools::task_todo::TaskCreateArgs {
+                    id: None,
+                    content: rest.to_string(),
+                    active_form: None,
+                    status: None,
+                },
+            )
+            .map_err(|e| format!("Failed to create task: {e}"))?;
+            ctx.app.refresh_todo_summary();
+            Ok(Some(format!(
+                "{}\n{output}",
+                localized_manager_header("task", "created", &ctx.app.config.ui.language)
+            )))
+        }
+        "get" | "show" => {
+            if rest.is_empty() {
+                return Err("Usage: /task get <id>".to_string());
+            }
+            crate::tools::task_todo::task_get(ctx.project_root, rest)
+                .map(|output| Some(format!("{}\n{output}", manager_header("task", "ready"))))
+                .map_err(|e| format!("Failed to get task: {e}"))
+        }
+        "update" => {
+            let output = crate::tools::task_todo::task_update(
+                ctx.project_root,
+                parse_task_update_args(rest)?,
+            )
+            .map_err(|e| format!("Failed to update task: {e}"))?;
+            ctx.app.refresh_todo_summary();
+            Ok(Some(format!(
+                "{}\n{output}",
+                manager_header("task", "ready")
+            )))
+        }
+        "start" | "done" | "complete" => {
+            if rest.is_empty() {
+                return Err(format!("Usage: /task {action} <id>"));
+            }
+            let status = if action == "start" {
+                "in_progress"
+            } else {
+                "completed"
+            };
+            let output = crate::tools::task_todo::task_update(
+                ctx.project_root,
+                crate::tools::task_todo::TaskUpdateArgs {
+                    id: rest.to_string(),
+                    content: None,
+                    active_form: None,
+                    status: Some(status.to_string()),
+                },
+            )
+            .map_err(|e| format!("Failed to update task: {e}"))?;
+            ctx.app.refresh_todo_summary();
+            Ok(Some(format!(
+                "{}\n{output}",
+                manager_header("task", "ready")
+            )))
+        }
+        "stop" | "cancel" => {
+            if rest.is_empty() {
+                return Err(format!("Usage: /task {action} <id>"));
+            }
+            let output = crate::tools::task_todo::task_stop(ctx.project_root, rest)
+                .map_err(|e| format!("Failed to stop task: {e}"))?;
+            ctx.app.refresh_todo_summary();
+            Ok(Some(format!(
+                "{}\n{output}",
+                manager_header("task", "ready")
+            )))
+        }
+        _ => Err("Usage: /task list|create|get|update|start|done|stop".to_string()),
+    }
+}
+
 fn cmd_status(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     let git_status = crate::workspace::git::git_status(ctx.project_root).unwrap_or_default();
     let mut parts = vec![format!("Model: {:?}", ctx.app.model)];
@@ -403,30 +776,225 @@ fn cmd_status(_args: &str, ctx: &mut CommandContext) -> CommandResult {
 }
 
 fn cmd_context(_args: &str, ctx: &mut CommandContext) -> CommandResult {
-    const CONTEXT_LIMIT_TOKENS: u64 = 200_000;
     let total = ctx.app.total_tokens;
-    let percent = if CONTEXT_LIMIT_TOKENS == 0 {
-        0.0
-    } else {
-        (total as f64 / CONTEXT_LIMIT_TOKENS as f64) * 100.0
-    };
+    let budget = crate::provider::context_budget_for(
+        ctx.app.config.provider.default,
+        &ctx.app.model,
+        ctx.app.config.search.max_context_tokens,
+    );
+    let percent = budget.usage_percent(total);
     let cache_hit = ctx
         .app
         .cache
         .as_ref()
         .map_or(0.0, |cache| cache.hit_rate() * 100.0);
+    let model_window = budget
+        .model_window_tokens
+        .map_or_else(|| "unknown".to_string(), compact_token_count);
+    let language = &ctx.app.config.ui.language;
+    let chinese = crate::tui::welcome::is_chinese_display_language(language);
+    let tool_summary = if ctx.app.recent_tool_summaries.is_empty() {
+        if chinese {
+            "无".to_string()
+        } else {
+            "none".to_string()
+        }
+    } else {
+        ctx.app
+            .recent_tool_summaries
+            .iter()
+            .map(|line| truncate_display_width(line, 72))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    let pending_question = ctx
+        .app
+        .last_user_question_summary
+        .as_deref()
+        .map(|summary| truncate_display_width(summary, 72))
+        .unwrap_or_else(|| {
+            if chinese {
+                "无".to_string()
+            } else {
+                "none".to_string()
+            }
+        });
+    let compact_summary = ctx
+        .app
+        .latest_compact_summary
+        .as_deref()
+        .map(|summary| truncate_display_width(summary, 72))
+        .unwrap_or_else(|| {
+            if budget.next_action(total) == "auto compact should run before the next large turn" {
+                if chinese {
+                    "达到阈值后会在 turn 边界写入确定性摘要"
+                } else {
+                    "deterministic summary will be written at the next turn boundary"
+                }
+                .to_string()
+            } else if chinese {
+                "无".to_string()
+            } else {
+                "none".to_string()
+            }
+        });
+    let compact_source = ctx
+        .app
+        .latest_compact_reason
+        .as_deref()
+        .unwrap_or(if chinese { "无" } else { "none" });
+    let resume_items = [
+        (!ctx.app.todo_summary.is_empty()).then_some("todo"),
+        (!ctx.app.recent_tool_summaries.is_empty()).then_some(if chinese {
+            "工具摘要"
+        } else {
+            "tool summaries"
+        }),
+        ctx.app
+            .last_user_question_summary
+            .is_some()
+            .then_some(if chinese {
+                "待选问题"
+            } else {
+                "pending question"
+            }),
+        ctx.app
+            .latest_compact_summary
+            .is_some()
+            .then_some(if chinese {
+                "压缩摘要"
+            } else {
+                "compact summary"
+            }),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    let resume_line = if resume_items.is_empty() {
+        if chinese { "无" } else { "none" }.to_string()
+    } else {
+        resume_items.join(", ")
+    };
     Ok(Some(
         [
-            manager_header("context", "ready"),
-            format!("window      {total}/{CONTEXT_LIMIT_TOKENS} tokens ({percent:.1}%)"),
-            format!("current     {} tokens", ctx.app.current_turn_tokens),
-            format!("messages    {}", ctx.app.messages.len()),
+            localized_manager_header("context", "ready", language),
+            format!(
+                "{}       {} / {}",
+                if chinese { "模型" } else { "model" },
+                ctx.app.config.provider.default.display_name(),
+                ctx.app.model
+            ),
+            format!(
+                "{}      {model_window} tokens ({})",
+                if chinese { "窗口" } else { "window" },
+                localized_context_window_source(budget.model_window_source, chinese)
+            ),
+            format!(
+                "{}       {} tokens (search.max_context_tokens)",
+                if chinese { "本地" } else { "local" },
+                compact_token_count(budget.local_budget_tokens)
+            ),
+            format!(
+                "{}      {}/{} tokens ({percent:.1}%)",
+                if chinese { "预算" } else { "budget" },
+                compact_token_count(total),
+                compact_token_count(budget.effective_budget_tokens)
+            ),
+            format!(
+                "{}     auto threshold {} tokens",
+                if chinese { "压缩" } else { "compact" },
+                compact_token_count(budget.auto_compact_threshold_tokens)
+            ),
+            format!(
+                "{}     {} tokens",
+                if chinese { "本轮" } else { "current" },
+                ctx.app.current_turn_tokens
+            ),
+            format!(
+                "{}    {}",
+                if chinese { "消息" } else { "messages" },
+                ctx.app.messages.len()
+            ),
+            ctx.app.todo_summary.context_line(chinese),
+            format!(
+                "{} {}",
+                if chinese {
+                    "工具摘要  "
+                } else {
+                    "tool summaries"
+                },
+                tool_summary
+            ),
+            format!(
+                "{} {}",
+                if chinese {
+                    "待选问题  "
+                } else {
+                    "pending question"
+                },
+                pending_question
+            ),
+            format!(
+                "{}     {}",
+                if chinese {
+                    "最近摘要"
+                } else {
+                    "last summary"
+                },
+                compact_summary
+            ),
+            format!(
+                "{}     {}",
+                if chinese {
+                    "摘要来源"
+                } else {
+                    "summary source"
+                },
+                compact_source
+            ),
+            format!(
+                "{}     {}",
+                if chinese {
+                    "可恢复项"
+                } else {
+                    "recoverable"
+                },
+                resume_line
+            ),
             format!("cache       {cache_hit:.0}%"),
             format!("cost        ¥{:.3}", ctx.app.total_cost),
-            "next        use /compact to keep only recent messages".to_string(),
+            format!(
+                "{}        {}",
+                if chinese { "下一步" } else { "next" },
+                localized_context_next_action(budget.next_action(total), chinese)
+            ),
         ]
         .join("\n"),
     ))
+}
+
+fn localized_context_window_source(source: &'static str, chinese: bool) -> &'static str {
+    if !chinese {
+        return source;
+    }
+    match source {
+        "DeepSeek API model details" => "DeepSeek API 模型能力",
+        "not declared by provider preset; using local assembly budget" => {
+            "provider 未声明，使用本地上下文预算"
+        }
+        _ => source,
+    }
+}
+
+fn localized_context_next_action(action: &'static str, chinese: bool) -> &'static str {
+    if !chinese {
+        return action;
+    }
+    match action {
+        "auto compact should run before the next large turn" => "下一次大任务前应自动压缩",
+        "keep collecting context" => "继续收集上下文",
+        _ => action,
+    }
 }
 
 fn cmd_cwd(args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -478,6 +1046,26 @@ fn cmd_usage(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     lines.push(format!("Model: {:?}", ctx.app.model));
     lines.push(format!("Total tokens: {}", ctx.app.total_tokens));
     lines.push(format!("Estimated cost: ¥{:.3}", ctx.app.total_cost));
+    if let Some(cache) = ctx.app.cache.as_ref() {
+        let total = cache.prompt_cache_hit_tokens + cache.prompt_cache_miss_tokens;
+        if total > 0 {
+            let rate = cache.hit_rate() * 100.0;
+            lines.push("".to_string());
+            lines.push("Prompt cache:".to_string());
+            lines.push(format!("  hit  : {} tokens", cache.prompt_cache_hit_tokens));
+            lines.push(format!(
+                "  miss : {} tokens",
+                cache.prompt_cache_miss_tokens
+            ));
+            lines.push(format!("  rate : {:.1}%", rate));
+            let saved_rate = match ctx.app.model {
+                crate::deepseek::DeepSeekModel::Pro => 2.0 - 0.5,
+                _ => 0.5 - 0.1,
+            };
+            let saved = cache.prompt_cache_hit_tokens as f64 / 1_000_000.0 * saved_rate;
+            lines.push(format!("  saved: ~¥{:.3}", saved));
+        }
+    }
     lines.push("".to_string());
     lines.push("Pricing (DeepSeek API, CNY / MTok):".to_string());
     lines.push("  Flash: input 0.5 (cache hit 0.1), output 2.0".to_string());
@@ -501,7 +1089,7 @@ fn cmd_doctor(_args: &str, ctx: &mut CommandContext) -> CommandResult {
         "configured".to_string()
     } else {
         format!(
-            "missing; run `octocode login --api-key <key>` or set {}",
+            "missing; run `octo login --api-key <key>` or set {}",
             crate::storage::api_key_env_hint(provider)
         )
     };
@@ -555,7 +1143,7 @@ fn cmd_doctor(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     ));
     lines.push(String::new());
     lines.push(
-        "Doctor is local-only in the TUI; run `octocode doctor` for API connectivity checks."
+        "Doctor is local-only in the TUI; run `octo doctor` for API connectivity checks."
             .to_string(),
     );
 
@@ -582,6 +1170,24 @@ fn tool_status(available: bool) -> &'static str {
         "available"
     } else {
         "not found on PATH"
+    }
+}
+
+fn compact_token_count(value: u64) -> String {
+    if value >= 1_000_000 {
+        if value.is_multiple_of(1_000_000) {
+            format!("{}M", value / 1_000_000)
+        } else {
+            format!("{:.1}M", value as f64 / 1_000_000.0)
+        }
+    } else if value >= 1_000 {
+        if value.is_multiple_of(1_000) {
+            format!("{}K", value / 1_000)
+        } else {
+            format!("{:.1}K", value as f64 / 1_000.0)
+        }
+    } else {
+        value.to_string()
     }
 }
 
@@ -685,7 +1291,7 @@ fn cmd_tui(args: &str, ctx: &mut CommandContext) -> CommandResult {
     write_project_ui_string_override(ctx.project_root, "renderer", mode)?;
     ctx.app.set_renderer_config(mode);
     Ok(Some(format!(
-        "TUI renderer set to {} (resolved to {}). Restart octocode to apply terminal mode.",
+        "TUI renderer set to {} (resolved to {}). Restart octo to apply terminal mode.",
         mode,
         ctx.app.renderer_mode.label()
     )))
@@ -694,6 +1300,139 @@ fn cmd_tui(args: &str, ctx: &mut CommandContext) -> CommandResult {
 fn cmd_settings(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     ctx.app.open_settings_panel();
     Ok(None)
+}
+
+fn output_style_path(project_root: &std::path::Path) -> std::path::PathBuf {
+    project_root.join(".octocode").join("output_style.json")
+}
+
+fn cmd_output_style(args: &str, ctx: &mut CommandContext) -> CommandResult {
+    let requested = args.trim().to_ascii_lowercase();
+    let path = output_style_path(ctx.project_root);
+    if requested.is_empty() {
+        let current = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+            .and_then(|value| {
+                value
+                    .get("style")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "normal".to_string());
+        return Ok(Some(format!(
+            "Output style: {current}\n\nUsage: /output-style normal | teaching | concise"
+        )));
+    }
+    let style = match requested.as_str() {
+        "normal" | "default" | "普通" => "normal",
+        "teaching" | "teach" | "教学" => "teaching",
+        "concise" | "short" | "minimal" | "简洁" => "concise",
+        other => {
+            return Err(format!(
+                "Unknown output style: {other}. Use /output-style normal, teaching, or concise."
+            ));
+        }
+    };
+    let dir = ctx.project_root.join(".octocode");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create .octocode: {e}"))?;
+    let prompt_policy = match style {
+        "teaching" => "explain important decisions and teach as you work",
+        "concise" => "answer directly and keep explanations short",
+        _ => "balanced engineering explanation",
+    };
+    let payload = serde_json::json!({
+        "style": style,
+        "updated_at": chrono::Utc::now(),
+        "prompt_policy": prompt_policy
+    });
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&payload)
+            .map_err(|e| format!("Failed to render output style: {e}"))?,
+    )
+    .map_err(|e| format!("Failed to write output style: {e}"))?;
+    ctx.app.push_activity(format!("output-style: {style}"));
+    Ok(Some(format!("Output style set to {style}.")))
+}
+
+fn keybindings_path(project_root: &std::path::Path) -> std::path::PathBuf {
+    project_root.join(".octocode").join("keybindings.toml")
+}
+
+fn cmd_keybindings(args: &str, ctx: &mut CommandContext) -> CommandResult {
+    let action = args.trim();
+    let path = keybindings_path(ctx.project_root);
+    if matches!(action, "defaults" | "write-defaults" | "init") {
+        let dir = ctx.project_root.join(".octocode");
+        std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create .octocode: {e}"))?;
+        let content = r#"[keybindings]
+submit = "enter"
+exit = "ctrl+d ctrl+d"
+interrupt = "esc"
+history_up = "up"
+history_down = "down"
+complete = "tab"
+open_settings = "ctrl+,"
+
+[labels.zh-CN]
+submit = "发送"
+exit = "连按两次退出"
+interrupt = "中断"
+history_up = "上一条"
+history_down = "下一条"
+complete = "补全"
+open_settings = "设置"
+"#;
+        std::fs::write(&path, content).map_err(|e| format!("Failed to write keybindings: {e}"))?;
+    }
+
+    let mut lines = vec![manager_header("keybindings", "ready")];
+    if path.exists() {
+        lines.push(format!("config    {}", path.display()));
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            for line in content
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .take(16)
+            {
+                lines.push(line.to_string());
+            }
+        }
+    } else {
+        lines.push("config    not created".to_string());
+        lines.push("next      /keybindings defaults".to_string());
+    }
+    Ok(Some(lines.join("\n")))
+}
+
+fn cmd_language(args: &str, ctx: &mut CommandContext) -> CommandResult {
+    let requested = args.trim().to_ascii_lowercase();
+    let current = ctx.app.config.ui.language.clone();
+    let value = match requested.as_str() {
+        "" => {
+            return Ok(Some(format!(
+                "Language: {current}\n\nUsage: /language auto | zh-CN | en-US"
+            )));
+        }
+        "auto" | "system" => "auto",
+        "zh" | "zh-cn" | "cn" | "chinese" | "中文" => "zh-CN",
+        "en" | "en-us" | "english" => "en-US",
+        other => {
+            return Err(format!(
+                "Unknown language: {other}. Use /language auto, /language zh-CN, or /language en-US."
+            ));
+        }
+    };
+    write_project_ui_string_override(ctx.project_root, "language", value)?;
+    ctx.app.config.ui.language = value.to_string();
+    ctx.app.welcome.display_language = value.to_string();
+    ctx.app
+        .push_activity(format!("language: {}", ctx.app.config.ui.language));
+    Ok(Some(format!(
+        "Language set to {}. Saved to local config.",
+        ctx.app.config.ui.language
+    )))
 }
 
 fn cmd_mode(args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -854,7 +1593,7 @@ fn cmd_sessions(_args: &str, ctx: &mut CommandContext) -> CommandResult {
         ));
     }
     lines.push(String::new());
-    lines.push("next      use `octocode resume <id-prefix>` outside TUI to resume".to_string());
+    lines.push("next      use `octo resume <id-prefix>` outside TUI to resume".to_string());
     Ok(Some(lines.join("\n")))
 }
 
@@ -895,12 +1634,24 @@ fn cmd_compact(args: &str, ctx: &mut CommandContext) -> CommandResult {
             "No compaction needed; {before} messages in context."
         )));
     }
-    let split_at = before - keep;
-    ctx.app.messages.drain(0..split_at);
-    ctx.app
-        .push_activity(format!("compact: kept last {keep} messages"));
+    let snapshot = ctx
+        .app
+        .compact_local_context(ctx.project_root, keep, "manual /compact");
+    let removed = before.saturating_sub(snapshot.after_messages);
+    let chinese = crate::tui::welcome::is_chinese_display_language(&ctx.app.config.ui.language);
+    if chinese {
+        return Ok(Some(format!(
+            "已压缩本地上下文：移除 {removed} 条旧消息，保留 {} 条；token {} -> {}。\n摘要会写入会话事件并在后续 prompt/resume 中恢复。",
+            snapshot.after_messages,
+            compact_token_count(snapshot.before_tokens),
+            compact_token_count(snapshot.after_tokens)
+        )));
+    }
     Ok(Some(format!(
-        "Compacted local transcript: removed {split_at} older messages, kept {keep}."
+        "Compacted local context: removed {removed} older messages, kept {}. Tokens {} -> {}.\nSummary was written to the session event log for prompt/resume recovery.",
+        snapshot.after_messages,
+        compact_token_count(snapshot.before_tokens),
+        compact_token_count(snapshot.after_tokens)
     )))
 }
 
@@ -930,16 +1681,33 @@ fn cmd_commands(_args: &str, ctx: &mut CommandContext) -> CommandResult {
         .unwrap_or_else(|| std::path::PathBuf::from("~/.octocode/commands"));
     let project_count = count_entries(&project_dir);
     let user_count = count_entries(&user_dir);
+    let language = &ctx.app.config.ui.language;
+    let chinese = crate::tui::welcome::is_chinese_display_language(language);
     Ok(Some(
         [
-            manager_header("commands", "ready"),
+            localized_manager_header("commands", "ready", language),
             format!(
-                "built-in   {}",
+                "{}   {}",
+                if chinese { "内置" } else { "built-in" },
                 CommandRegistry::new().list_commands().len()
             ),
-            format!("project    {} ({})", project_count, project_dir.display()),
-            format!("user       {} ({})", user_count, user_dir.display()),
-            "next       add prompt command files in a future custom-command pass".to_string(),
+            format!(
+                "{}    {} ({})",
+                if chinese { "项目" } else { "project" },
+                project_count,
+                project_dir.display()
+            ),
+            format!(
+                "{}       {} ({})",
+                if chinese { "用户" } else { "user" },
+                user_count,
+                user_dir.display()
+            ),
+            if chinese {
+                "下一步    在 .octocode/commands 中添加提示词命令文件".to_string()
+            } else {
+                "next       add prompt command files in .octocode/commands".to_string()
+            },
         ]
         .join("\n"),
     ))
@@ -1000,14 +1768,31 @@ fn cmd_plugins(_args: &str, _ctx: &mut CommandContext) -> CommandResult {
 }
 
 fn cmd_statusline(_args: &str, ctx: &mut CommandContext) -> CommandResult {
+    let language = &ctx.app.config.ui.language;
+    let chinese = crate::tui::welcome::is_chinese_display_language(language);
     Ok(Some(
         [
-            manager_header("statusline", "ready"),
-            format!("mode      {}", ctx.app.interaction_mode.label()),
-            format!("theme     {}", ctx.app.theme_mode.label()),
-            "style     compact chips".to_string(),
-            "segments  app, mode, web, context, tokens, cost, cache, tools, permissions"
-                .to_string(),
+            localized_manager_header("statusline", "ready", language),
+            format!(
+                "{}      {}",
+                if chinese { "模式" } else { "mode" },
+                ctx.app.interaction_mode.label()
+            ),
+            format!(
+                "{}     {}",
+                if chinese { "主题" } else { "theme" },
+                ctx.app.theme_mode.label()
+            ),
+            if chinese {
+                "样式     紧凑标签".to_string()
+            } else {
+                "style     compact chips".to_string()
+            },
+            if chinese {
+                "段落     app, mode, model, status, permissions, context".to_string()
+            } else {
+                "segments  app, mode, model, status, permissions, context".to_string()
+            },
         ]
         .join("\n"),
     ))
@@ -1032,29 +1817,76 @@ fn list_entry_names(path: &std::path::Path) -> Vec<String> {
 
 fn cmd_agents(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     let registry = crate::agent::subagent::SubagentRegistry::load_from_project(ctx.project_root);
-    let mut lines = vec![manager_header("agents", "ready")];
-    for name in registry.list() {
-        if let Some(agent) = registry.get(name) {
-            lines.push(format!(
-                "{} — tools: {} — max turns: {}",
-                name,
-                if agent.allowed_tools.is_empty() {
-                    "default".to_string()
-                } else {
-                    agent.allowed_tools.join(", ")
-                },
-                agent.max_turns
-            ));
-        }
-    }
     let config = crate::storage::Config::load(Some(ctx.project_root)).unwrap_or_default();
-    lines.push(String::new());
-    lines.push(format!(
-        "custom agents: {}",
-        on_off(config.subagent.allow_custom_agents)
-    ));
-    if let Some(dir) = config.subagent.custom_agents_dir {
-        lines.push(format!("custom dir: {}", dir.display()));
+    let language = &ctx.app.config.ui.language;
+    let chinese = crate::tui::welcome::is_chinese_display_language(language);
+    let mut lines = vec![localized_manager_header("agents", "ready", language)];
+    if chinese {
+        let agent_names = registry.list();
+        let name_width = agent_names
+            .iter()
+            .map(|name| display_width(name))
+            .max()
+            .unwrap_or(4)
+            .max(display_width("名称"));
+        let tools_width = agent_names
+            .iter()
+            .filter_map(|name| registry.get(name))
+            .map(|agent| display_width(&agent_tools_label(agent.allowed_tools.as_slice(), chinese)))
+            .max()
+            .unwrap_or(4)
+            .max(display_width("工具"))
+            .min(52);
+        lines.push(format!(
+            "{}  {}  轮次",
+            pad_display("名称", name_width),
+            pad_display("工具", tools_width)
+        ));
+        for name in agent_names {
+            if let Some(agent) = registry.get(name) {
+                let tools = truncate_display_width(
+                    &agent_tools_label(agent.allowed_tools.as_slice(), chinese),
+                    tools_width,
+                );
+                lines.push(format!(
+                    "{}  {}  {}",
+                    pad_display(name, name_width),
+                    pad_display(&tools, tools_width),
+                    agent.max_turns
+                ));
+            }
+        }
+        lines.push(String::new());
+        lines.push(format!(
+            "{}  {}",
+            pad_display(
+                "自定义智能体",
+                name_width.max(display_width("自定义智能体"))
+            ),
+            localized_on_off(config.subagent.allow_custom_agents, chinese)
+        ));
+        if let Some(dir) = config.subagent.custom_agents_dir {
+            lines.push(format!("自定义目录  {}", dir.display()));
+        }
+    } else {
+        for name in registry.list() {
+            if let Some(agent) = registry.get(name) {
+                lines.push(format!(
+                    "{} — tools: {} — max turns: {}",
+                    name,
+                    agent_tools_label(agent.allowed_tools.as_slice(), chinese),
+                    agent.max_turns
+                ));
+            }
+        }
+        lines.push(String::new());
+        lines.push(format!(
+            "custom agents: {}",
+            on_off(config.subagent.allow_custom_agents)
+        ));
+        if let Some(dir) = config.subagent.custom_agents_dir {
+            lines.push(format!("custom dir: {}", dir.display()));
+        }
     }
     Ok(Some(lines.join("\n")))
 }
@@ -1164,7 +1996,7 @@ fn cmd_schedule(args: &str, ctx: &mut CommandContext) -> CommandResult {
                         lines.push(format!("log     {}", path.display()));
                     } else {
                         lines.push(
-                            "log     use `octocode resume` to inspect session event logs".to_string(),
+                            "log     use `octo resume` to inspect session event logs".to_string(),
                         );
                     }
                     Ok(Some(lines.join("\n")))
@@ -1173,7 +2005,7 @@ fn cmd_schedule(args: &str, ctx: &mut CommandContext) -> CommandResult {
                     [
                         manager_header("schedule", "manual-run"),
                         format!("id      {id}"),
-                        "next    run `octocode task run <id>` from the shell".to_string(),
+                        "next    run `octo task run <id>` from the shell".to_string(),
                         "note    TUI slash commands stay synchronous to avoid hidden side effects"
                             .to_string(),
                     ]
@@ -1342,19 +2174,105 @@ fn on_off(value: bool) -> &'static str {
     }
 }
 
+fn localized_on_off(value: bool, chinese: bool) -> &'static str {
+    match (value, chinese) {
+        (true, true) => "开启",
+        (false, true) => "关闭",
+        (true, false) => "on",
+        (false, false) => "off",
+    }
+}
+
+fn agent_tools_label(tools: &[String], chinese: bool) -> String {
+    if tools.is_empty() {
+        if chinese {
+            "默认".to_string()
+        } else {
+            "default".to_string()
+        }
+    } else {
+        tools.join(", ")
+    }
+}
+
+fn display_width(value: &str) -> usize {
+    UnicodeWidthStr::width(value)
+}
+
+fn pad_display(value: &str, width: usize) -> String {
+    let used = display_width(value);
+    if used >= width {
+        value.to_string()
+    } else {
+        format!("{value}{}", " ".repeat(width - used))
+    }
+}
+
+fn truncate_display_width(value: &str, width: usize) -> String {
+    if display_width(value) <= width {
+        return value.to_string();
+    }
+    let mut out = String::new();
+    let target = width.saturating_sub(1);
+    for ch in value.chars() {
+        let next = format!("{out}{ch}");
+        if display_width(&next) > target {
+            break;
+        }
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
 fn manager_header(name: &str, status: &str) -> String {
     format!("◆ manager {name}  status:{status}")
 }
 
-fn cmd_help(_args: &str, _ctx: &mut CommandContext) -> CommandResult {
+fn localized_manager_header(name: &str, status: &str, language: &str) -> String {
+    if crate::tui::welcome::is_chinese_display_language(language) {
+        let status = match status {
+            "ready" => "就绪",
+            "running" => "运行中",
+            "planned" => "计划中",
+            "empty" => "空",
+            "local" => "本地",
+            "created" => "已创建",
+            other => other,
+        };
+        format!("◆ 管理器 {name}  状态:{status}")
+    } else {
+        manager_header(name, status)
+    }
+}
+
+fn cmd_help(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     let registry = CommandRegistry::new();
-    let mut lines = vec!["Available commands:".to_string(), "".to_string()];
+    let language = &ctx.app.config.ui.language;
+    let chinese = crate::tui::welcome::is_chinese_display_language(language);
+    let mut lines = vec![
+        if chinese {
+            "可用命令:".to_string()
+        } else {
+            "Available commands:".to_string()
+        },
+        String::new(),
+    ];
     for cmd in registry.list_commands() {
-        lines.push(format!("  {} — {}", cmd.name, cmd.description));
+        lines.push(format!(
+            "  {} — {}",
+            cmd.name,
+            localized_command_description(cmd.name, cmd.description, language)
+        ));
         if !cmd.aliases.is_empty() {
-            lines.push(format!("    aliases: {}", cmd.aliases.join(", ")));
+            let label = if chinese { "别名" } else { "aliases" };
+            lines.push(format!("    {label}: {}", cmd.aliases.join(", ")));
         }
-        lines.push(format!("    usage: {}", cmd.usage));
+        let label = if chinese { "用法" } else { "usage" };
+        lines.push(format!(
+            "    {label}: {}",
+            localized_command_usage(cmd.usage, language)
+        ));
         lines.push(String::new());
     }
     Ok(Some(lines.join("\n")))
@@ -1489,6 +2407,34 @@ impl CommandRegistry {
             handler: cmd_plan,
         });
         self.register(&SlashCommand {
+            name: "/todo",
+            aliases: &["/todos"],
+            description: "Show and update the current work todo list",
+            usage: "/todo list|add|start|done|cancel|clear",
+            handler: cmd_todo,
+        });
+        self.register(&SlashCommand {
+            name: "/task",
+            aliases: &[],
+            description: "Manage project todo-backed tasks",
+            usage: "/task list|create|get|update|start|done|stop|help",
+            handler: cmd_task,
+        });
+        self.register(&SlashCommand {
+            name: "/glob",
+            aliases: &[],
+            description: "Find files by glob pattern",
+            usage: "/glob <pattern> [limit]",
+            handler: cmd_glob,
+        });
+        self.register(&SlashCommand {
+            name: "/grep",
+            aliases: &[],
+            description: "Search file contents",
+            usage: "/grep <pattern> [glob]",
+            handler: cmd_grep,
+        });
+        self.register(&SlashCommand {
             name: "/search",
             aliases: &[],
             description: "Semantic search the codebase",
@@ -1585,6 +2531,27 @@ impl CommandRegistry {
             description: "Open the editable settings panel",
             usage: "/settings",
             handler: cmd_settings,
+        });
+        self.register(&SlashCommand {
+            name: "/output-style",
+            aliases: &["/style"],
+            description: "Show or switch assistant output style",
+            usage: "/output-style [normal|teaching|concise]",
+            handler: cmd_output_style,
+        });
+        self.register(&SlashCommand {
+            name: "/keybindings",
+            aliases: &["/keys"],
+            description: "Show or write keybinding config",
+            usage: "/keybindings [defaults]",
+            handler: cmd_keybindings,
+        });
+        self.register(&SlashCommand {
+            name: "/language",
+            aliases: &["/lang"],
+            description: "Show or switch the display language",
+            usage: "/language [auto|zh-CN|en-US]",
+            handler: cmd_language,
         });
         self.register(&SlashCommand {
             name: "/mode",
@@ -1806,7 +2773,7 @@ mod tests {
             .expect("model should show output");
 
         assert!(output.contains("Current model"));
-        assert!(output.contains("DeepSeek V4 Flash"));
+        assert!(output.contains("DeepSeek"));
         assert!(output.contains("DeepSeek V4 Pro"));
         let (_, options) = ctx.app.pending_options.as_ref().expect("model picker");
         assert_eq!(
@@ -1889,6 +2856,7 @@ mod tests {
             "/exit",
             "/hooks",
             "/init",
+            "/language",
             "/plugins",
             "/readiness-report",
             "/security-review",
@@ -1912,7 +2880,7 @@ mod tests {
         let agents = execute_with_test_app("/droids")
             .expect("droids alias should run")
             .expect("droids alias should show output");
-        assert!(agents.contains("manager agents"));
+        assert!(agents.contains("manager agents") || agents.contains("管理器 agents"));
 
         let tasks = execute_with_test_app("/missions")
             .expect("missions alias should run")
@@ -1931,9 +2899,84 @@ mod tests {
             .expect("context should run")
             .expect("context should show output");
 
-        assert!(output.contains("manager context"));
-        assert!(output.contains("window"));
-        assert!(output.contains("current"));
+        assert!(output.contains("context"));
+        assert!(output.contains("状态:就绪"));
+        assert!(output.contains("DeepSeek"));
+        assert!(output.contains("deepseek-v4-flash"));
+        assert!(output.contains("窗口"));
+        assert!(output.contains("压缩"));
+    }
+
+    #[test]
+    fn compact_command_writes_summary_state() {
+        let reg = CommandRegistry::new();
+        let mut app = crate::tui::app::TuiApp::new(
+            crate::deepseek::DeepSeekModel::Flash,
+            crate::deepseek::ThinkingMode::Auto,
+            None,
+            std::path::PathBuf::from("."),
+        );
+        for index in 0..8 {
+            app.messages
+                .push(test_user_message(&format!("message {index}")));
+        }
+        let mut yolo = false;
+        let mut ctx = CommandContext {
+            app: &mut app,
+            project_root: std::path::Path::new("."),
+            yolo_mode: &mut yolo,
+            mcp_status: "MCP: not initialized",
+            background_tasks: &[],
+        };
+
+        let output = reg
+            .execute("/compact 4", &mut ctx)
+            .expect("compact command should be handled")
+            .expect("compact command should run")
+            .expect("compact should show output");
+
+        assert!(output.contains("已压缩本地上下文"));
+        assert_eq!(ctx.app.messages.len(), 4);
+        assert!(ctx.app.latest_compact_summary.is_some());
+        assert_eq!(
+            ctx.app.latest_compact_reason.as_deref(),
+            Some("manual /compact")
+        );
+    }
+
+    #[test]
+    fn language_command_switches_display_language() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reg = CommandRegistry::new();
+        let mut app = crate::tui::app::TuiApp::new(
+            crate::deepseek::DeepSeekModel::Flash,
+            crate::deepseek::ThinkingMode::Auto,
+            None,
+            temp.path().to_path_buf(),
+        );
+        app.config.ui.language = "zh-CN".to_string();
+        app.welcome.display_language = app.config.ui.language.clone();
+        let mut yolo = false;
+        let mut ctx = CommandContext {
+            app: &mut app,
+            project_root: temp.path(),
+            yolo_mode: &mut yolo,
+            mcp_status: "MCP: not initialized",
+            background_tasks: &[],
+        };
+
+        let output = reg
+            .execute("/language en-US", &mut ctx)
+            .expect("command should be handled")
+            .expect("language should run")
+            .expect("language should show output");
+
+        assert!(output.contains("Language set to en-US"));
+        assert_eq!(ctx.app.config.ui.language, "en-US");
+        assert_eq!(ctx.app.welcome.display_language, "en-US");
+        let local = std::fs::read_to_string(temp.path().join(".octocode/local.toml"))
+            .expect("local config exists");
+        assert!(local.contains("language = \"en-US\""));
     }
 
     #[test]
@@ -1996,6 +3039,55 @@ mod tests {
         assert!(output.contains("bg-test"));
         assert!(output.contains("Review plan UI"));
         assert!(output.contains("checking panels"));
+    }
+
+    #[test]
+    fn task_command_uses_project_todo_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reg = CommandRegistry::new();
+        let mut app = crate::tui::app::TuiApp::new(
+            crate::deepseek::DeepSeekModel::Flash,
+            crate::deepseek::ThinkingMode::Auto,
+            None,
+            temp.path().to_path_buf(),
+        );
+        app.config.ui.language = "en-US".to_string();
+        let mut yolo = false;
+        let mut ctx = CommandContext {
+            app: &mut app,
+            project_root: temp.path(),
+            yolo_mode: &mut yolo,
+            mcp_status: "MCP: not initialized",
+            background_tasks: &[],
+        };
+
+        let created = reg
+            .execute("/task create Ship P0.4", &mut ctx)
+            .expect("command handled")
+            .expect("task create runs")
+            .expect("task create output");
+
+        assert!(created.contains("Task created"));
+        assert!(crate::tools::todo_state::todo_state_path(temp.path()).exists());
+        assert_eq!(ctx.app.todo_summary.total, 1);
+
+        let started = reg
+            .execute("/task start task-1", &mut ctx)
+            .expect("command handled")
+            .expect("task start runs")
+            .expect("task start output");
+
+        assert!(started.contains("in_progress"));
+        assert_eq!(ctx.app.todo_summary.in_progress, 1);
+
+        let listed = reg
+            .execute("/task list", &mut ctx)
+            .expect("command handled")
+            .expect("task list runs")
+            .expect("task list output");
+
+        assert!(listed.contains("manager task"));
+        assert!(listed.contains("Ship P0.4"));
     }
 
     #[test]
@@ -2185,7 +3277,10 @@ mod tests {
 
         assert!(output.is_none());
         assert!(ctx.app.settings_open);
-        assert!(ctx.app.status_message.contains("edits selected value"));
+        assert!(
+            ctx.app.status_message.contains("edits selected value")
+                || ctx.app.status_message.contains("修改当前项")
+        );
     }
 
     #[test]
@@ -2229,5 +3324,19 @@ mod tests {
         };
         reg.execute(input, &mut ctx)
             .expect("command should be handled")
+    }
+
+    fn test_user_message(content: &str) -> crate::deepseek::ProtocolMessage {
+        crate::deepseek::ProtocolMessage {
+            id: crate::deepseek::MessageId::new_v4(),
+            role: crate::deepseek::Role::User,
+            content: crate::deepseek::MessageContent::from(content),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            tool_results: Vec::new(),
+            turn_id: crate::deepseek::TurnId::new_v4(),
+            sub_turn_id: None,
+            visibility: crate::deepseek::MessageVisibility::UserVisible,
+        }
     }
 }

@@ -1,5 +1,40 @@
 use super::models::ToolDefinition;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolPermissionProfile {
+    SafeRead,
+    WorkspaceWrite,
+    Command,
+    Network,
+    GitMutation,
+    Agent,
+    InternalReasoning,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolRiskLevel {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolOutputSummary {
+    Inline,
+    Compact,
+    UserQuestion,
+    PersistentState,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolRegistryEntry {
+    pub definition: ToolDefinition,
+    pub display_name: &'static str,
+    pub permission: ToolPermissionProfile,
+    pub risk: ToolRiskLevel,
+    pub output_summary: ToolOutputSummary,
+}
+
 /// Build the standard tool definitions that are sent to `DeepSeek` API.
 /// These mirror the local tool implementations in `src/tools/`.
 #[must_use]
@@ -7,8 +42,18 @@ pub fn standard_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         read_file_def(),
         list_dir_def(),
+        glob_def(),
+        grep_def(),
         search_files_def(),
         search_code_def(),
+        todo_write_def(),
+        task_create_def(),
+        task_get_def(),
+        task_list_def(),
+        task_update_def(),
+        task_stop_def(),
+        ask_user_def(),
+        ask_user_question_def(),
         git_status_def(),
         git_diff_def(),
         git_add_def(),
@@ -24,6 +69,104 @@ pub fn standard_tool_definitions() -> Vec<ToolDefinition> {
         run_subagent_def(),
         think_def(),
     ]
+}
+
+#[must_use]
+pub fn standard_tool_registry() -> Vec<ToolRegistryEntry> {
+    standard_tool_definitions()
+        .into_iter()
+        .map(|definition| {
+            let name = definition.function.name.clone();
+            let permission = tool_permission_profile(&name);
+            let display_name = tool_display_name(&name);
+            ToolRegistryEntry {
+                definition,
+                display_name,
+                permission,
+                risk: tool_risk_level(permission),
+                output_summary: tool_output_summary(&name),
+            }
+        })
+        .collect()
+}
+
+fn tool_display_name(name: &str) -> &'static str {
+    match name {
+        "read_file" => "Read file",
+        "list_dir" => "List directory",
+        "glob" => "Glob",
+        "grep" => "Grep",
+        "search_files" => "Search files",
+        "search_code" => "Search code",
+        "todo_write" => "Todo write",
+        "task_create" => "TaskCreate",
+        "task_get" => "TaskGet",
+        "task_list" => "TaskList",
+        "task_update" => "TaskUpdate",
+        "task_stop" => "TaskStop",
+        "ask_user" => "Ask user",
+        "ask_user_question" => "Ask user question",
+        "git_status" => "Git status",
+        "git_diff" => "Git diff",
+        "git_add" => "Git add",
+        "git_commit" => "Git commit",
+        "edit_file" => "Edit file",
+        "write_file" => "Write file",
+        "apply_patch" => "Apply patch",
+        "run_command" => "Run command",
+        "fetch_url" => "Fetch URL",
+        "web_search" => "Web search",
+        "github_pr" => "GitHub PR",
+        "semantic_search" => "Semantic search",
+        "run_subagent" => "Run subagent",
+        "think" => "Think",
+        _ => "Tool",
+    }
+}
+
+fn tool_permission_profile(name: &str) -> ToolPermissionProfile {
+    match name {
+        "read_file" | "list_dir" | "glob" | "grep" | "search_files" | "search_code"
+        | "git_status" | "git_diff" | "semantic_search" | "task_get" | "task_list" | "ask_user"
+        | "ask_user_question" => ToolPermissionProfile::SafeRead,
+        "todo_write" | "task_create" | "task_update" | "task_stop" => {
+            ToolPermissionProfile::WorkspaceWrite
+        }
+        "edit_file" | "write_file" | "apply_patch" => ToolPermissionProfile::WorkspaceWrite,
+        "git_add" | "git_commit" => ToolPermissionProfile::GitMutation,
+        "run_command" => ToolPermissionProfile::Command,
+        "fetch_url" | "web_search" | "github_pr" => ToolPermissionProfile::Network,
+        "run_subagent" => ToolPermissionProfile::Agent,
+        "think" => ToolPermissionProfile::InternalReasoning,
+        _ => ToolPermissionProfile::Command,
+    }
+}
+
+fn tool_output_summary(name: &str) -> ToolOutputSummary {
+    match name {
+        "todo_write" | "task_create" | "task_update" | "task_stop" => {
+            ToolOutputSummary::PersistentState
+        }
+        "ask_user" | "ask_user_question" => ToolOutputSummary::UserQuestion,
+        "read_file" | "list_dir" | "grep" | "search_code" | "run_command" => {
+            ToolOutputSummary::Compact
+        }
+        _ => ToolOutputSummary::Inline,
+    }
+}
+
+fn tool_risk_level(permission: ToolPermissionProfile) -> ToolRiskLevel {
+    match permission {
+        ToolPermissionProfile::SafeRead | ToolPermissionProfile::InternalReasoning => {
+            ToolRiskLevel::Low
+        }
+        ToolPermissionProfile::WorkspaceWrite | ToolPermissionProfile::Agent => {
+            ToolRiskLevel::Medium
+        }
+        ToolPermissionProfile::Command
+        | ToolPermissionProfile::Network
+        | ToolPermissionProfile::GitMutation => ToolRiskLevel::High,
+    }
 }
 
 fn read_file_def() -> ToolDefinition {
@@ -63,6 +206,51 @@ fn list_dir_def() -> ToolDefinition {
     }
 }
 
+fn glob_def() -> ToolDefinition {
+    ToolDefinition {
+        tool_type: "function".into(),
+        function: super::models::FunctionDef {
+            name: "glob".into(),
+            description: "Find files by path pattern. Supports **, *, ?, and character classes. Respects .gitignore and sorts results by modification time. Prefer this over shell find, dir, ls, or rg --files.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "Glob pattern, for example **/*.rs or src/**/test_*.py" },
+                    "path": { "type": "string", "description": "Optional search root; defaults to project root" },
+                    "limit": { "type": "integer", "description": "Maximum paths to return (default 200, max 2000)" }
+                },
+                "required": ["pattern"]
+            }),
+        },
+    }
+}
+
+fn grep_def() -> ToolDefinition {
+    ToolDefinition {
+        tool_type: "function".into(),
+        function: super::models::FunctionDef {
+            name: "grep".into(),
+            description: "Regex content search across files. Respects .gitignore. Supports files_with_matches, content with before/after context, and count modes. Prefer this over shell grep or rg.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string", "description": "Rust regex syntax" },
+                    "path": { "type": "string", "description": "Optional search root; defaults to project root" },
+                    "glob": { "type": "string", "description": "Optional file-name glob filter, for example *.rs" },
+                    "output_mode": { "type": "string", "enum": ["files_with_matches", "content", "count"], "description": "Default is files_with_matches" },
+                    "case_insensitive": { "type": "boolean" },
+                    "multiline": { "type": "boolean", "description": "Allow pattern to span lines; dot matches newline" },
+                    "before": { "type": "integer", "description": "Context lines before each match in content mode" },
+                    "after": { "type": "integer", "description": "Context lines after each match in content mode" },
+                    "head_limit": { "type": "integer", "description": "Stop after this many files (default 250)" },
+                    "show_line_numbers": { "type": "boolean" }
+                },
+                "required": ["pattern"]
+            }),
+        },
+    }
+}
+
 fn search_files_def() -> ToolDefinition {
     ToolDefinition {
         tool_type: "function".into(),
@@ -96,6 +284,201 @@ fn search_code_def() -> ToolDefinition {
                     "limit": { "type": "integer", "description": "Maximum results (default 30)" }
                 },
                 "required": ["pattern"]
+            }),
+        },
+    }
+}
+
+fn todo_write_def() -> ToolDefinition {
+    ToolDefinition {
+        tool_type: "function".into(),
+        function: super::models::FunctionDef {
+            name: "todo_write".into(),
+            description: "Replace the current todo list with structured items. Pass the full list each call; omitted items are deleted. Use this proactively whenever a task has three or more steps. Keep at most one item in_progress.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string", "description": "Stable todo id" },
+                                "content": { "type": "string", "description": "Todo text" },
+                                "active_form": { "type": "string", "description": "Present-continuous wording for active state, for example Reading config.toml" },
+                                "status": { "type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"], "description": "Todo state" },
+                                "priority": { "type": "string", "enum": ["low", "medium", "high"], "description": "Optional priority" }
+                            },
+                            "required": ["content", "status"]
+                        }
+                    }
+                },
+                "required": ["todos"]
+            }),
+        },
+    }
+}
+
+fn task_create_def() -> ToolDefinition {
+    ToolDefinition {
+        tool_type: "function".into(),
+        function: super::models::FunctionDef {
+            name: "task_create".into(),
+            description: "Create a project-local task in .octocode/todos.json. Use this to track multi-step work in the same state shown by /todo and /task.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Optional stable task id. If omitted, Octocode assigns task-N." },
+                    "content": { "type": "string", "description": "Task text or objective" },
+                    "active_form": { "type": "string", "description": "Present-continuous wording for in_progress display, for example Implementing task tools" },
+                    "status": { "type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"], "description": "Initial task status. Defaults to pending." }
+                },
+                "required": ["content"]
+            }),
+        },
+    }
+}
+
+fn task_get_def() -> ToolDefinition {
+    ToolDefinition {
+        tool_type: "function".into(),
+        function: super::models::FunctionDef {
+            name: "task_get".into(),
+            description: "Load one project-local task from .octocode/todos.json by id, id prefix, or 1-based list number.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Task id or unique id prefix" }
+                },
+                "required": ["id"]
+            }),
+        },
+    }
+}
+
+fn task_list_def() -> ToolDefinition {
+    ToolDefinition {
+        tool_type: "function".into(),
+        function: super::models::FunctionDef {
+            name: "task_list".into(),
+            description: "List project-local tasks from .octocode/todos.json, the same state used by todo_write and /todo.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+        },
+    }
+}
+
+fn task_update_def() -> ToolDefinition {
+    ToolDefinition {
+        tool_type: "function".into(),
+        function: super::models::FunctionDef {
+            name: "task_update".into(),
+            description:
+                "Update a project-local task in .octocode/todos.json. Can change status, content, or active_form."
+                    .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Task id, unique id prefix, or 1-based list number" },
+                    "content": { "type": "string", "description": "Updated task text" },
+                    "active_form": { "type": "string", "description": "Updated present-continuous active wording" },
+                    "status": { "type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"], "description": "New task status" }
+                },
+                "required": ["id"]
+            }),
+        },
+    }
+}
+
+fn task_stop_def() -> ToolDefinition {
+    ToolDefinition {
+        tool_type: "function".into(),
+        function: super::models::FunctionDef {
+            name: "task_stop".into(),
+            description: "Cancel a project-local task in .octocode/todos.json by id, id prefix, or 1-based list number.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Task id or unique id prefix" }
+                },
+                "required": ["id"]
+            }),
+        },
+    }
+}
+
+fn ask_user_question_def() -> ToolDefinition {
+    ToolDefinition {
+        tool_type: "function".into(),
+        function: super::models::FunctionDef {
+            name: "ask_user_question".into(),
+            description: "Ask the user one structured question when progress depends on a real choice. Prefer ask_user for multi-question prompts. Do not use this for questions answerable from local files.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "question": { "type": "string", "description": "Question shown to the user" },
+                    "options": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string", "description": "Short option label" },
+                                "description": { "type": "string", "description": "What choosing this option means" },
+                                "preview": { "type": "string", "description": "Optional text preview or mockup" }
+                            },
+                            "required": ["label"]
+                        }
+                    },
+                    "multi_select": { "type": "boolean", "description": "Whether multiple options may be selected" }
+                },
+                "required": ["question", "options"]
+            }),
+        },
+    }
+}
+
+fn ask_user_def() -> ToolDefinition {
+    ToolDefinition {
+        tool_type: "function".into(),
+        function: super::models::FunctionDef {
+            name: "ask_user".into(),
+            description: "Ask the user one or more structured questions when a real decision is needed, such as choosing a library or resolving ambiguity. Prefer this over prose questions. Each question needs 2-4 options. Preview is only for single-select options.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 4,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "question": { "type": "string" },
+                                "header": { "type": "string", "description": "Short chip label, 12 chars or fewer" },
+                                "multi_select": { "type": "boolean", "default": false },
+                                "options": {
+                                    "type": "array",
+                                    "minItems": 2,
+                                    "maxItems": 4,
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": { "type": "string" },
+                                            "description": { "type": "string" },
+                                            "preview": { "type": "string" }
+                                        },
+                                        "required": ["label", "description"]
+                                    }
+                                }
+                            },
+                            "required": ["question", "header", "options"]
+                        }
+                    }
+                },
+                "required": ["questions"]
             }),
         },
     }
@@ -467,5 +850,57 @@ mod tests {
             .contains("Do not use this for file reading"));
         assert!(run.function.description.contains("cat, ls, find, grep, rg"));
         assert!(run.function.description.contains("use read_file, list_dir"));
+    }
+
+    #[test]
+    fn standard_tool_registry_covers_all_builtin_tools() {
+        let definitions = standard_tool_definitions();
+        let registry = standard_tool_registry();
+
+        assert_eq!(registry.len(), definitions.len());
+        for definition in definitions {
+            let entry = registry
+                .iter()
+                .find(|entry| entry.definition.function.name == definition.function.name)
+                .unwrap_or_else(|| {
+                    panic!("missing registry entry for {}", definition.function.name)
+                });
+            assert_ne!(entry.display_name, "Tool");
+        }
+
+        let run_command = registry
+            .iter()
+            .find(|entry| entry.definition.function.name == "run_command")
+            .expect("run_command registry entry");
+        assert_eq!(run_command.permission, ToolPermissionProfile::Command);
+        assert_eq!(run_command.risk, ToolRiskLevel::High);
+
+        let read_file = registry
+            .iter()
+            .find(|entry| entry.definition.function.name == "read_file")
+            .expect("read_file registry entry");
+        assert_eq!(read_file.permission, ToolPermissionProfile::SafeRead);
+        assert_eq!(read_file.risk, ToolRiskLevel::Low);
+
+        let task_create = registry
+            .iter()
+            .find(|entry| entry.definition.function.name == "task_create")
+            .expect("task_create registry entry");
+        assert_eq!(task_create.display_name, "TaskCreate");
+        assert_eq!(
+            task_create.permission,
+            ToolPermissionProfile::WorkspaceWrite
+        );
+        assert_eq!(
+            task_create.output_summary,
+            ToolOutputSummary::PersistentState
+        );
+
+        let task_list = registry
+            .iter()
+            .find(|entry| entry.definition.function.name == "task_list")
+            .expect("task_list registry entry");
+        assert_eq!(task_list.display_name, "TaskList");
+        assert_eq!(task_list.permission, ToolPermissionProfile::SafeRead);
     }
 }

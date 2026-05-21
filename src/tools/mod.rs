@@ -1,15 +1,22 @@
+pub mod ask_user;
 pub mod backend;
 pub mod dispatch;
 pub mod edit_file;
 pub mod fetch_url;
 pub mod git;
 pub mod github;
+pub mod glob;
+pub mod grep;
 pub mod image_input;
 pub mod list_dir;
 pub mod mcp_wrapper;
 pub mod mentions;
+pub mod metadata;
 pub mod read_file;
 pub mod run_command;
+pub mod task_todo;
+pub mod todo_state;
+pub mod todo_write;
 pub mod web_search;
 pub mod write_file;
 

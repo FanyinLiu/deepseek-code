@@ -395,7 +395,6 @@ fn is_sensitive_command_env_key(key: &str) -> bool {
         "ZAI_API",
         "ZHIPU",
         "GITHUB",
-        "ANTHROPIC",
         "MCP",
     ];
 
@@ -482,6 +481,22 @@ mod tests {
             .unwrap();
         assert!(result.is_success());
         assert!(result.stdout.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn timeout_preserves_collected_stdout_and_stderr() {
+        let root = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let command = "echo stdout-before & echo stderr-before 1>&2 & ping -n 30 127.0.0.1 > nul";
+        #[cfg(not(windows))]
+        let command = "printf 'stdout-before\\n'; printf 'stderr-before\\n' >&2; sleep 30";
+
+        let result = run_command(root.path(), command, None, 1).await.unwrap();
+
+        assert!(result.timed_out, "expected timeout, got {result:?}");
+        assert!(result.stdout.contains("stdout-before"), "{result:?}");
+        assert!(result.stderr.contains("stderr-before"), "{result:?}");
+        assert!(result.stderr.contains("[timed out after 1s]"), "{result:?}");
     }
 
     #[cfg(unix)]

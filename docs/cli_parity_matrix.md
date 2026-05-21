@@ -9,10 +9,10 @@ discoverable, resumable, safer, and easier to verify.
 
 ## Sources Checked
 
-- Claude Code docs: <https://docs.claude.com/en/docs/claude-code/cli-reference>
-- Claude Code subagents docs: <https://docs.claude.com/en/docs/claude-code/subagents>
-- Claude Code current subagents docs: <https://code.claude.com/docs/en/sub-agents>
-- OpenAI Codex CLI help article: <https://help.openai.com/en/articles/11096431>
+- Reference docs (omitted)
+- Reference subagents docs (omitted)
+- Reference subagents docs (omitted)
+- OpenAI Peer B CLI help article: <https://help.openai.com/en/articles/11096431>
 - Kimi Code CLI quick start: <https://www.kimi.com/code/docs/en/kimi-code-cli/getting-started.html>
 - Kimi Code CLI core operations: <https://www.kimi.com/code/docs/en/kimi-code-cli/core-operations.html>
 - Kimi CLI guide: <https://www.kimi.com/code/docs/en/kimi-cli.html>
@@ -29,9 +29,9 @@ discoverable, resumable, safer, and easier to verify.
 
 ## Capability Matrix
 
-| Capability | Claude | Codex | Kimi | Qwen | Gemini | Droid | OpenCode | octocode current | Action |
+| Capability | Peer A | Peer B | Kimi | Qwen | Gemini | Droid | OpenCode | octocode current | Action |
 |---|---|---|---|---|---|---|---|---|---|
-| project memory file | CLAUDE.md and memory scopes | AGENTS.md/project instructions | project context docs | `/init`, `/memory`, durable memory | GEMINI.md and memory reload | project/org context | project config and instructions | project guidance injection exists, diagnostics thin | already-have |
+| project memory file | peer convention and memory scopes | AGENTS.md/project instructions | project context docs | `/init`, `/memory`, durable memory | GEMINI.md and memory reload | project/org context | project config and instructions | project guidance injection exists, diagnostics thin | already-have |
 | custom agents | markdown agents, CLI `--agents` | emerging subagent patterns | not prominent in public docs | agents/skills surface | `/agents` registry | enterprise agent workflows | `opencode agent create` | markdown/TOML registry exists, no CLI surface | implement-now |
 | subagents | built-in and custom subagents | subagents in current product docs | autonomous planning/execution, no clear custom subagents | agents/skills features | local/remote agents list | background process/workflow model | primary/subagent modes | built-in executor, supervisor, TUI cards | already-have |
 | parallel execution | background subagents and fork/team patterns | multi-step autonomous mode | agent plans actions autonomously | task/session tooling | research subagents in plan mode | background process management | subtask/task permissions | supervisor, swarm, background queue | already-have |
@@ -50,7 +50,7 @@ discoverable, resumable, safer, and easier to verify.
 | TUI dashboard | full interactive terminal | terminal UI | terminal and browser UI | terminal UI | terminal UI | REPL | TUI default | Ratatui TUI exists | already-have |
 | plain terminal/SSH mode | headless `-p`, JSON output | terminal local CLI | terminal CLI, ACP | terminal CLI | headless `-p` | `droid exec` | `opencode run` | normal CLI commands exist | already-have |
 | JSON output | `--output-format json` | machine-readable modes | export/import, no universal JSON | share JSON | headless output options | exec automation | CLI automation outputs | limited JSON currently | implement-now |
-| provider flexibility | Anthropic models | OpenAI models | Kimi models | Qwen/coding plan/API key | Gemini models | Factory service, integrations | provider/model string | DeepSeek-first only | implement-later |
+| provider flexibility | Peer models | OpenAI models | Kimi models | Qwen/coding plan/API key | Gemini models | Factory service, integrations | provider/model string | DeepSeek-first only | implement-later |
 | model selection | `--model`, subagent model | `-m` | product model defaults | `/model`, auth plans | `--model`, `/model` | service-managed | `--model provider/model` | pro/flash options | already-have |
 | background tasks | background subagents | full-auto long tasks | task automation | task/session commands | session/task trackers | `/bg-process` | subtask/task tools | background queue exists | already-have |
 | permissions engine | detailed permission modes | approval/sandbox modes | plan/shell restrictions | approval-mode | approval/sandboxing | review workflows | per-resource permissions | policy modules for commands/paths/sandbox | already-have |

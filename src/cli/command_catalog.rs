@@ -226,6 +226,7 @@ async fn run_custom_command(
         thinking,
         Some(root.to_path_buf()),
         output_format,
+        crate::cli::ToolApprovalPolicy::Deny,
     )
     .await
 }
@@ -880,12 +881,13 @@ fn command_group(name: &str) -> &'static str {
     match name {
         "/ask" | "/run" | "/plan" | "/review" | "/security-review" | "/simplify" | "/fix"
         | "/explain" | "/wiki" | "/readiness-report" => "agent",
-        "/agents" | "/swarm" | "/tasks" | "/schedule" => "team",
+        "/agents" | "/swarm" | "/tasks" | "/task" | "/schedule" => "team",
         "/mcp" | "/tools" | "/skills" | "/hooks" | "/plugins" | "/commands" => "extension",
         "/permissions" | "/auto" | "/yolo" | "/mode" | "/doctor" => "control",
-        "/model" | "/theme" | "/tui" | "/settings" | "/statusline" | "/config" => "settings",
-        "/sessions" | "/checkpoint" | "/restore" | "/memory" | "/compact" => "history",
-        "/status" | "/context" | "/usage" | "/cwd" | "/search" => "status",
+        "/model" | "/theme" | "/tui" | "/settings" | "/language" | "/output-style"
+        | "/keybindings" | "/statusline" | "/config" => "settings",
+        "/sessions" | "/checkpoint" | "/restore" | "/memory" | "/compact" | "/todo" => "history",
+        "/status" | "/context" | "/usage" | "/cwd" | "/search" | "/glob" | "/grep" => "status",
         "/clear" | "/exit" | "/copy" | "/undo" | "/image" | "/commit" | "/test" | "/help" => {
             "local"
         }

@@ -20,6 +20,9 @@ use crate::search::{self, SearchMatch};
 use crate::storage::{EventLogStore, SessionEvent, SessionEventKind};
 
 use super::background::{BackgroundQueue, BackgroundTaskSnapshot};
+use super::compact::{
+    build_compact_snapshot, retained_messages, should_auto_compact, DEFAULT_COMPACT_KEEP_MESSAGES,
+};
 use super::event_sink::EventSink;
 use super::lanes::{classify_task, TaskClass};
 use super::prompt_builder::{load_project_rules, PromptBuilder};
@@ -56,6 +59,17 @@ pub enum AgentEvent {
         tool_name: String,
         success: bool,
         summary: String,
+    },
+    UserQuestionRequested {
+        title: String,
+        options: Vec<String>,
+        summary: String,
+    },
+    ContextCompacted {
+        summary: String,
+        reason: String,
+        before_tokens: u64,
+        after_tokens: u64,
     },
     HookExecuted {
         event: HookEvent,
@@ -103,6 +117,7 @@ pub enum AgentEvent {
         agent_id: String,
         tool_name: String,
         arguments: String,
+        policy_decision: policy::PolicyDecision,
         respond: tokio::sync::oneshot::Sender<bool>,
     },
     /// A local swarm run has started.
@@ -1158,6 +1173,58 @@ impl Orchestrator {
             .unwrap_or_default()
     }
 
+    async fn maybe_auto_compact_context(
+        &mut self,
+        events: &[SessionEvent],
+        threshold_tokens: u64,
+        turn_id: TurnId,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) -> bool {
+        if !should_auto_compact(&self.session, events, threshold_tokens) {
+            return false;
+        }
+
+        // PreCompact lets users hook in (e.g. snapshot before compaction).
+        self.run_lifecycle_hook(
+            HookEvent::PreCompact,
+            Some(turn_id),
+            event_tx,
+            Some("auto threshold".into()),
+        )
+        .await;
+
+        let snapshot = build_compact_snapshot(
+            &self.session,
+            Some(events),
+            DEFAULT_COMPACT_KEEP_MESSAGES,
+            "auto threshold",
+        );
+        self.record_event(
+            Some(turn_id),
+            SessionEventKind::ContextCompacted {
+                before_tokens: snapshot.before_tokens,
+                after_tokens: snapshot.after_tokens,
+                before_messages: snapshot.before_messages,
+                after_messages: snapshot.after_messages,
+                retained_start: snapshot.retained_start,
+                retained_count: snapshot.retained_count,
+                summary: snapshot.summary.clone(),
+                reason: snapshot.reason.clone(),
+            },
+        );
+        self.session.messages = retained_messages(&self.session, DEFAULT_COMPACT_KEEP_MESSAGES);
+        send_event(
+            event_tx,
+            AgentEvent::ContextCompacted {
+                summary: snapshot.summary,
+                reason: snapshot.reason,
+                before_tokens: snapshot.before_tokens,
+                after_tokens: snapshot.after_tokens,
+            },
+        );
+        true
+    }
+
     /// Initialize MCP registry from config and connect to all configured servers.
     pub async fn init_mcp(&mut self, config: &crate::storage::config::McpConfig) {
         self.mcp_initialized = true;
@@ -1265,6 +1332,17 @@ impl Orchestrator {
                 &event_tx,
                 AgentEvent::Error("Turn timed out after 10 minutes".into()),
             );
+            // Turn was forcibly stopped — fire Stop + Notification hooks
+            // before the broader SessionEnd hook below.
+            self.run_lifecycle_hook(HookEvent::Stop, None, &event_tx, None)
+                .await;
+            self.run_lifecycle_hook(
+                HookEvent::Notification,
+                None,
+                &event_tx,
+                Some("Turn timed out after 10 minutes".into()),
+            )
+            .await;
             Err(anyhow::anyhow!("Turn timed out after 10 minutes"))
         };
         self.run_lifecycle_hook(HookEvent::SessionEnd, None, &event_tx, None)
@@ -1292,6 +1370,17 @@ impl Orchestrator {
                 &event_tx,
                 AgentEvent::Error("Turn timed out after 10 minutes".into()),
             );
+            // Turn was forcibly stopped — fire Stop + Notification hooks
+            // before the broader SessionEnd hook below.
+            self.run_lifecycle_hook(HookEvent::Stop, None, &event_tx, None)
+                .await;
+            self.run_lifecycle_hook(
+                HookEvent::Notification,
+                None,
+                &event_tx,
+                Some("Turn timed out after 10 minutes".into()),
+            )
+            .await;
             Err(anyhow::anyhow!("Turn timed out after 10 minutes"))
         };
         self.run_lifecycle_hook(HookEvent::SessionEnd, None, &event_tx, None)
@@ -1441,6 +1530,22 @@ impl Orchestrator {
                 content: event_user_content,
             },
         );
+
+        let runtime_config =
+            crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
+        let budget = crate::provider::context_budget_for(
+            runtime_config.provider.default,
+            &self.session.reasoning_state.effective_model(),
+            runtime_config.search.max_context_tokens,
+        );
+        let session_events_for_compact = self.load_session_events();
+        self.maybe_auto_compact_context(
+            &session_events_for_compact,
+            budget.auto_compact_threshold_tokens,
+            turn_id,
+            event_tx,
+        )
+        .await;
 
         if self.should_run_swarm(routing_input, assessment.as_ref(), force_swarm) {
             return self
@@ -2569,6 +2674,9 @@ impl Orchestrator {
 
         for (tc, result) in &results {
             let changed_files = changed_files_for_tool_call(tc);
+            let pending_question = (!result.is_error)
+                .then(|| question_prompt_for_tool_call(tc))
+                .flatten();
             self.record_event(
                 Some(turn_id),
                 SessionEventKind::ToolCallFinished {
@@ -2580,6 +2688,18 @@ impl Orchestrator {
                     changed_files: changed_files.clone(),
                 },
             );
+            if let Some(question) = &pending_question {
+                self.record_event(
+                    Some(turn_id),
+                    SessionEventKind::UserQuestionRequested {
+                        tool_call_id: result.tool_call_id.clone(),
+                        name: result.name.clone(),
+                        title: question.title.clone(),
+                        options: question.options.clone(),
+                        summary: question.summary.clone(),
+                    },
+                );
+            }
             let tool_msg = ReasoningManager::new_tool_result_message(
                 &result.tool_call_id,
                 &result.name,
@@ -2597,6 +2717,16 @@ impl Orchestrator {
                     summary: result.result.clone(),
                 },
             );
+            if let Some(question) = pending_question {
+                send_event(
+                    event_tx,
+                    AgentEvent::UserQuestionRequested {
+                        title: question.title,
+                        options: question.options,
+                        summary: question.summary,
+                    },
+                );
+            }
 
             // Emit diff event for file-editing tools so the TUI can show an inline preview
             if (tc.function.name == "edit_file" || tc.function.name == "write_file")
@@ -2961,6 +3091,16 @@ fn estimate_stream_tokens(value: &str) -> u64 {
 
 fn changed_files_for_tool_call(tc: &ToolCall) -> Vec<String> {
     crate::tools::backend::changed_files_for_call(tc)
+}
+
+fn question_prompt_for_tool_call(
+    tc: &ToolCall,
+) -> Option<crate::tools::ask_user::PendingUserQuestion> {
+    if !matches!(tc.function.name.as_str(), "ask_user" | "ask_user_question") {
+        return None;
+    }
+    let value = serde_json::from_str::<serde_json::Value>(&tc.function.arguments).ok()?;
+    crate::tools::ask_user::pending_question_from_value(&value).ok()
 }
 
 fn should_force_swarm(user_input: &str) -> bool {

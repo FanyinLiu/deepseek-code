@@ -545,6 +545,7 @@ pub fn render_slash_command_panel(
     area: Rect,
     commands: &[(String, String)],
     selected_index: usize,
+    chinese: bool,
 ) {
     if area.width < 18 || area.height < 3 || commands.is_empty() {
         return;
@@ -566,26 +567,30 @@ pub fn render_slash_command_panel(
         String::new()
     };
 
+    let title = if chinese { "命令" } else { "Commands" };
+    let controls = if chinese {
+        format!("↑↓ 选择   PgUp/PgDn 翻页   Enter/Tab 补全{page_label}")
+    } else {
+        format!("↑↓ choose   PgUp/PgDn page   Enter/Tab complete{page_label}")
+    };
+
     let mut lines = vec![Line::from(vec![
         Span::styled(
-            "Commands",
+            title,
             Style::default()
                 .fg(p.text)
                 .bg(p.canvas)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("  ", Style::default().bg(p.canvas)),
-        Span::styled(
-            format!("↑↓ choose   PgUp/PgDn page   Enter/Tab complete{page_label}"),
-            Style::default().fg(p.dim).bg(p.canvas),
-        ),
+        Span::styled(controls, Style::default().fg(p.dim).bg(p.canvas)),
     ])];
 
     let name_width = commands
         .get(page_start..page_end)
         .unwrap_or(&[])
         .iter()
-        .map(|(name, _)| name.chars().count())
+        .map(|(name, _)| display_width(name))
         .max()
         .unwrap_or(8)
         .clamp(8, 18);
@@ -600,7 +605,7 @@ pub fn render_slash_command_panel(
     {
         let selected = i == selected_index;
         let marker = if selected { "▸" } else { " " };
-        let name_cell = format!("{name:<name_width$}");
+        let name_cell = pad_to_width(name, name_width);
         let desc = truncate(description, desc_width);
         let style = if selected {
             Style::default()
@@ -631,6 +636,7 @@ pub fn render_file_mention_panel(
     area: Rect,
     files: &[String],
     selected_index: usize,
+    chinese: bool,
 ) {
     if area.width < 18 || area.height < 3 || files.is_empty() {
         return;
@@ -638,19 +644,22 @@ pub fn render_file_mention_panel(
 
     let p = theme::palette();
     let selected_bg = p.surface_alt;
+    let title = if chinese { "文件" } else { "Files" };
+    let controls = if chinese {
+        "↑↓ 选择   Enter/Tab 插入引用"
+    } else {
+        "↑↓ choose   Enter/Tab insert mention"
+    };
     let mut lines = vec![Line::from(vec![
         Span::styled(
-            "Files",
+            title,
             Style::default()
                 .fg(p.text)
                 .bg(p.canvas)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("  ", Style::default().bg(p.canvas)),
-        Span::styled(
-            "↑↓ choose   Enter/Tab insert mention",
-            Style::default().fg(p.dim).bg(p.canvas),
-        ),
+        Span::styled(controls, Style::default().fg(p.dim).bg(p.canvas)),
     ])];
 
     let row_width = area.width.saturating_sub(4) as usize;
@@ -681,7 +690,7 @@ pub fn render_file_mention_panel(
 }
 
 /// Render shell command hints while the user is typing `!`.
-pub fn render_shell_hint_panel(f: &mut Frame, area: Rect) {
+pub fn render_shell_hint_panel(f: &mut Frame, area: Rect, chinese: bool) {
     if area.width < 18 || area.height < 3 {
         return;
     }
@@ -690,19 +699,27 @@ pub fn render_shell_hint_panel(f: &mut Frame, area: Rect) {
     let lines = vec![
         Line::from(vec![
             Span::styled(
-                "Shell",
+                if chinese { "终端" } else { "Shell" },
                 Style::default()
                     .fg(p.text)
                     .bg(p.canvas)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "  Enter submits through run_command approval",
+                if chinese {
+                    "  Enter 提交，并经过 run_command 审批"
+                } else {
+                    "  Enter submits through run_command approval"
+                },
                 Style::default().fg(p.dim).bg(p.canvas),
             ),
         ]),
         Line::from(Span::styled(
-            "!pwd     show current workspace",
+            if chinese {
+                "!pwd     查看当前工作区"
+            } else {
+                "!pwd     show current workspace"
+            },
             Style::default().fg(p.text).bg(p.canvas),
         )),
         Line::from(Span::styled(

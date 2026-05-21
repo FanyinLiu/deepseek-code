@@ -93,7 +93,7 @@ pub async fn plan(task: String, project_root: Option<PathBuf>) -> Result<(), any
 
     output_blocks::print_header("plan mode complete", output_blocks::BlockStatus::Done);
     output_blocks::print_kv("next", "review the plan above before executing");
-    output_blocks::print_kv("run", "octocode run \"<your approved steps>\"");
+    output_blocks::print_kv("run", "octo run \"<your approved steps>\"");
 
     Ok(())
 }

@@ -52,6 +52,14 @@ enum Commands {
         /// Output format: text, json, stream-json
         #[arg(long, value_enum, default_value_t = OutputFormatArg::Text)]
         output_format: OutputFormatArg,
+
+        /// Tool approval policy: ask (prompt), allow, or deny
+        #[arg(long, value_enum)]
+        tool_approval: Option<ToolApprovalArg>,
+
+        /// Enable tool approval for every request without prompts
+        #[arg(short = 'y', long = "auto-approve")]
+        auto_approve: bool,
     },
 
     /// Ask a question with search context (read-only, no edits)
@@ -62,6 +70,14 @@ enum Commands {
         /// Output format: text, json, stream-json
         #[arg(long, value_enum, default_value_t = OutputFormatArg::Text)]
         output_format: OutputFormatArg,
+
+        /// Tool approval policy: ask (prompt), allow, or deny
+        #[arg(long, value_enum)]
+        tool_approval: Option<ToolApprovalArg>,
+
+        /// Enable tool approval for every request without prompts
+        #[arg(short = 'y', long = "auto-approve")]
+        auto_approve: bool,
     },
 
     /// Search the project codebase
@@ -94,8 +110,8 @@ enum Commands {
         thinking: bool,
 
         /// Tool approval policy: ask (prompt), allow, or deny
-        #[arg(long, value_enum, default_value_t = ToolApprovalArg::Deny)]
-        tool_approval: ToolApprovalArg,
+        #[arg(long, value_enum)]
+        tool_approval: Option<ToolApprovalArg>,
 
         /// Enable tool approval for every request without prompts
         #[arg(short = 'y', long = "auto-approve")]
@@ -325,6 +341,23 @@ impl ToolApprovalArg {
             Self::Allow => crate::cli::ToolApprovalPolicy::Allow,
             Self::Deny => crate::cli::ToolApprovalPolicy::Deny,
         }
+    }
+}
+
+fn effective_turn_tool_approval(
+    output_format: OutputFormatArg,
+    tool_approval: Option<ToolApprovalArg>,
+    auto_approve: bool,
+) -> crate::cli::ToolApprovalPolicy {
+    if auto_approve {
+        return crate::cli::ToolApprovalPolicy::Allow;
+    }
+    if let Some(tool_approval) = tool_approval {
+        return tool_approval.to_policy();
+    }
+    match output_format {
+        OutputFormatArg::Text => crate::cli::ToolApprovalPolicy::Ask,
+        OutputFormatArg::Json | OutputFormatArg::StreamJson => crate::cli::ToolApprovalPolicy::Deny,
     }
 }
 
@@ -885,6 +918,17 @@ enum McpCommands {
         /// Server name
         name: String,
     },
+    /// Start octocode as an MCP server, exposing local tools to external agents.
+    /// Read-only tools are exposed by default; pass --allow-destructive to also
+    /// expose write_file/edit_file/run_command.
+    Serve {
+        /// Use stdio transport (default; reads JSON-RPC from stdin)
+        #[arg(long, default_value_t = true)]
+        stdio: bool,
+        /// Also expose destructive tools (write/edit/run_command)
+        #[arg(long)]
+        allow_destructive: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1206,7 +1250,11 @@ pub async fn run() -> Result<(), anyhow::Error> {
             model,
             session,
             output_format,
+            tool_approval,
+            auto_approve,
         }) => {
+            let tool_approval =
+                effective_turn_tool_approval(output_format, tool_approval, auto_approve);
             cli::chat(
                 prompt,
                 thinking,
@@ -1214,17 +1262,23 @@ pub async fn run() -> Result<(), anyhow::Error> {
                 cli.project_root,
                 session,
                 output_format.turn_output_format(),
+                tool_approval,
             )
             .await
         }
         Some(Commands::Ask {
             question,
             output_format,
+            tool_approval,
+            auto_approve,
         }) => {
+            let tool_approval =
+                effective_turn_tool_approval(output_format, tool_approval, auto_approve);
             cli::ask(
                 question,
                 cli.project_root,
                 output_format.turn_output_format(),
+                tool_approval,
             )
             .await
         }
@@ -1241,11 +1295,8 @@ pub async fn run() -> Result<(), anyhow::Error> {
             auto_approve,
             output_format,
         }) => {
-            let tool_approval = if auto_approve {
-                cli::ToolApprovalPolicy::Allow
-            } else {
-                tool_approval.to_policy()
-            };
+            let tool_approval =
+                effective_turn_tool_approval(output_format, tool_approval, auto_approve);
             cli::run(
                 task,
                 thinking,
@@ -1560,6 +1611,17 @@ pub async fn run() -> Result<(), anyhow::Error> {
             cli::agent(command, cli.project_root).await
         }
         Some(Commands::Mcp { command }) => {
+            // `serve` short-circuits: it speaks JSON-RPC on stdio and never
+            // returns a value-formatted McpCommand. All other subcommands fall
+            // through to the standard cli::mcp dispatch.
+            if let McpCommands::Serve {
+                stdio: _,
+                allow_destructive,
+            } = command
+            {
+                let project_root = cli::resolve_project_root(cli.project_root, "mcp serve")?;
+                return crate::mcp::serve_stdio(project_root, allow_destructive).await;
+            }
             let command = match command {
                 McpCommands::List { json } => cli::mcp::McpCommand::List { json },
                 McpCommands::Get { name, json } => cli::mcp::McpCommand::Get { name, json },
@@ -1612,6 +1674,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
                     trust,
                 }),
                 McpCommands::Remove { name } => cli::mcp::McpCommand::Remove { name },
+                McpCommands::Serve { .. } => unreachable!("serve handled above"),
             };
             cli::mcp(command, cli.project_root).await
         }
@@ -1782,6 +1845,7 @@ fn init_tracing(quiet_terminal: bool) {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter)),
         )
         .with_target(false)
+        .with_writer(std::io::stderr)
         .try_init();
 }
 

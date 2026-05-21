@@ -18,7 +18,13 @@ pub async fn welcome(
 ) -> Result<(), anyhow::Error> {
     let root = resolve_project_root(project_root, "welcome")?;
 
-    let config = storage::Config::load(Some(&root)).unwrap_or_default();
+    let config = match storage::Config::load(Some(&root)) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("warning: failed to load config (using defaults): {e}");
+            storage::Config::default()
+        }
+    };
     let model = match model_override.as_deref() {
         Some(value) => crate::provider::parse_model(value)
             .map_err(|error| anyhow::anyhow!("invalid model override: {error}"))?,
@@ -81,6 +87,7 @@ pub async fn welcome(
         Some(root),
         session,
         crate::cli::TurnOutputFormat::Text,
+        crate::cli::ToolApprovalPolicy::Ask,
     )
     .await
 }
@@ -220,7 +227,7 @@ fn print_welcome(
         println!(
             "  {}  API key not configured. Run: {}",
             yellow("!"),
-            cyan("octocode login --api-key <your-key>")
+            cyan("octo login --api-key <your-key>")
         );
         println!();
     }

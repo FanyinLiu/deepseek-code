@@ -1,8 +1,9 @@
-use std::io::{self, IsTerminal};
+use std::io;
 use std::path::PathBuf;
 
 use crate::agent::orchestrator::{AgentEvent, Orchestrator};
-use crate::cli::inline_popup::{self, ApprovalChoice};
+use crate::cli::approval;
+use crate::cli::inline_popup;
 use crate::cli::output_blocks;
 use crate::cli::{resolve_project_root, ToolApprovalPolicy, TurnOutputFormat};
 use crate::deepseek::{
@@ -22,7 +23,7 @@ pub async fn run(
         Ok(root) => root,
         Err(error) => return json_error_result(output_format, error),
     };
-    let api_key = match if output_format.is_json() {
+    let api_key = match if output_format.is_machine_readable() {
         super::login::resolve_api_key_non_interactive(Some(&root))
     } else {
         super::login::resolve_or_prompt_api_key(Some(&root))
@@ -86,8 +87,9 @@ pub async fn run(
         (orch_for_turn, result)
     });
 
-    let mut auto_approve_session = false;
-    let is_tty = cli_prompt_tty();
+    let mut tool_auto_approve_session = false;
+    let mut subagent_auto_approve_session = false;
+    let is_tty = approval::cli_prompt_tty();
 
     while let Some(event) = ev_rx.recv().await {
         if let Some(collector) = final_json.as_mut() {
@@ -98,41 +100,34 @@ pub async fn run(
                     display,
                     respond,
                 } => {
-                    let approved = resolve_tool_approval(
+                    let decision = approval::resolve_tool_approval(
                         tool_approval,
-                        &mut auto_approve_session,
+                        &mut tool_auto_approve_session,
                         is_tty,
                         &display,
                     )
                     .await;
-                    let _ = respond.send(approved);
-                    if !approved {
-                        crate::cli::stream_json::print_tool_approval_denied(
-                            &tool_name,
-                            "policy=deny",
-                        );
+                    let _ = respond.send(decision.approved);
+                    if let Some(reason) = decision.denial_reason {
+                        collector.record_tool_approval_denied(&tool_name, reason);
                     }
                 }
                 AgentEvent::SubagentToolApprovalNeeded {
-                    agent_id,
                     tool_name,
-                    arguments,
+                    policy_decision,
                     respond,
+                    ..
                 } => {
-                    let display = subagent_approval_display(&agent_id, &tool_name, &arguments);
-                    let approved = resolve_tool_approval(
+                    let decision = approval::resolve_subagent_tool_approval(
+                        &policy_decision,
                         tool_approval,
-                        &mut auto_approve_session,
+                        &mut subagent_auto_approve_session,
                         is_tty,
-                        &display,
                     )
                     .await;
-                    let _ = respond.send(approved);
-                    if !approved {
-                        crate::cli::stream_json::print_tool_approval_denied(
-                            &tool_name,
-                            "policy=deny",
-                        );
+                    let _ = respond.send(decision.approved);
+                    if let Some(reason) = decision.denial_reason {
+                        collector.record_tool_approval_denied(&tool_name, reason);
                     }
                 }
                 AgentEvent::OptionsNeeded { respond, .. } => {
@@ -150,41 +145,34 @@ pub async fn run(
                     display,
                     respond,
                 } => {
-                    let approved = resolve_tool_approval(
+                    let decision = approval::resolve_tool_approval(
                         tool_approval,
-                        &mut auto_approve_session,
+                        &mut tool_auto_approve_session,
                         is_tty,
                         &display,
                     )
                     .await;
-                    let _ = respond.send(approved);
-                    if !approved {
-                        crate::cli::stream_json::print_tool_approval_denied(
-                            &tool_name,
-                            "policy=deny",
-                        );
+                    let _ = respond.send(decision.approved);
+                    if let Some(reason) = decision.denial_reason {
+                        crate::cli::stream_json::print_tool_approval_denied(&tool_name, reason);
                     }
                 }
                 AgentEvent::SubagentToolApprovalNeeded {
-                    agent_id,
                     tool_name,
-                    arguments,
+                    policy_decision,
                     respond,
+                    ..
                 } => {
-                    let display = subagent_approval_display(&agent_id, &tool_name, &arguments);
-                    let approved = resolve_tool_approval(
+                    let decision = approval::resolve_subagent_tool_approval(
+                        &policy_decision,
                         tool_approval,
-                        &mut auto_approve_session,
+                        &mut subagent_auto_approve_session,
                         is_tty,
-                        &display,
                     )
                     .await;
-                    let _ = respond.send(approved);
-                    if !approved {
-                        crate::cli::stream_json::print_tool_approval_denied(
-                            &tool_name,
-                            "policy=deny",
-                        );
+                    let _ = respond.send(decision.approved);
+                    if let Some(reason) = decision.denial_reason {
+                        crate::cli::stream_json::print_tool_approval_denied(&tool_name, reason);
                     }
                 }
                 AgentEvent::OptionsNeeded { respond, .. } => {
@@ -204,17 +192,17 @@ pub async fn run(
                 display,
                 respond,
             } => {
-                let approved = resolve_tool_approval(
+                let decision = approval::resolve_tool_approval(
                     tool_approval,
-                    &mut auto_approve_session,
+                    &mut tool_auto_approve_session,
                     is_tty,
                     &display,
                 )
                 .await;
                 if !is_tty {
-                    output_blocks::print_approval(&tool_name, &display, approved);
+                    output_blocks::print_approval(&tool_name, &display, decision.approved);
                 }
-                let _ = respond.send(approved);
+                let _ = respond.send(decision.approved);
             }
             AgentEvent::ToolStarted { .. } => {}
             AgentEvent::ToolExecuted {
@@ -287,23 +275,26 @@ pub async fn run(
                 output_blocks::print_worker_completed(&agent_id, &result);
             }
             AgentEvent::SubagentToolApprovalNeeded {
-                agent_id,
                 tool_name,
-                arguments,
+                policy_decision,
                 respond,
+                ..
             } => {
-                let display = subagent_approval_display(&agent_id, &tool_name, &arguments);
-                let approved = resolve_tool_approval(
+                let decision = approval::resolve_subagent_tool_approval(
+                    &policy_decision,
                     tool_approval,
-                    &mut auto_approve_session,
+                    &mut subagent_auto_approve_session,
                     is_tty,
-                    &display,
                 )
                 .await;
                 if !is_tty {
-                    output_blocks::print_approval(&tool_name, &display, approved);
+                    output_blocks::print_approval(
+                        &tool_name,
+                        &policy_decision.display,
+                        decision.approved,
+                    );
                 }
-                let _ = respond.send(approved);
+                let _ = respond.send(decision.approved);
             }
             AgentEvent::PlanStepUpdate {
                 index,
@@ -393,6 +384,8 @@ pub async fn run(
             if let Err(error) = result {
                 if let Some(collector) = final_json.as_mut() {
                     collector.record_error(error.to_string());
+                } else if output_format.is_stream_json() {
+                    crate::cli::stream_json::print_error_event(error.to_string());
                 }
                 turn_error = Some(error);
             }
@@ -401,6 +394,8 @@ pub async fn run(
             let error = anyhow::anyhow!("Turn task failed: {e}");
             if let Some(collector) = final_json.as_mut() {
                 collector.record_error(error.to_string());
+            } else if output_format.is_stream_json() {
+                crate::cli::stream_json::print_error_event(error.to_string());
             }
             turn_error = Some(error);
         }
@@ -424,53 +419,8 @@ fn json_error_result<T>(
     output_format: TurnOutputFormat,
     error: anyhow::Error,
 ) -> Result<T, anyhow::Error> {
-    if output_format.is_json() {
-        crate::cli::stream_json::print_final_error(error.to_string());
+    if output_format.is_machine_readable() {
+        crate::cli::stream_json::print_output_error(output_format, error.to_string());
     }
     Err(error)
-}
-
-fn cli_prompt_tty() -> bool {
-    io::stdin().is_terminal() && io::stderr().is_terminal()
-}
-
-async fn resolve_tool_approval(
-    policy: ToolApprovalPolicy,
-    auto_approve_session: &mut bool,
-    is_tty: bool,
-    display: &crate::policy::ApprovalDisplay,
-) -> bool {
-    if let Some(approved) = policy.auto_approved(*auto_approve_session) {
-        return approved;
-    }
-
-    if !is_tty {
-        tracing::warn!("tool approval policy ask requested without tty; denying");
-        return false;
-    }
-
-    match inline_popup::prompt_approval_inline(display)
-        .await
-        .unwrap_or(ApprovalChoice::Deny)
-    {
-        ApprovalChoice::ApproveOnce => true,
-        ApprovalChoice::ApproveSession => {
-            *auto_approve_session = true;
-            true
-        }
-        ApprovalChoice::Deny => false,
-    }
-}
-
-fn subagent_approval_display(
-    agent_id: &str,
-    tool_name: &str,
-    arguments: &str,
-) -> crate::policy::ApprovalDisplay {
-    crate::policy::ApprovalDisplay {
-        title: format!("Subagent tool: {tool_name}"),
-        description: "Subagent requested a tool call".to_string(),
-        risk_level: crate::policy::RiskLevel::CommandExecution,
-        details: format!("Agent: {agent_id}\nArguments: {arguments}"),
-    }
 }

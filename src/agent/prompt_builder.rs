@@ -279,11 +279,16 @@ impl PromptBuilder {
     ) -> String {
         let mut prompt = String::new();
 
-        // Core identity — this should be stable for cache
-        prompt.push_str(&format!(
-            "You are Octocode, a programming agent powered by {}.\n",
-            self.model
-        ));
+        // ───── STABLE PREFIX (cache-friendly) ─────
+        // Identity, workspace, rules, safety, tool usage — these must not change
+        // mid-session, otherwise DeepSeek prefix cache misses. Volatile bits
+        // (current model label, current lane) are appended at the end.
+        prompt.push_str("You are Octocode, a local terminal coding agent.\n");
+        prompt.push_str(
+            "Your identity is Octocode; the backend provider/model is configurable and is not \
+             part of your identity. Do not claim to be powered by a specific model unless the \
+             user asks about the current runtime configuration.\n",
+        );
         prompt.push_str("You work inside a terminal-based coding agent.\n");
         prompt.push_str(
             "Your task is to help with software engineering: \
@@ -298,33 +303,16 @@ impl PromptBuilder {
              the user provides a different absolute path.\n\n",
         );
 
-        // Execution lane instructions
-        match self.lane {
-            ExecutionLane::ChatNonThinking => {
-                prompt.push_str("Mode: CHAT (non-thinking). Be concise.\n\n");
-            }
-            ExecutionLane::ChatThinking => {
-                prompt.push_str("Mode: CHAT (thinking). Think carefully before answering.\n\n");
-            }
-            ExecutionLane::PlanThinking => {
-                prompt.push_str(
-                    "Mode: PLAN (read-only). You CANNOT modify files or run commands.\n\
-                     Only read, search, and plan. Do NOT write code in this mode.\n\n",
-                );
-            }
-            ExecutionLane::ToolLoopThinking => {
-                prompt.push_str(
-                    "Mode: EXECUTE. You may read, write, edit, and run commands.\n\
-                     All writes and commands require user approval.\n\n",
-                );
-            }
-            _ => {}
-        }
-
         // Project rules (stable part)
         if let Some(rules) = project_rules {
             prompt.push_str("## Project Rules\n\n");
             prompt.push_str(rules);
+            prompt.push_str("\n\n");
+        }
+
+        if let Some(output_style) = load_output_style_policy(&session.project_root) {
+            prompt.push_str("## Output Style\n\n");
+            prompt.push_str(&output_style);
             prompt.push_str("\n\n");
         }
 
@@ -390,6 +378,37 @@ impl PromptBuilder {
             ));
         }
 
+        // ───── VOLATILE SUFFIX (placed last to preserve prefix cache) ─────
+        // Lane and model label change per turn / per user toggle. Keeping
+        // them at the end means the long stable prefix above stays a single
+        // cache key even when the user switches modes.
+        prompt.push_str("## Runtime\n\n");
+        prompt.push_str(&format!(
+            "Current configured model label: {}.\n",
+            self.model
+        ));
+        match self.lane {
+            ExecutionLane::ChatNonThinking => {
+                prompt.push_str("Mode: CHAT (non-thinking). Be concise.\n");
+            }
+            ExecutionLane::ChatThinking => {
+                prompt.push_str("Mode: CHAT (thinking). Think carefully before answering.\n");
+            }
+            ExecutionLane::PlanThinking => {
+                prompt.push_str(
+                    "Mode: PLAN (read-only). You CANNOT modify files or run commands.\n\
+                     Only read, search, and plan. Do NOT write code in this mode.\n",
+                );
+            }
+            ExecutionLane::ToolLoopThinking => {
+                prompt.push_str(
+                    "Mode: EXECUTE. You may read, write, edit, and run commands.\n\
+                     All writes and commands require user approval.\n",
+                );
+            }
+            _ => {}
+        }
+
         prompt
     }
 
@@ -437,6 +456,27 @@ pub fn load_project_rules(project_root: &Path) -> Option<String> {
     } else {
         Some(loaded.join("\n\n"))
     }
+}
+
+fn load_output_style_policy(project_root: &Path) -> Option<String> {
+    let path = project_root.join(".octocode").join("output_style.json");
+    let content = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let style = value
+        .get("style")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("normal");
+    let policy = value
+        .get("prompt_policy")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(match style {
+            "teaching" => "explain important decisions and teach as you work",
+            "concise" => "answer directly and keep explanations short",
+            _ => "balanced engineering explanation",
+        });
+    Some(format!(
+        "- Current output style: {style}.\n- Follow this response policy: {policy}."
+    ))
 }
 
 #[must_use]
@@ -566,6 +606,43 @@ mod tests {
     }
 
     #[test]
+    fn build_system_prompt_reads_project_output_style() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(temp.path().join(".octocode")).expect("create .octocode");
+        std::fs::write(
+            temp.path().join(".octocode").join("output_style.json"),
+            serde_json::json!({
+                "style": "concise",
+                "prompt_policy": "answer directly and avoid long explanations"
+            })
+            .to_string(),
+        )
+        .expect("write output style");
+        let session = Session {
+            id: crate::deepseek::SessionId::new_v4(),
+            name: None,
+            project_root: temp.path().to_path_buf(),
+            messages: Vec::new(),
+            reasoning_state: crate::deepseek::ReasoningState::default(),
+            tool_call_history: Vec::new(),
+            checkpoints: Vec::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            metadata: crate::deepseek::SessionMetadata::default(),
+        };
+
+        let (prompt, _) = PromptBuilder::new(
+            DeepSeekModel::Flash,
+            ExecutionLane::ToolLoopThinking,
+            true,
+        )
+        .build(&session, None, None, &[]);
+
+        assert!(prompt.contains("Current output style: concise"));
+        assert!(prompt.contains("answer directly and avoid long explanations"));
+    }
+
+    #[test]
     fn build_injects_transient_context_into_api_messages_only() {
         let mut session = Session {
             id: crate::deepseek::SessionId::new_v4(),
@@ -675,5 +752,82 @@ mod tests {
         assert!(joined.contains("Current approved execution plan JSON"));
         assert!(joined.contains("修复 CLI"));
         assert!(joined.contains("请按上面的计划逐步执行"));
+    }
+
+    #[test]
+    fn build_system_prompt_is_deterministic() {
+        // Cache hit requires byte-for-byte identical prefix across turns.
+        // This test locks down determinism — break it and you break caching.
+        let session = Session {
+            id: crate::deepseek::SessionId::new_v4(),
+            name: None,
+            project_root: std::path::PathBuf::from("."),
+            messages: Vec::new(),
+            reasoning_state: crate::deepseek::ReasoningState::default(),
+            tool_call_history: Vec::new(),
+            checkpoints: Vec::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            metadata: crate::deepseek::SessionMetadata::default(),
+        };
+        let tools = crate::deepseek::tools::standard_tool_definitions();
+        let builder =
+            PromptBuilder::new(DeepSeekModel::Flash, ExecutionLane::ToolLoopThinking, true);
+        let a = builder.build_system_prompt(&session, None, &tools);
+        let b = builder.build_system_prompt(&session, None, &tools);
+        assert_eq!(a, b, "system prompt must be byte-identical across calls");
+    }
+
+    #[test]
+    fn lane_switch_keeps_stable_prefix_intact() {
+        // Switching lane between turns must NOT change the stable prefix —
+        // it should only flip the volatile suffix at the end. If the prefix
+        // changes, the DeepSeek prompt cache misses on every lane toggle.
+        let session = Session {
+            id: crate::deepseek::SessionId::new_v4(),
+            name: None,
+            project_root: std::path::PathBuf::from("."),
+            messages: Vec::new(),
+            reasoning_state: crate::deepseek::ReasoningState::default(),
+            tool_call_history: Vec::new(),
+            checkpoints: Vec::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            metadata: crate::deepseek::SessionMetadata::default(),
+        };
+        let tools = crate::deepseek::tools::standard_tool_definitions();
+        let chat = PromptBuilder::new(DeepSeekModel::Flash, ExecutionLane::ChatNonThinking, true)
+            .build_system_prompt(&session, None, &tools);
+        let plan = PromptBuilder::new(DeepSeekModel::Flash, ExecutionLane::PlanThinking, true)
+            .build_system_prompt(&session, None, &tools);
+
+        // Identify the stable-prefix boundary: anything before "## Runtime"
+        // must be identical between the two lanes.
+        let chat_prefix = chat
+            .split("## Runtime")
+            .next()
+            .expect("stable prefix exists");
+        let plan_prefix = plan
+            .split("## Runtime")
+            .next()
+            .expect("stable prefix exists");
+        assert_eq!(
+            chat_prefix, plan_prefix,
+            "lane switch must not alter the stable prefix above ## Runtime"
+        );
+    }
+
+    #[test]
+    fn standard_tool_definitions_are_deterministic() {
+        // Tool schemas live in the prompt-cache-eligible region. They MUST
+        // be deterministic — same call twice in a row, byte-identical JSON.
+        let a = crate::deepseek::tools::standard_tool_definitions();
+        let b = crate::deepseek::tools::standard_tool_definitions();
+        let a_json = serde_json::to_string(&a).expect("serialize a");
+        let b_json = serde_json::to_string(&b).expect("serialize b");
+        assert_eq!(
+            a_json, b_json,
+            "tool definitions must be byte-identical across calls"
+        );
     }
 }

@@ -3,10 +3,20 @@
 //! The runtime still uses the DeepSeek-compatible chat client internally, but
 //! provider presets make OpenAI-compatible Chinese model services first-class.
 
+use std::{future::Future, pin::Pin};
+
 use serde::{Deserialize, Serialize};
 
-use crate::deepseek::{client::DeepSeekClient, DeepSeekModel, ThinkingWireFormat};
+use crate::deepseek::{
+    client::DeepSeekClient,
+    errors::DeepSeekError,
+    models::{ChatRequest, ChatResponse, StreamResult},
+    DeepSeekModel, ThinkingWireFormat,
+};
 use crate::storage::config::ModelConfig;
+
+const DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS: u64 = 1_000_000;
+const DEFAULT_AUTO_COMPACT_RATIO: f64 = 0.80;
 
 /// Supported provider families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -81,6 +91,11 @@ impl ProviderKind {
                 supports_tool_calls: true,
                 supports_json_output: true,
                 supports_fim: true,
+                supports_responses_api: false,
+                supports_structured_outputs: false,
+                supports_tracing: false,
+                supports_evals: false,
+                supports_cache_control: false,
             },
             Self::Qwen => ProviderCapabilities {
                 kind: self,
@@ -95,6 +110,11 @@ impl ProviderKind {
                 supports_tool_calls: true,
                 supports_json_output: true,
                 supports_fim: false,
+                supports_responses_api: false,
+                supports_structured_outputs: false,
+                supports_tracing: false,
+                supports_evals: false,
+                supports_cache_control: false,
             },
             Self::Kimi => ProviderCapabilities {
                 kind: self,
@@ -109,6 +129,11 @@ impl ProviderKind {
                 supports_tool_calls: true,
                 supports_json_output: true,
                 supports_fim: false,
+                supports_responses_api: false,
+                supports_structured_outputs: false,
+                supports_tracing: false,
+                supports_evals: false,
+                supports_cache_control: false,
             },
             Self::Zhipu => ProviderCapabilities {
                 kind: self,
@@ -123,6 +148,11 @@ impl ProviderKind {
                 supports_tool_calls: true,
                 supports_json_output: true,
                 supports_fim: false,
+                supports_responses_api: false,
+                supports_structured_outputs: false,
+                supports_tracing: false,
+                supports_evals: false,
+                supports_cache_control: false,
             },
             Self::OpenRouter | Self::OpenAiCompatible => ProviderCapabilities {
                 kind: self,
@@ -137,6 +167,11 @@ impl ProviderKind {
                 supports_tool_calls: true,
                 supports_json_output: true,
                 supports_fim: false,
+                supports_responses_api: matches!(self, Self::OpenAiCompatible),
+                supports_structured_outputs: matches!(self, Self::OpenAiCompatible),
+                supports_tracing: matches!(self, Self::OpenAiCompatible),
+                supports_evals: matches!(self, Self::OpenAiCompatible),
+                supports_cache_control: false,
             },
         }
     }
@@ -150,6 +185,84 @@ pub struct ProviderCapabilities {
     pub supports_tool_calls: bool,
     pub supports_json_output: bool,
     pub supports_fim: bool,
+    pub supports_responses_api: bool,
+    pub supports_structured_outputs: bool,
+    pub supports_tracing: bool,
+    pub supports_evals: bool,
+    /// Whether this provider needs explicit `cache_control` markers on the
+    /// request payload to opt in to prompt caching with explicit breakpoints.
+    /// DeepSeek and most OpenAI-compatible providers auto-cache by prefix,
+    /// so this stays `false` for them.
+    pub supports_cache_control: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContextBudget {
+    pub model_window_tokens: Option<u64>,
+    pub model_window_source: &'static str,
+    pub local_budget_tokens: u64,
+    pub effective_budget_tokens: u64,
+    pub auto_compact_threshold_tokens: u64,
+}
+
+impl ContextBudget {
+    #[must_use]
+    pub fn usage_percent(&self, used_tokens: u64) -> f64 {
+        (used_tokens as f64 / self.effective_budget_tokens.max(1) as f64) * 100.0
+    }
+
+    #[must_use]
+    pub fn next_action(&self, used_tokens: u64) -> &'static str {
+        if used_tokens >= self.auto_compact_threshold_tokens {
+            "auto compact should run before the next large turn"
+        } else {
+            "keep collecting context"
+        }
+    }
+}
+
+#[must_use]
+pub fn context_budget_for(
+    provider: ProviderKind,
+    model: &DeepSeekModel,
+    configured_local_budget: usize,
+) -> ContextBudget {
+    let local_budget_tokens = (configured_local_budget as u64).max(1);
+    let model_window_tokens = model_context_window_tokens(provider, model);
+    let effective_budget_tokens = model_window_tokens
+        .map_or(local_budget_tokens, |window| {
+            window.min(local_budget_tokens)
+        })
+        .max(1);
+    let auto_compact_threshold_tokens =
+        ((effective_budget_tokens as f64) * DEFAULT_AUTO_COMPACT_RATIO).round() as u64;
+    ContextBudget {
+        model_window_tokens,
+        model_window_source: model_context_window_source(provider, model),
+        local_budget_tokens,
+        effective_budget_tokens,
+        auto_compact_threshold_tokens: auto_compact_threshold_tokens.max(1),
+    }
+}
+
+#[must_use]
+pub fn model_context_window_tokens(provider: ProviderKind, model: &DeepSeekModel) -> Option<u64> {
+    match (provider, model.canonical()) {
+        (ProviderKind::DeepSeek, DeepSeekModel::Pro | DeepSeekModel::Flash) => {
+            Some(DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS)
+        }
+        _ => None,
+    }
+}
+
+#[must_use]
+pub fn model_context_window_source(provider: ProviderKind, model: &DeepSeekModel) -> &'static str {
+    match (provider, model.canonical()) {
+        (ProviderKind::DeepSeek, DeepSeekModel::Pro | DeepSeekModel::Flash) => {
+            "DeepSeek API model details"
+        }
+        _ => "not declared by provider preset; using local assembly budget",
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -381,6 +494,64 @@ pub enum ModelSelectionError {
     UnknownModel(String),
 }
 
+/// Provider-neutral request wrapper used by new runtime code.
+#[derive(Debug, Clone)]
+pub struct ModelRequest {
+    pub chat: ChatRequest,
+}
+
+/// Provider-neutral non-streaming response wrapper.
+#[derive(Debug, Clone)]
+pub enum ModelResponse {
+    Chat(ChatResponse),
+}
+
+/// Provider-neutral streaming result wrapper.
+#[derive(Debug, Clone)]
+pub enum ModelStream {
+    Accumulated(StreamResult),
+}
+
+/// Runtime-facing model abstraction. Existing code can keep using
+/// `DeepSeekClient` while new providers converge on this interface.
+pub trait ModelClient {
+    fn provider_kind(&self) -> ProviderKind;
+
+    fn send<'a>(
+        &'a self,
+        request: &'a ModelRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<ModelResponse, DeepSeekError>> + Send + 'a>>;
+
+    fn stream<'a>(
+        &'a self,
+        request: &'a ModelRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<ModelStream, DeepSeekError>> + Send + 'a>>;
+}
+
+impl ModelClient for DeepSeekClient {
+    fn provider_kind(&self) -> ProviderKind {
+        ProviderKind::DeepSeek
+    }
+
+    fn send<'a>(
+        &'a self,
+        request: &'a ModelRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<ModelResponse, DeepSeekError>> + Send + 'a>> {
+        Box::pin(async move { self.chat(&request.chat).await.map(ModelResponse::Chat) })
+    }
+
+    fn stream<'a>(
+        &'a self,
+        request: &'a ModelRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<ModelStream, DeepSeekError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.chat_stream_accumulated(&request.chat)
+                .await
+                .map(ModelStream::Accumulated)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,6 +613,29 @@ mod tests {
                 .thinking
                 .supports_thinking
         );
+    }
+
+    #[test]
+    fn context_budget_caps_configured_budget_to_provider_window() {
+        let budget = context_budget_for(ProviderKind::DeepSeek, &DeepSeekModel::Flash, 2_000_000);
+
+        assert_eq!(budget.model_window_tokens, Some(1_000_000));
+        assert_eq!(budget.effective_budget_tokens, 1_000_000);
+        assert_eq!(budget.auto_compact_threshold_tokens, 800_000);
+        assert_eq!(budget.usage_percent(100_000).round() as u64, 10);
+    }
+
+    #[test]
+    fn context_budget_uses_local_budget_for_unknown_provider_window() {
+        let budget = context_budget_for(
+            ProviderKind::OpenAiCompatible,
+            &DeepSeekModel::Flash,
+            32_000,
+        );
+
+        assert_eq!(budget.model_window_tokens, None);
+        assert_eq!(budget.effective_budget_tokens, 32_000);
+        assert_eq!(budget.auto_compact_threshold_tokens, 25_600);
     }
 
     #[test]

@@ -74,7 +74,7 @@ pub async fn resume(
                         }
                         println!();
                         println!("To continue this session, run:");
-                        println!("  octocode chat --session {}", session.id);
+                        println!("  octo chat --session {}", session.id);
                     }
                     Err(e) => {
                         eprintln!("Failed to load session: {e}");
@@ -173,8 +173,8 @@ fn list_and_print(
         );
     }
     println!();
-    println!("Resume: octocode resume <name-or-id-prefix>");
-    println!("Export: octocode export <id>");
+    println!("Resume: octo resume <name-or-id-prefix>");
+    println!("Export: octo export <id>");
 
     Ok(())
 }

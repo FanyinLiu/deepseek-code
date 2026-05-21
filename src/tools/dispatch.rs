@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use crate::policy::sandbox::CommandSandboxConfig;
-use crate::search;
 use crate::storage::config::PolicyConfig;
 use crate::tools;
 
@@ -137,6 +136,74 @@ fn suggest_command_fix(result: &tools::run_command::CommandResult) -> Option<Str
     None
 }
 
+fn update_todos(project_root: &Path, args: &serde_json::Value) -> Result<String, anyhow::Error> {
+    let todos = args
+        .get("todos")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("todos must be an array"))?;
+    let summary = crate::tools::todo_state::write_todo_items(project_root, todos.clone())?;
+    Ok(format!(
+        "Todo list updated: {} item(s), pending {}, in_progress {}, completed {}.",
+        summary.total, summary.pending, summary.in_progress, summary.completed
+    ))
+}
+
+fn ask_user_question_payload(args: &serde_json::Value) -> Result<String, anyhow::Error> {
+    if args.get("questions").is_some() {
+        let parsed: crate::tools::ask_user::AskUserArgs = serde_json::from_value(args.clone())?;
+        return crate::tools::ask_user::ask_user(parsed);
+    }
+    let question = args
+        .get("question")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("question is required"))?;
+    let options = args
+        .get("options")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("options must be an array"))?;
+    if options.len() < 2 {
+        anyhow::bail!("options needs at least 2 options");
+    }
+    let mut lines = vec![
+        "User decision required".to_string(),
+        format!("question  {question}"),
+        format!(
+            "select    {}",
+            if args
+                .get("multi_select")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                "multiple"
+            } else {
+                "one"
+            }
+        ),
+        String::new(),
+    ];
+    for (idx, option) in options.iter().enumerate() {
+        let label = option
+            .get("label")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("option label is required"))?;
+        let description = option
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        lines.push(format!("{}. {}  {}", idx + 1, label, description));
+        if let Some(preview) = option.get("preview").and_then(serde_json::Value::as_str) {
+            if !preview.trim().is_empty() {
+                lines.push(format!("   preview: {}", preview.trim()));
+            }
+        }
+    }
+    lines.push(String::new());
+    lines.push(
+        "(Waiting for the user's reply in the next turn. Do not assume an answer.)".to_string(),
+    );
+    Ok(lines.join("\n"))
+}
+
 /// Execute a single tool call and return `(result_text, is_error)`.
 pub async fn execute_single_tool(
     tc: &crate::deepseek::ToolCall,
@@ -188,10 +255,30 @@ pub async fn execute_single_tool_with_config(
                 Err(e) => (e.to_string(), true),
             }
         }
+        "glob" => {
+            let parsed: Result<crate::tools::glob::GlobArgs, _> = serde_json::from_value(args);
+            match parsed {
+                Ok(parsed) => match crate::tools::glob::glob(project_root, parsed) {
+                    Ok(content) => (content, false),
+                    Err(e) => (e.to_string(), true),
+                },
+                Err(e) => (e.to_string(), true),
+            }
+        }
+        "grep" => {
+            let parsed: Result<crate::tools::grep::GrepArgs, _> = serde_json::from_value(args);
+            match parsed {
+                Ok(parsed) => match crate::tools::grep::grep(project_root, parsed) {
+                    Ok(content) => (content, false),
+                    Err(e) => (e.to_string(), true),
+                },
+                Err(e) => (e.to_string(), true),
+            }
+        }
         "search_files" => {
             let query = args["query"].as_str().unwrap_or("");
             let limit = args["limit"].as_u64().unwrap_or(20) as usize;
-            match search::search_files(project_root, query, limit) {
+            match crate::search::search_files(project_root, query, limit) {
                 Ok(matches) => (
                     matches
                         .iter()
@@ -208,7 +295,7 @@ pub async fn execute_single_tool_with_config(
             let glob = args["glob"].as_str();
             let case_sensitive = args["case_sensitive"].as_bool().unwrap_or(false);
             let limit = args["limit"].as_u64().unwrap_or(30) as usize;
-            match search::search_code(project_root, pattern, glob, case_sensitive, limit) {
+            match crate::search::search_code(project_root, pattern, glob, case_sensitive, limit) {
                 Ok(matches) => (
                     matches
                         .iter()
@@ -227,6 +314,65 @@ pub async fn execute_single_tool_with_config(
                 Err(e) => (e.to_string(), true),
             }
         }
+        "todo_write" => match update_todos(project_root, &args) {
+            Ok(content) => (content, false),
+            Err(e) => (e.to_string(), true),
+        },
+        "task_create" => {
+            let parsed: Result<crate::tools::task_todo::TaskCreateArgs, _> =
+                serde_json::from_value(args);
+            match parsed {
+                Ok(parsed) => match crate::tools::task_todo::task_create(project_root, parsed) {
+                    Ok(content) => (content, false),
+                    Err(e) => (e.to_string(), true),
+                },
+                Err(e) => (e.to_string(), true),
+            }
+        }
+        "task_get" => {
+            let id = args["id"].as_str().unwrap_or("");
+            match crate::tools::task_todo::task_get(project_root, id) {
+                Ok(content) => (content, false),
+                Err(e) => (e.to_string(), true),
+            }
+        }
+        "task_list" => match crate::tools::task_todo::task_list(project_root) {
+            Ok(content) => (content, false),
+            Err(e) => (e.to_string(), true),
+        },
+        "task_update" => {
+            let parsed: Result<crate::tools::task_todo::TaskUpdateArgs, _> =
+                serde_json::from_value(args);
+            match parsed {
+                Ok(parsed) => match crate::tools::task_todo::task_update(project_root, parsed) {
+                    Ok(content) => (content, false),
+                    Err(e) => (e.to_string(), true),
+                },
+                Err(e) => (e.to_string(), true),
+            }
+        }
+        "task_stop" => {
+            let id = args["id"].as_str().unwrap_or("");
+            match crate::tools::task_todo::task_stop(project_root, id) {
+                Ok(content) => (content, false),
+                Err(e) => (e.to_string(), true),
+            }
+        }
+        "ask_user" => {
+            let parsed: Result<crate::tools::ask_user::AskUserArgs, _> =
+                serde_json::from_value(args);
+            match parsed {
+                Ok(parsed) => match crate::tools::ask_user::ask_user(parsed) {
+                    Ok(content) => (content, false),
+                    Err(e) => (e.to_string(), true),
+                },
+                Err(e) => (e.to_string(), true),
+            }
+        }
+        "ask_user_question" => match ask_user_question_payload(&args) {
+            Ok(content) => (content, false),
+            Err(e) => (e.to_string(), true),
+        },
         "git_status" => match tools::git_status(project_root) {
             Ok(content) => (content, false),
             Err(e) => (e.to_string(), true),
@@ -402,5 +548,115 @@ pub async fn execute_single_tool_with_config(
             (format!("💭 Thinking:\n{thought}"), false)
         }
         _ => (format!("unknown tool: {}", tc.function.name), true),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::deepseek::{ToolCall, ToolCallFunction};
+
+    fn call(name: &str, arguments: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: "call-test".into(),
+            call_type: "function".into(),
+            function: ToolCallFunction {
+                name: name.into(),
+                arguments: arguments.to_string(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn todo_write_persists_project_state_and_accepts_active_form() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tool = call(
+            "todo_write",
+            serde_json::json!({
+                "todos": [
+                    {"id":"a","content":"Plan","active_form":"Planning","status":"in_progress"},
+                    {"id":"b","content":"Verify","status":"pending"}
+                ]
+            }),
+        );
+
+        let (output, is_error) = execute_single_tool(&tool, temp.path()).await;
+
+        assert!(!is_error, "{output}");
+        assert!(output.contains("in_progress 1"));
+        assert!(crate::tools::todo_state::todo_state_path(temp.path()).exists());
+    }
+
+    #[tokio::test]
+    async fn todo_write_rejects_two_in_progress_items() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tool = call(
+            "todo_write",
+            serde_json::json!({
+                "todos": [
+                    {"content":"A","status":"in_progress"},
+                    {"content":"B","status":"in_progress"}
+                ]
+            }),
+        );
+
+        let (output, is_error) = execute_single_tool(&tool, temp.path()).await;
+
+        assert!(is_error);
+        assert!(output.contains("at most one"));
+    }
+
+    #[tokio::test]
+    async fn task_tools_share_project_todo_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let create = call(
+            "task_create",
+            serde_json::json!({
+                "id": "p0-4",
+                "content": "Ship task tools",
+                "active_form": "Shipping task tools"
+            }),
+        );
+
+        let (created, create_error) = execute_single_tool(&create, temp.path()).await;
+
+        assert!(!create_error, "{created}");
+        assert!(created.contains("p0-4"));
+        assert!(crate::tools::todo_state::todo_state_path(temp.path()).exists());
+
+        let update = call(
+            "task_update",
+            serde_json::json!({
+                "id": "p0",
+                "status": "in_progress"
+            }),
+        );
+        let (updated, update_error) = execute_single_tool(&update, temp.path()).await;
+
+        assert!(!update_error, "{updated}");
+        assert!(updated.contains("Shipping task tools"));
+
+        let list = call("task_list", serde_json::json!({}));
+        let (listed, list_error) = execute_single_tool(&list, temp.path()).await;
+
+        assert!(!list_error, "{listed}");
+        assert!(listed.contains("Tasks: 1"));
+
+        let stop = call("task_stop", serde_json::json!({"id": "1"}));
+        let (stopped, stop_error) = execute_single_tool(&stop, temp.path()).await;
+
+        assert!(!stop_error, "{stopped}");
+        assert!(stopped.contains("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn task_get_unknown_id_is_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let get = call("task_get", serde_json::json!({"id": "missing"}));
+
+        let (output, is_error) = execute_single_tool(&get, temp.path()).await;
+
+        assert!(is_error);
+        assert!(output.contains("task not found"));
     }
 }

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -5,8 +7,10 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
     Frame,
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::deepseek::{MessageVisibility, ProtocolMessage, Role};
+use crate::deepseek::{MessageVisibility, ProtocolMessage, Role, ToolCall};
+use crate::tui::shared_output::{BlockRole, ASSISTANT_PREFIX, SYSTEM_PREFIX, TOOL_LOG_PREFIX};
 use crate::tui::{
     diff_viewer, motion, plan_tracker, subagent_cards, syntax_highlight, theme, view_blocks,
 };
@@ -36,16 +40,48 @@ pub struct TranscriptProps<'a> {
     pub show_reasoning: bool,
 }
 
-const TRANSCRIPT_RENDER_MARGIN_LINES: usize = 600;
+const TRANSCRIPT_RENDER_MARGIN_LINES: usize = 120;
+const TRANSCRIPT_MAX_WIDTH: u16 = 100;
+
+#[derive(Default)]
+struct ToolRenderState {
+    run_commands: HashMap<String, String>,
+}
+
+impl ToolRenderState {
+    fn from_messages(messages: &[ProtocolMessage]) -> Self {
+        let mut state = Self::default();
+        for message in messages {
+            for tool_call in &message.tool_calls {
+                if tool_call.function.name == "run_command" {
+                    state.run_commands.insert(
+                        tool_call.id.clone(),
+                        view_blocks::summarize_tool_arguments(
+                            &tool_call.function.name,
+                            &tool_call.function.arguments,
+                        ),
+                    );
+                }
+            }
+        }
+        state
+    }
+
+    fn run_command(&self, tool_call_id: &str) -> Option<&str> {
+        self.run_commands.get(tool_call_id).map(String::as_str)
+    }
+}
 
 pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) {
+    let content_width = transcript_content_width(area.width);
     let mut lines: Vec<Line<'static>> = Vec::new();
     let palette = theme::palette();
     let frame = motion::MotionFrame::new(motion::MotionLevel::Subtle, props.global_elapsed_ms);
     let visible_height = area.height as usize;
+    let mut tool_state = ToolRenderState::from_messages(props.messages);
     let messages = transcript_message_window(
         props.messages,
-        area.width,
+        content_width,
         visible_height,
         props.scroll_offset,
     );
@@ -59,7 +95,7 @@ pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) 
         if !lines.is_empty() {
             lines.push(Line::from(""));
         }
-        render_message(&mut lines, msg, area.width);
+        render_message(&mut lines, msg, content_width, &mut tool_state);
     }
 
     if let Some(message) = props
@@ -69,7 +105,7 @@ pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) 
         if !lines.is_empty() {
             lines.push(Line::from(""));
         }
-        lines.extend(user_text_lines(message, area.width));
+        lines.extend(user_text_lines(message, content_width));
     }
 
     // ── Streaming response ──
@@ -83,7 +119,7 @@ pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) 
             render_assistant_content(
                 &mut lines,
                 props.stream_buffer,
-                area.width,
+                content_width,
                 "",
                 palette.text,
             );
@@ -97,7 +133,7 @@ pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) 
         if !lines.is_empty() {
             lines.push(Line::from(""));
         }
-        render_queued_user_messages(&mut lines, props.queued_user_messages, area.width);
+        render_queued_user_messages(&mut lines, props.queued_user_messages, content_width);
     }
 
     // ── Thinking panel (collapsed by default, expanded with T) ──
@@ -145,14 +181,8 @@ pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) 
         render_inline_diffs(&mut lines, props.diffs, props.selected_diff);
     }
 
-    // Chat-style scrollback: offset 0 is pinned to the newest visual lines.
-    let lines = wrap_visual_lines(&lines, area.width);
-    let max_offset = lines.len().saturating_sub(visible_height);
-    let hidden_below = props.scroll_offset.min(max_offset);
-    let end = lines.len().saturating_sub(hidden_below);
-    let start = end.saturating_sub(visible_height);
-    let mut visible: Vec<Line> = Vec::with_capacity(visible_height);
-    visible.extend(lines[start..end].iter().cloned());
+    let lines = wrap_visual_lines(&lines, content_width);
+    let visible = transcript_visible_lines(&lines, visible_height, props.scroll_offset);
 
     let text = Text::from(visible);
     let paragraph = Paragraph::new(text)
@@ -197,9 +227,25 @@ fn estimate_message_visual_lines(message: &ProtocolMessage, width: u16) -> usize
 
     let max_width = (width as usize).max(1);
     let mut lines = estimate_text_visual_lines(&message.content.to_string_lossy(), max_width);
-    lines = lines.saturating_add(message.tool_calls.len().saturating_mul(3));
-    lines = lines.saturating_add(message.tool_results.len().saturating_mul(3));
+    lines = lines.saturating_add(message.tool_calls.iter().map(estimate_tool_lines).sum());
+    lines = lines.saturating_add(message.tool_results.iter().map(estimate_result_lines).sum());
     lines.saturating_add(1)
+}
+
+fn estimate_tool_lines(tool_call: &ToolCall) -> usize {
+    if tool_call.function.name == "run_command" {
+        4
+    } else {
+        3
+    }
+}
+
+fn estimate_result_lines(result: &crate::deepseek::ToolResultRecord) -> usize {
+    if result.name == "run_command" {
+        5
+    } else {
+        3
+    }
 }
 
 fn estimate_text_visual_lines(text: &str, max_width: usize) -> usize {
@@ -265,7 +311,28 @@ fn wrap_visual_lines(lines: &[Line<'static>], width: u16) -> Vec<Line<'static>> 
     out
 }
 
-fn render_message(lines: &mut Vec<Line<'static>>, msg: &ProtocolMessage, width: u16) {
+fn transcript_visible_lines(
+    lines: &[Line<'static>],
+    visible_height: usize,
+    scroll_offset: usize,
+) -> Vec<Line<'static>> {
+    if visible_height == 0 {
+        return Vec::new();
+    }
+
+    let max_offset = lines.len().saturating_sub(visible_height);
+    let hidden_below = scroll_offset.min(max_offset);
+    let end = lines.len().saturating_sub(hidden_below);
+    let start = end.saturating_sub(visible_height);
+    lines[start..end].to_vec()
+}
+
+fn render_message(
+    lines: &mut Vec<Line<'static>>,
+    msg: &ProtocolMessage,
+    width: u16,
+    tool_state: &mut ToolRenderState,
+) {
     let palette = theme::palette();
     if msg.role == Role::User {
         render_user_message(lines, msg, width);
@@ -274,13 +341,24 @@ fn render_message(lines: &mut Vec<Line<'static>>, msg: &ProtocolMessage, width: 
 
     let (prefix, fg) = match msg.role {
         Role::User => unreachable!("user messages are rendered above"),
-        Role::Assistant => ("● ", palette.text),
-        Role::System => ("! ", palette.dim),
-        Role::Tool => ("$ ", palette.accent),
+        Role::Assistant => (ASSISTANT_PREFIX, palette.text),
+        Role::System => (SYSTEM_PREFIX, palette.dim),
+        Role::Tool => (BlockRole::Tool.line_prefix(), palette.accent),
     };
 
     if msg.role == Role::Tool && !msg.tool_results.is_empty() {
         for result in &msg.tool_results {
+            if result.name == "run_command" {
+                let command = tool_state.run_command(&result.tool_call_id).unwrap_or("");
+                let status = if result.is_error {
+                    view_blocks::ViewStatus::Failed
+                } else {
+                    view_blocks::ViewStatus::Done
+                };
+                let rendered = render_run_command_lines(command, &result.result, status, width);
+                lines.extend(tool_log_lines_from_lines(rendered));
+                continue;
+            }
             let kind = view_blocks::classify_tool(&result.name);
             let view = view_blocks::ToolCallView {
                 name: result.name.clone(),
@@ -292,7 +370,7 @@ fn render_message(lines: &mut Vec<Line<'static>>, msg: &ProtocolMessage, width: 
                 intent: format!("{kind} result"),
                 detail: view_blocks::summarize_tool_result(&result.result),
             };
-            lines.extend(view_blocks::render_tool_card_lines(&view, width as usize));
+            lines.extend(tool_log_lines(&view, width));
         }
         return;
     }
@@ -302,6 +380,19 @@ fn render_message(lines: &mut Vec<Line<'static>>, msg: &ProtocolMessage, width: 
 
     if !msg.tool_calls.is_empty() {
         for tc in &msg.tool_calls {
+            if tc.function.name == "run_command" {
+                let command = view_blocks::summarize_tool_arguments(
+                    &tc.function.name,
+                    &tc.function.arguments,
+                );
+                tool_state
+                    .run_commands
+                    .insert(tc.id.clone(), command.clone());
+                let rendered =
+                    render_run_command_lines(&command, "", view_blocks::ViewStatus::Running, width);
+                lines.extend(tool_log_lines_from_lines(rendered));
+                continue;
+            }
             let kind = view_blocks::classify_tool(&tc.function.name);
             let detail =
                 view_blocks::summarize_tool_arguments(&tc.function.name, &tc.function.arguments);
@@ -324,6 +415,11 @@ fn render_assistant_content(
     fg: Color,
 ) {
     let palette = theme::palette();
+    let prefix_fg = if prefix == ASSISTANT_PREFIX {
+        palette.assistant
+    } else {
+        fg
+    };
     let visible_content = sanitize_transcript_visible_text(content);
     let blocks = syntax_highlight::parse_markdown(&visible_content);
     let mut first_line = true;
@@ -364,7 +460,7 @@ fn render_assistant_content(
                         line_index += 1;
                         continue;
                     }
-                    let mut spans = vec![Span::styled(p, transcript_style(fg))];
+                    let mut spans = vec![Span::styled(p, transcript_style(prefix_fg))];
                     spans.extend(inline_spans(&sanitized_line, fg));
                     lines.push(Line::from(spans));
                     first_line = false;
@@ -379,7 +475,7 @@ fn render_assistant_content(
                     _ => palette.secondary,
                 };
                 lines.push(Line::from(vec![
-                    Span::styled(p, transcript_style(fg)),
+                    Span::styled(p, transcript_style(prefix_fg)),
                     Span::styled(text, transcript_style(color).add_modifier(Modifier::BOLD)),
                 ]));
                 first_line = false;
@@ -387,7 +483,7 @@ fn render_assistant_content(
             syntax_highlight::MarkdownBlock::BlockQuote(text) => {
                 let p = if first_line { prefix } else { "" }.to_string();
                 let mut spans = vec![
-                    Span::styled(p, transcript_style(fg)),
+                    Span::styled(p, transcript_style(prefix_fg)),
                     Span::styled("│ ", transcript_style(palette.dim)),
                 ];
                 spans.extend(inline_spans(&text, palette.secondary));
@@ -400,7 +496,7 @@ fn render_assistant_content(
                 indent,
             } => {
                 let p = if first_line { prefix } else { "" };
-                render_markdown_list_item(lines, p, &marker, &text, indent, fg);
+                render_markdown_list_item(lines, p, &marker, &text, indent, fg, prefix_fg);
                 first_line = false;
             }
             syntax_highlight::MarkdownBlock::CodeBlock { language: _, code } => {
@@ -434,6 +530,7 @@ fn render_markdown_list_item(
     text: &str,
     indent: usize,
     fg: Color,
+    prefix_fg: Color,
 ) {
     let p = theme::palette();
     let (task_marker, text) =
@@ -452,7 +549,10 @@ fn render_markdown_list_item(
     } else {
         p.warning
     };
-    let mut spans = vec![Span::styled(prefix.to_string(), transcript_style(fg))];
+    let mut spans = vec![Span::styled(
+        prefix.to_string(),
+        transcript_style(prefix_fg),
+    )];
     spans.push(Span::styled(
         " ".repeat(indent.min(8)),
         transcript_style(p.dim),
@@ -869,7 +969,6 @@ fn render_thinking_panel(
     };
 
     lines.push(Line::from(vec![
-        Span::styled("◌ ", transcript_style(p.accent)),
         Span::styled(
             "Thinking",
             transcript_style(p.text).add_modifier(Modifier::BOLD),
@@ -895,20 +994,338 @@ fn render_thinking_panel(
 
 fn streaming_status_line(frame: motion::MotionFrame) -> Line<'static> {
     let p = theme::palette();
+    Line::from(vec![Span::styled(
+        format!("Thinking{}", frame.dots()),
+        Style::default().fg(p.dim).bg(p.canvas),
+    )])
+}
+
+#[derive(Debug, Clone)]
+struct CommandProgressLine {
+    percent: Option<u8>,
+    suffix: String,
+    raw: String,
+}
+
+fn render_run_command_lines(
+    command: &str,
+    output: &str,
+    status: view_blocks::ViewStatus,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let p = theme::palette();
+    let max_width = (width as usize).max(1);
+    let command = if command.trim().is_empty() {
+        "run_command"
+    } else {
+        command.trim()
+    };
+    let command = truncate_display_width(command, max_width.saturating_sub(8).max(12));
+    let mut lines = vec![Line::from({
+        let mut spans = vec![Span::styled(
+            "Execute ",
+            transcript_style(p.secondary).add_modifier(Modifier::BOLD),
+        )];
+        spans.extend(command_inline_spans(&command));
+        spans
+    })];
+
+    if status == view_blocks::ViewStatus::Running {
+        lines.push(command_detail_line("command is running", p.dim));
+        lines.push(Line::from(vec![
+            Span::styled("  ", transcript_style(p.text)),
+            Span::styled(
+                "Executing...",
+                transcript_style(p.warning).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  (Press Esc to stop)", transcript_style(p.dim)),
+        ]));
+        return lines;
+    }
+
+    let progress_lines = command_progress_lines(output);
+    if progress_lines.is_empty() {
+        for preview in command_output_preview(output).into_iter().take(2) {
+            lines.push(command_detail_line(&preview, p.dim));
+        }
+    } else {
+        for progress in progress_lines {
+            lines.push(command_progress_line(&progress, status, max_width));
+        }
+    }
+
+    lines.push(command_status_line(output, status));
+    lines
+}
+
+fn command_inline_spans(command: &str) -> Vec<Span<'static>> {
+    let p = theme::palette();
+    let language = if command.contains("$env:")
+        || command.contains("Write-Host")
+        || command.contains("Invoke-")
+        || command.contains("Test-Path")
+    {
+        Some("powershell")
+    } else {
+        Some("bash")
+    };
+    let highlighted = syntax_highlight::highlight_code_block(command, language);
+    let Some(first_line) = highlighted.into_iter().next() else {
+        return inline_spans(command, p.text);
+    };
+    first_line
+        .into_iter()
+        .map(|span| {
+            let mut style = span.style.bg(p.canvas);
+            if style.fg.is_none() {
+                style = style.fg(p.text);
+            }
+            Span::styled(span.content, style)
+        })
+        .collect()
+}
+
+fn command_detail_line(value: &str, color: Color) -> Line<'static> {
+    let p = theme::palette();
+    let mut spans = vec![Span::styled("  ↳ ", transcript_style(p.divider))];
+    spans.extend(inline_spans(value, color));
+    Line::from(spans)
+}
+
+fn command_progress_line(
+    progress: &CommandProgressLine,
+    status: view_blocks::ViewStatus,
+    max_width: usize,
+) -> Line<'static> {
+    let p = theme::palette();
+    let Some(percent) = progress.percent else {
+        return command_detail_line(
+            &truncate_display_width(&progress.raw, max_width.saturating_sub(4)),
+            p.dim,
+        );
+    };
+    if max_width < 24 {
+        return command_detail_line(
+            &truncate_display_width(
+                &format!("{percent}% · {}", progress.suffix),
+                max_width.saturating_sub(4),
+            ),
+            p.dim,
+        );
+    }
+
+    let percent_text = format!("{percent}%");
+    let bar_width = ((max_width as f64 * 0.42) as usize).clamp(8, 34);
+    let filled = ((percent as usize * bar_width) + 50) / 100;
+    let empty = bar_width.saturating_sub(filled);
+    let suffix = truncate_display_width(
+        &progress.suffix,
+        max_width.saturating_sub(bar_width + percent_text.len() + 11),
+    );
+    let bar_color = if status == view_blocks::ViewStatus::Done {
+        p.success
+    } else if status == view_blocks::ViewStatus::Failed {
+        p.danger
+    } else {
+        p.accent
+    };
     Line::from(vec![
+        Span::styled("  │ ", transcript_style(p.divider)),
+        Span::styled("█".repeat(filled), transcript_style(bar_color)),
+        Span::styled("░".repeat(empty), transcript_style(p.muted)),
         Span::styled(
-            format!("{} ", frame.running_icon()),
-            Style::default().fg(p.accent).bg(p.canvas),
+            format!(" {percent_text}"),
+            transcript_style(bar_color).add_modifier(Modifier::BOLD),
         ),
+        Span::styled(" ", transcript_style(p.text)),
+        Span::styled(suffix, transcript_style(p.dim)),
+    ])
+}
+
+fn command_status_line(output: &str, status: view_blocks::ViewStatus) -> Line<'static> {
+    let p = theme::palette();
+    let mut parts = vec![match status {
+        view_blocks::ViewStatus::Done => "done".to_string(),
+        view_blocks::ViewStatus::Failed => "failed".to_string(),
+        view_blocks::ViewStatus::Denied => "denied".to_string(),
+        view_blocks::ViewStatus::Cancelled => "cancelled".to_string(),
+        view_blocks::ViewStatus::Queued => "queued".to_string(),
+        view_blocks::ViewStatus::Running => "running".to_string(),
+    }];
+    if let Some(exit_code) = command_exit_code(output) {
+        parts.push(format!("exit {exit_code}"));
+    }
+    if let Some(duration_ms) = command_duration_ms(output) {
+        parts.push(plan_tracker::format_duration_compact(duration_ms));
+    }
+    let color = status.color();
+    Line::from(vec![
+        Span::styled("  └ ", transcript_style(p.divider)),
         Span::styled(
-            format!("Thinking{}", frame.dots()),
-            Style::default().fg(p.dim).bg(p.canvas),
+            parts.join(" · "),
+            transcript_style(color).add_modifier(Modifier::BOLD),
         ),
     ])
 }
 
+fn command_progress_lines(output: &str) -> Vec<CommandProgressLine> {
+    let mut items = Vec::new();
+    for line in command_output_lines(output) {
+        if !looks_like_progress_line(&line) {
+            continue;
+        }
+        let percent = progress_percent(&line);
+        let suffix = percent
+            .and_then(|value| progress_suffix(&line, value))
+            .unwrap_or_else(|| truncate_display_width(&line, 80));
+        items.push(CommandProgressLine {
+            percent,
+            suffix,
+            raw: line,
+        });
+    }
+    let keep_from = items.len().saturating_sub(2);
+    items.into_iter().skip(keep_from).collect()
+}
+
+fn looks_like_progress_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    let has_percent = progress_percent(line).is_some();
+    let has_size = [" mib", " mb", " gib", " gb", " kib", " kb", " of "]
+        .iter()
+        .any(|needle| lower.contains(needle));
+    let has_progress_word = lower.contains("download")
+        || lower.contains("fetch")
+        || lower.contains("install")
+        || lower.contains("extract");
+    (has_percent && (has_size || has_progress_word || has_progress_bar(line)))
+        || (has_progress_bar(line) && has_size)
+}
+
+fn has_progress_bar(line: &str) -> bool {
+    line.chars()
+        .filter(|ch| matches!(ch, '█' | '▓' | '▒' | '░' | '■' | '#' | '='))
+        .count()
+        >= 4
+}
+
+fn progress_percent(line: &str) -> Option<u8> {
+    let percent_index = line.find('%')?;
+    let before_percent = &line[..percent_index];
+    let digits_reversed = before_percent
+        .chars()
+        .rev()
+        .skip_while(|ch| ch.is_whitespace())
+        .take_while(char::is_ascii_digit)
+        .collect::<String>();
+    if digits_reversed.is_empty() {
+        return None;
+    }
+    let digits = digits_reversed.chars().rev().collect::<String>();
+    let value = digits.parse::<u16>().ok()?;
+    (value <= 100).then_some(value as u8)
+}
+
+fn progress_suffix(line: &str, percent: u8) -> Option<String> {
+    let marker = format!("{percent}%");
+    let start = line.find(&marker)? + marker.len();
+    let suffix = line[start..].trim().trim_matches('|').trim().to_string();
+    if suffix.is_empty() {
+        None
+    } else {
+        Some(suffix)
+    }
+}
+
+fn command_output_preview(output: &str) -> Vec<String> {
+    command_output_lines(output)
+        .into_iter()
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            !matches!(lower.as_str(), "stdout:" | "stderr:")
+                && !lower.starts_with("exit_code:")
+                && !looks_like_progress_line(line)
+        })
+        .take(2)
+        .map(|line| truncate_display_width(&line, 120))
+        .collect()
+}
+
+fn command_exit_code(output: &str) -> Option<i32> {
+    command_output_lines(output).into_iter().find_map(|line| {
+        let rest = line.strip_prefix("exit_code:")?.trim();
+        let code = rest.split('|').next()?.trim();
+        code.parse::<i32>().ok()
+    })
+}
+
+fn command_duration_ms(output: &str) -> Option<u64> {
+    command_output_lines(output).into_iter().find_map(|line| {
+        let (_, rest) = line.split_once("duration:")?;
+        let digits = rest
+            .trim()
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>();
+        digits.parse::<u64>().ok()
+    })
+}
+
+fn command_output_lines(output: &str) -> Vec<String> {
+    output
+        .split(['\n', '\r'])
+        .map(strip_ansi_codes)
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+fn strip_ansi_codes(value: &str) -> String {
+    let mut out = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.peek().is_some_and(|next| *next == '[') {
+            let _ = chars.next();
+            for seq in chars.by_ref() {
+                if seq.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
 fn render_connected_tool_lines(view: &view_blocks::ToolCallView, width: u16) -> Vec<Line<'static>> {
-    view_blocks::render_tool_card_lines(view, width.saturating_sub(4) as usize)
+    tool_log_lines_with_prefix(view, width)
+}
+
+fn tool_log_lines(view: &view_blocks::ToolCallView, width: u16) -> Vec<Line<'static>> {
+    tool_log_lines_with_prefix(view, width)
+}
+
+fn tool_log_lines_with_prefix(view: &view_blocks::ToolCallView, width: u16) -> Vec<Line<'static>> {
+    let max_width = width.saturating_sub(4).max(1) as usize;
+    let base = view_blocks::render_tool_card_lines(view, max_width);
+    base.into_iter().map(tool_log_prefix).collect()
+}
+
+fn tool_log_lines_from_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    lines.into_iter().map(tool_log_prefix).collect()
+}
+
+fn tool_log_prefix(line: Line<'static>) -> Line<'static> {
+    let p = theme::palette();
+    let mut spans = Vec::with_capacity(line.spans.len() + 1);
+    spans.push(Span::styled(TOOL_LOG_PREFIX, transcript_style(p.dim)));
+    spans.extend(line.spans);
+    Line::from(spans)
+}
+
+fn transcript_content_width(area_width: u16) -> u16 {
+    area_width.saturating_sub(2).clamp(1, TRANSCRIPT_MAX_WIDTH)
 }
 
 fn should_hide_transcript_line(line: &str) -> bool {
@@ -1790,34 +2207,11 @@ fn truncate_display_width(value: &str, max_width: usize) -> String {
 }
 
 fn display_width(value: &str) -> usize {
-    value.chars().map(char_display_width).sum()
+    UnicodeWidthStr::width(value)
 }
 
 fn char_display_width(ch: char) -> usize {
-    let code = ch as u32;
-    if ch.is_control() {
-        return 0;
-    }
-    if ch.is_ascii() {
-        return 1;
-    }
-    if matches!(
-        code,
-        0x1100..=0x115F
-            | 0x2329..=0x232A
-            | 0x2E80..=0xA4CF
-            | 0xAC00..=0xD7A3
-            | 0xF900..=0xFAFF
-            | 0xFE10..=0xFE19
-            | 0xFE30..=0xFE6F
-            | 0xFF00..=0xFF60
-            | 0xFFE0..=0xFFE6
-            | 0x1F300..=0x1FAFF
-    ) {
-        2
-    } else {
-        1
-    }
+    UnicodeWidthChar::width(ch).unwrap_or(0)
 }
 
 fn format_duration(ms: u64) -> String {
@@ -2046,6 +2440,28 @@ mod tests {
     }
 
     #[test]
+    fn transcript_content_width_caps_at_100_with_side_gutter() {
+        assert_eq!(transcript_content_width(1), 1);
+        assert_eq!(transcript_content_width(80), 78);
+        assert_eq!(transcript_content_width(180), 100);
+    }
+
+    #[test]
+    fn transcript_visible_lines_clip_to_viewport_from_bottom() {
+        let lines = (1..=6)
+            .map(|index| Line::from(format!("line {index}")))
+            .collect::<Vec<_>>();
+
+        let newest = transcript_visible_lines(&lines, 3, 0);
+        assert_eq!(newest[0].spans[0].content.as_ref(), "line 4");
+        assert_eq!(newest[2].spans[0].content.as_ref(), "line 6");
+
+        let older = transcript_visible_lines(&lines, 3, 2);
+        assert_eq!(older[0].spans[0].content.as_ref(), "line 2");
+        assert_eq!(older[2].spans[0].content.as_ref(), "line 4");
+    }
+
+    #[test]
     fn light_theme_transcript_uses_dark_readable_ink_for_chinese_text() {
         theme::set_active_theme(theme::ThemeMode::Light);
         let mut terminal = Terminal::new(TestBackend::new(80, 4)).expect("terminal");
@@ -2082,7 +2498,9 @@ mod tests {
             })
             .expect("draw");
 
-        let cell = terminal.backend().buffer().cell((0, 0)).expect("cell");
+        // Skip the leading "● " prefix; verify the
+        // Chinese body text itself uses the readable ink colour.
+        let cell = terminal.backend().buffer().cell((2, 0)).expect("cell");
         assert_eq!(cell.fg, theme::LIGHT_PALETTE.text);
         assert_eq!(cell.bg, theme::LIGHT_PALETTE.canvas);
         theme::set_active_theme(theme::ThemeMode::Light);
@@ -2222,6 +2640,46 @@ mod tests {
         assert!(rendered.contains("running"));
         assert!(rendered.contains("tool read_file"));
         assert!(rendered.contains("└ src/tui/status_bar.rs"));
+        theme::set_active_theme(theme::ThemeMode::Light);
+    }
+
+    #[test]
+    fn running_run_command_uses_execute_download_card() {
+        theme::set_active_theme(theme::ThemeMode::Light);
+        let msg = assistant_tool_call(
+            "run_command",
+            r#"{"command":"npx playwright install chromium"}"#,
+        );
+
+        let rendered = render_text(&[msg], 0, 5);
+
+        assert!(rendered.contains("Execute"));
+        assert!(rendered.contains("npx playwright install chromium"));
+        assert!(rendered.contains("Executing"));
+        assert!(!rendered.contains("tool run_command"));
+        theme::set_active_theme(theme::ThemeMode::Light);
+    }
+
+    #[test]
+    fn run_command_result_extracts_recent_download_progress() {
+        theme::set_active_theme(theme::ThemeMode::Light);
+        let call = assistant_tool_call(
+            "run_command",
+            r#"{"command":"npx playwright install chromium"}"#,
+        );
+        let result = tool_message(
+            "run_command",
+            "stdout:\n|████████░░░░░░░░░░░░| 10% of 181.9 MiB\r|████████████████░░░░| 20% of 181.9 MiB\nexit_code: 0 | duration: 1200ms",
+        );
+
+        let rendered = render_text(&[call, result], 0, 8);
+
+        assert!(rendered.contains("Execute"));
+        assert!(rendered.contains("npx playwright install chromium"));
+        assert!(rendered.contains("20%"));
+        assert!(rendered.contains("181.9 MiB"));
+        assert!(rendered.contains("done"));
+        assert!(!rendered.contains("tool run_command"));
         theme::set_active_theme(theme::ThemeMode::Light);
     }
 

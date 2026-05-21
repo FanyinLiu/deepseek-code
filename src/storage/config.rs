@@ -221,6 +221,10 @@ struct PartialHooksConfig {
     session_start: Option<Vec<String>>,
     session_end: Option<Vec<String>>,
     stop: Option<Vec<String>>,
+    turn_stop: Option<Vec<String>>,
+    subagent_stop: Option<Vec<String>>,
+    pre_compact: Option<Vec<String>>,
+    notification: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -320,8 +324,23 @@ pub struct HooksConfig {
     pub session_start: Vec<String>,
     #[serde(default)]
     pub session_end: Vec<String>,
+    /// Legacy alias merged into `session_end` for backward compatibility.
     #[serde(default)]
     pub stop: Vec<String>,
+    /// Fires when a turn is interrupted by user cancel / abort, distinct from
+    /// session end. Kept separate from `stop` to avoid breaking legacy configs.
+    #[serde(default)]
+    pub turn_stop: Vec<String>,
+    /// Fires after each subagent task completes (success or failure).
+    #[serde(default)]
+    pub subagent_stop: Vec<String>,
+    /// Fires right before context compaction runs.
+    #[serde(default)]
+    pub pre_compact: Vec<String>,
+    /// Fires on noteworthy async events (plan proposed, approval required,
+    /// errors). Use to bridge octocode events to OS notifications.
+    #[serde(default)]
+    pub notification: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -669,6 +688,7 @@ impl Config {
             "default",
             self.provider.default.as_str().to_string(),
         );
+        set_toml_string(&mut value, "ui", "language", self.ui.language.clone());
         set_toml_string(&mut value, "ui", "theme", self.ui.theme.clone());
         set_toml_bool(
             &mut value,
@@ -1096,6 +1116,10 @@ impl HooksConfig {
             session_start: patch.session_start.unwrap_or(self.session_start),
             session_end: patch.session_end.unwrap_or(self.session_end),
             stop: patch.stop.unwrap_or(self.stop),
+            turn_stop: patch.turn_stop.unwrap_or(self.turn_stop),
+            subagent_stop: patch.subagent_stop.unwrap_or(self.subagent_stop),
+            pre_compact: patch.pre_compact.unwrap_or(self.pre_compact),
+            notification: patch.notification.unwrap_or(self.notification),
         }
     }
 }
@@ -1344,6 +1368,7 @@ default = "deepseek"
             ..Config::default()
         };
         config.provider.default = ProviderKind::OpenRouter;
+        config.ui.language = "en-US".to_string();
         config.ui.theme = "dark".to_string();
         config.policy.require_approval_for_command = false;
         config.mcp.enabled = true;
@@ -1358,6 +1383,7 @@ default = "deepseek"
         assert!(content.contains("[provider]"));
         assert!(content.contains("default = \"openrouter\""));
         assert!(content.contains("[ui]"));
+        assert!(content.contains("language = \"en-US\""));
         assert!(content.contains("theme = \"dark\""));
         assert!(content.contains("[mcp]"));
         assert!(content.contains("enabled = true"));
@@ -1577,6 +1603,10 @@ model = "deepseek-v4-pro"
                 session_start: Vec::new(),
                 session_end: Vec::new(),
                 stop: Vec::new(),
+                turn_stop: Vec::new(),
+                subagent_stop: Vec::new(),
+                pre_compact: Vec::new(),
+                notification: Vec::new(),
             },
             ..Config::default()
         };

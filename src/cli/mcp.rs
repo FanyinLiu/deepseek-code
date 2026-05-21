@@ -556,9 +556,14 @@ fn local_config_path(root: &Path) -> PathBuf {
 
 fn read_toml_value(path: &Path) -> Result<toml::Value, anyhow::Error> {
     if path.exists() {
-        Ok(std::fs::read_to_string(path)?
-            .parse::<toml::Value>()
-            .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new())))
+        let text = std::fs::read_to_string(path)?;
+        text.parse::<toml::Value>().map_err(|e| {
+            anyhow::anyhow!(
+                "mcp config file {} is corrupted: {}. Refusing to overwrite; fix or remove it first.",
+                path.display(),
+                e
+            )
+        })
     } else {
         Ok(toml::Value::Table(toml::map::Map::new()))
     }

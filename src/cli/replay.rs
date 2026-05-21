@@ -45,6 +45,29 @@ pub fn session_line(event: &SessionEvent) -> ReplayLine {
                 "tool finished: {name} success={success} {}",
                 one_line(summary)
             ),
+            SessionEventKind::UserQuestionRequested {
+                title,
+                options,
+                summary,
+                ..
+            } => format!(
+                "question requested: {} ({} options) {}",
+                one_line(title),
+                options.len(),
+                one_line(summary)
+            ),
+            SessionEventKind::ContextCompacted {
+                before_tokens,
+                after_tokens,
+                before_messages,
+                after_messages,
+                reason,
+                summary,
+                ..
+            } => format!(
+                "context compacted {reason}: tokens {before_tokens}->{after_tokens} messages {before_messages}->{after_messages} {}",
+                one_line(summary)
+            ),
             SessionEventKind::HookExecuted {
                 event,
                 success,

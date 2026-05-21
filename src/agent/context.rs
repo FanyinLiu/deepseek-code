@@ -195,6 +195,28 @@ impl ContextAssembler {
                         truncate_context_line(summary, 140)
                     ));
                 }
+                SessionEventKind::UserQuestionRequested {
+                    title,
+                    options,
+                    summary,
+                    ..
+                } => {
+                    lines.push(format!(
+                        "- user question pending: {} ({} options): {}",
+                        truncate_context_line(title, 120),
+                        options.len(),
+                        truncate_context_line(summary, 120)
+                    ));
+                }
+                SessionEventKind::ContextCompacted {
+                    summary, reason, ..
+                } => {
+                    let compact_summary = summary.lines().take(8).collect::<Vec<_>>().join(" ");
+                    lines.push(format!(
+                        "- compact {reason}: {}",
+                        truncate_context_line(&compact_summary, 220)
+                    ));
+                }
                 SessionEventKind::AssistantVisible { .. }
                 | SessionEventKind::AssistantInternal { .. }
                 | SessionEventKind::ReasoningInternal { .. }
@@ -547,5 +569,39 @@ mod tests {
 
         assert!(text.contains("Recent tool summary"));
         assert!(text.contains("short useful summary"));
+    }
+
+    #[test]
+    fn compact_event_is_injected_as_recoverable_context() {
+        let session = session_with_messages(Vec::new());
+        let event = SessionEvent::new(
+            session.id,
+            None,
+            SessionEventKind::ContextCompacted {
+                before_tokens: 10_000,
+                after_tokens: 1_500,
+                before_messages: 50,
+                after_messages: 12,
+                retained_start: 38,
+                retained_count: 12,
+                summary: "[Context compact summary]\nreason: manual /compact\nrecent user goals:\n- 修复 CLI".into(),
+                reason: "manual /compact".into(),
+            },
+        );
+
+        let messages =
+            ContextAssembler::default().transient_chat_messages(&session, Some(&[event]));
+        let text = messages
+            .first()
+            .and_then(|message| message.content.as_ref())
+            .map(|content| match content {
+                ChatMessageContent::Text(text) => text.as_str(),
+                ChatMessageContent::Parts(_) => "",
+            })
+            .unwrap_or_default();
+
+        assert!(text.contains("Recoverable event summary"));
+        assert!(text.contains("compact manual /compact"));
+        assert!(text.contains("修复 CLI"));
     }
 }

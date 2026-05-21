@@ -71,8 +71,8 @@ pub struct FeatureMatrix {
 #[derive(Debug, Clone, Serialize)]
 pub struct FeatureMatrixRow {
     pub capability: String,
-    pub claude: String,
-    pub codex: String,
+    pub peer_tool: String,
+    pub peer_b: String,
     pub kimi: String,
     pub qwen: String,
     pub gemini: String,
@@ -238,7 +238,7 @@ pub fn recommend_payload(task: &str) -> FeatureRecommendation {
             task: task.to_string(),
             recommended_mode: RecommendedMode::MissionDryRun,
             suggested_agent: Some("planner".to_string()),
-            reason: "large or risky edit work should start with the executable dry-run path: octocode mission new \"<task>\" --dry-run".to_string(),
+            reason: "large or risky edit work should start with the executable dry-run path: octo mission new \"<task>\" --dry-run".to_string(),
         };
     }
 
@@ -247,7 +247,7 @@ pub fn recommend_payload(task: &str) -> FeatureRecommendation {
             task: task.to_string(),
             recommended_mode: RecommendedMode::AgentRun,
             suggested_agent: Some("code-reviewer".to_string()),
-            reason: "multi-file review should use the executable agent path: octocode agent run code-reviewer \"<task>\"".to_string(),
+            reason: "multi-file review should use the executable agent path: octo agent run code-reviewer \"<task>\"".to_string(),
         };
     }
 
@@ -262,7 +262,7 @@ pub fn recommend_payload(task: &str) -> FeatureRecommendation {
             recommended_mode: RecommendedMode::AgentRun,
             suggested_agent: Some(suggested_agent.clone()),
             reason: format!(
-                "review and audit tasks are executable read-only agent work: octocode agent run {suggested_agent} \"<task>\""
+                "review and audit tasks are executable read-only agent work: octo agent run {suggested_agent} \"<task>\""
             ),
         };
     }
@@ -272,7 +272,7 @@ pub fn recommend_payload(task: &str) -> FeatureRecommendation {
             task: task.to_string(),
             recommended_mode: RecommendedMode::AgentRun,
             suggested_agent: Some("code-explorer".to_string()),
-            reason: "explanation tasks use the executable explorer path: octocode agent run code-explorer \"<task>\"".to_string(),
+            reason: "explanation tasks use the executable explorer path: octo agent run code-explorer \"<task>\"".to_string(),
         };
     }
 
@@ -298,7 +298,10 @@ fn parse_matrix_rows(content: &str) -> Vec<FeatureMatrixRow> {
     let mut in_matrix = false;
 
     for line in content.lines() {
-        if line.starts_with("| Capability | Claude | Codex |") {
+        if line.starts_with("| Capability |")
+            && line.contains('|')
+            && line.matches('|').count() >= 8
+        {
             in_matrix = true;
             continue;
         }
@@ -322,8 +325,8 @@ fn parse_matrix_rows(content: &str) -> Vec<FeatureMatrixRow> {
         }
         rows.push(FeatureMatrixRow {
             capability: columns[0].clone(),
-            claude: columns[1].clone(),
-            codex: columns[2].clone(),
+            peer_tool: columns[1].clone(),
+            peer_b: columns[2].clone(),
             kimi: columns[3].clone(),
             qwen: columns[4].clone(),
             gemini: columns[5].clone(),
@@ -511,14 +514,14 @@ mod tests {
         let review = recommend_payload("review src/agent/orchestrator.rs src/agent/swarm.rs");
         assert_eq!(review.recommended_mode, RecommendedMode::AgentRun);
         assert_eq!(review.suggested_agent.as_deref(), Some("code-reviewer"));
-        assert!(review.reason.contains("octocode agent run code-reviewer"));
+        assert!(review.reason.contains("octo agent run code-reviewer"));
 
         let wording = recommend_payload("modify README wording");
         assert_eq!(wording.recommended_mode, RecommendedMode::Direct);
 
         let refactor = recommend_payload("refactor agent runtime and add tests");
         assert_eq!(refactor.recommended_mode, RecommendedMode::MissionDryRun);
-        assert!(refactor.reason.contains("octocode mission new"));
+        assert!(refactor.reason.contains("octo mission new"));
     }
 
     #[test]
@@ -531,12 +534,12 @@ mod tests {
         );
         assert!(english_review
             .reason
-            .contains("octocode agent run code-reviewer"));
+            .contains("octo agent run code-reviewer"));
 
         let chinese_fix = recommend_payload("多文件修复 src/agent 和 src/cli 的状态问题");
         assert_eq!(chinese_fix.recommended_mode, RecommendedMode::MissionDryRun);
         assert_eq!(chinese_fix.suggested_agent.as_deref(), Some("planner"));
-        assert!(chinese_fix.reason.contains("octocode mission new"));
+        assert!(chinese_fix.reason.contains("octo mission new"));
 
         let chinese_review = recommend_payload("审核多个文件的权限逻辑");
         assert_eq!(chinese_review.recommended_mode, RecommendedMode::AgentRun);
@@ -546,6 +549,6 @@ mod tests {
         );
         assert!(chinese_review
             .reason
-            .contains("octocode agent run code-reviewer"));
+            .contains("octo agent run code-reviewer"));
     }
 }

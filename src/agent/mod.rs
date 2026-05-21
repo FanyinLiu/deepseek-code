@@ -1,6 +1,7 @@
 pub mod background;
 pub mod bus;
 pub mod checkpoints;
+pub mod compact;
 pub mod context;
 pub mod decomposer;
 pub mod event_sink;

@@ -11,7 +11,13 @@ use crate::storage;
 
 pub async fn models(json: bool, project_root: Option<PathBuf>) -> Result<(), anyhow::Error> {
     let root = resolve_project_root(project_root, "models")?;
-    let config = storage::Config::load(Some(&root)).unwrap_or_default();
+    let config = match storage::Config::load(Some(&root)) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("warning: failed to load config (using defaults): {e}");
+            storage::Config::default()
+        }
+    };
     let payload = models_payload(&config.provider);
     if json {
         println!("{}", serde_json::to_string_pretty(&payload)?);

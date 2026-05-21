@@ -19,3 +19,7 @@
 *.pdb
 .env
 .env.*
+node_modules/
+/.claude/
+.codex/
+.private_notes/

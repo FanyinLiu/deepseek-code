@@ -320,6 +320,29 @@ impl SubagentExecutor {
             },
         );
 
+        // SubagentStop hook fires once per completed subagent. We load the
+        // config just-in-time because the executor doesn't hold a HooksConfig
+        // reference — this is fine since subagent completion is infrequent.
+        let config = crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
+        if !config.hooks.subagent_stop.is_empty() {
+            let mut payload = crate::hooks::HookPayload::new(
+                crate::hooks::HookEvent::SubagentStop,
+                self.agent_id.clone(),
+                self.project_root.clone(),
+            );
+            payload.success = Some(result.success);
+            payload.summary = Some(result.summary.clone());
+            payload.duration_ms = Some(result.duration_ms);
+            let _ = crate::hooks::run_configured_hooks(
+                crate::hooks::HookEvent::SubagentStop,
+                &config.hooks,
+                &payload,
+                &self.project_root,
+                config.policy.command_timeout_seconds.max(5),
+            )
+            .await;
+        }
+
         result
     }
 
@@ -452,7 +475,8 @@ impl SubagentExecutor {
                 &tc.function.arguments,
                 &self.project_root,
                 &policy_config,
-            );
+            )
+            .with_source(crate::policy::ToolCallSource::Subagent);
             if policy_decision.action == crate::policy::PolicyAction::Deny {
                 push_subagent_tool_result(
                     &mut results,
@@ -493,6 +517,7 @@ impl SubagentExecutor {
                             agent_id: self.agent_id.clone(),
                             tool_name: tc.function.name.clone(),
                             arguments: tc.function.arguments.clone(),
+                            policy_decision: policy_decision.clone(),
                             respond: tx,
                         },
                     );
@@ -799,17 +824,8 @@ fn collect_successful_file_access(
 }
 
 fn read_only_allows_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "read_file"
-            | "list_dir"
-            | "search_files"
-            | "search_code"
-            | "git_status"
-            | "git_diff"
-            | "semantic_search"
-            | "think"
-    )
+    // Single source of truth: `crate::tools::metadata::ALL_TOOLS`.
+    crate::tools::metadata::is_read_only(tool_name)
 }
 
 fn structured_subagent_limit_message(task: &SubagentTask, _max_turns: u32) -> String {

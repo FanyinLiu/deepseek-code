@@ -7,7 +7,7 @@ pub mod unicode;
 
 pub use approvals::{
     evaluate_mcp_tool, evaluate_tool, is_safe_read_tool, ApprovalDisplay, PolicyAction,
-    PolicyDecision, RiskLevel,
+    PolicyDecision, RiskLevel, ToolCallSource,
 };
 pub use redact::redact_all;
 pub use sandbox::SandboxConfig;

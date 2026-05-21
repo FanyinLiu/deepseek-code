@@ -1,13 +1,39 @@
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
+
 use crate::storage::config::PolicyConfig;
 
 /// Policy decision for a tool execution.
 #[derive(Debug, Clone)]
 pub struct PolicyDecision {
+    pub source: ToolCallSource,
     pub action: PolicyAction,
     pub reason: String,
     pub display: ApprovalDisplay,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolCallSource {
+    Main,
+    Subagent,
+    Mcp,
+    Task,
+    Mission,
+}
+
+impl ToolCallSource {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Subagent => "subagent",
+            Self::Mcp => "mcp",
+            Self::Task => "task",
+            Self::Mission => "mission",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +71,7 @@ impl PolicyDecision {
         risk: RiskLevel,
     ) -> Self {
         Self {
+            source: ToolCallSource::Main,
             action: PolicyAction::Allow,
             reason: reason.into(),
             display: ApprovalDisplay {
@@ -64,6 +91,7 @@ impl PolicyDecision {
         details: impl Into<String>,
     ) -> Self {
         Self {
+            source: ToolCallSource::Main,
             action: PolicyAction::Deny,
             reason: reason.into(),
             display: ApprovalDisplay {
@@ -83,6 +111,7 @@ impl PolicyDecision {
         details: impl Into<String>,
     ) -> Self {
         Self {
+            source: ToolCallSource::Main,
             action: PolicyAction::AskOnce,
             reason: reason.into(),
             display: ApprovalDisplay {
@@ -92,6 +121,12 @@ impl PolicyDecision {
                 details: details.into(),
             },
         }
+    }
+
+    #[must_use]
+    pub(crate) fn with_source(mut self, source: ToolCallSource) -> Self {
+        self.source = source;
+        self
     }
 }
 
@@ -109,26 +144,26 @@ impl std::fmt::Display for RiskLevel {
     }
 }
 
-/// Safe-read tools that do not mutate the workspace.
-pub const SAFE_READ_TOOLS: &[&str] = &[
-    "read_file",
-    "list_dir",
-    "search_files",
-    "search_code",
-    "git_status",
-    "git_diff",
-    "git_log",
-];
-
-/// Check if a tool name is in the safe-read list.
+/// Check if a tool name is declared read-only in the central metadata table.
+///
+/// Source of truth lives in `crate::tools::metadata::ALL_TOOLS`. To change
+/// which tools are read-only, edit that table, not here.
 #[must_use]
 pub fn is_safe_read_tool(name: &str) -> bool {
-    SAFE_READ_TOOLS.contains(&name)
+    crate::tools::metadata::is_read_only(name)
 }
 
 /// Evaluate an MCP tool call using server metadata instead of treating it as an unknown tool.
 #[must_use]
 pub fn evaluate_mcp_tool(
+    metadata: &crate::mcp::registry::McpToolApprovalMetadata,
+    arguments: &str,
+    policy: &PolicyConfig,
+) -> PolicyDecision {
+    evaluate_mcp_tool_inner(metadata, arguments, policy).with_source(ToolCallSource::Mcp)
+}
+
+fn evaluate_mcp_tool_inner(
     metadata: &crate::mcp::registry::McpToolApprovalMetadata,
     arguments: &str,
     policy: &PolicyConfig,
@@ -230,6 +265,16 @@ pub fn evaluate_tool(
     project_root: &Path,
     policy: &PolicyConfig,
 ) -> PolicyDecision {
+    evaluate_tool_inner(tool_name, arguments, project_root, policy)
+        .with_source(infer_tool_call_source(tool_name))
+}
+
+fn evaluate_tool_inner(
+    tool_name: &str,
+    arguments: &str,
+    project_root: &Path,
+    policy: &PolicyConfig,
+) -> PolicyDecision {
     let auto_approve_safe_read = policy.auto_approve_safe_read || policy.auto_mode;
     let args: serde_json::Value = match serde_json::from_str(arguments) {
         Ok(args) => args,
@@ -302,7 +347,8 @@ pub fn evaluate_tool(
             }
         }
 
-        "search_files" | "search_code" | "git_status" | "git_diff" | "git_log" => {
+        "glob" | "grep" | "search_files" | "search_code" | "git_status" | "git_diff"
+        | "git_log" | "task_get" | "task_list" | "ask_user" | "ask_user_question" => {
             PolicyDecision::allow(
                 "safe read-only operation",
                 tool_name.to_string(),
@@ -359,6 +405,20 @@ pub fn evaluate_tool(
             tool_name.to_string(),
             "Searching codebase with TF-IDF",
             RiskLevel::SafeRead,
+        ),
+
+        "todo_write" => write_paths_decision(
+            tool_name,
+            &[".octocode/todos.json".to_string()],
+            project_root,
+            policy,
+        ),
+
+        "task_create" | "task_update" | "task_stop" => write_paths_decision(
+            tool_name,
+            &[".octocode/todos.json".to_string()],
+            project_root,
+            policy,
         ),
 
         "git_commit" => {
@@ -475,6 +535,16 @@ pub fn evaluate_tool(
             RiskLevel::Blocked,
             String::new(),
         ),
+    }
+}
+
+fn infer_tool_call_source(tool_name: &str) -> ToolCallSource {
+    if tool_name == "todo_write" || tool_name.starts_with("task_") {
+        ToolCallSource::Task
+    } else if tool_name.starts_with("mission_") {
+        ToolCallSource::Mission
+    } else {
+        ToolCallSource::Main
     }
 }
 
@@ -949,6 +1019,24 @@ mod tests {
     }
 
     #[test]
+    fn task_write_tools_target_project_todos_file() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let policy = PolicyConfig::default();
+
+        let decision = evaluate_tool(
+            "task_create",
+            &args(serde_json::json!({ "content": "Ship task tools" })),
+            temp.path(),
+            &policy,
+        );
+
+        assert_eq!(decision.action, PolicyAction::AskOnce);
+        assert_eq!(decision.display.risk_level, RiskLevel::WriteProject);
+        assert!(decision.display.details.contains(".octocode/todos.json"));
+        assert!(!decision.display.details.contains(".octocode/tasks"));
+    }
+
+    #[test]
     fn command_approval_can_be_disabled_by_policy() {
         let policy = PolicyConfig {
             require_approval_for_command: false,
@@ -1079,5 +1167,35 @@ diff --git a/src/lib.rs b/src/lib.rs
             .display
             .details
             .contains("No affected paths were found"));
+    }
+
+    #[test]
+    fn policy_decision_sources_are_inferred_for_builtin_tool_classes() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let policy = PolicyConfig::default();
+
+        let main = evaluate_tool(
+            "read_file",
+            &args(serde_json::json!({ "path": "Cargo.toml" })),
+            temp.path(),
+            &policy,
+        );
+        let task = evaluate_tool(
+            "task_update",
+            &args(serde_json::json!({ "id": "1", "status": "done" })),
+            temp.path(),
+            &policy,
+        );
+        let mission = evaluate_tool(
+            "mission_replay",
+            &args(serde_json::json!({ "id": "latest" })),
+            temp.path(),
+            &policy,
+        );
+
+        assert_eq!(main.source, ToolCallSource::Main);
+        assert_eq!(task.source, ToolCallSource::Task);
+        assert_eq!(mission.source, ToolCallSource::Mission);
+        assert_eq!(ToolCallSource::Subagent.as_str(), "subagent");
     }
 }

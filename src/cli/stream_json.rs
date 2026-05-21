@@ -20,6 +20,11 @@ impl TurnOutputFormat {
     pub fn is_stream_json(self) -> bool {
         matches!(self, Self::StreamJson)
     }
+
+    #[must_use]
+    pub fn is_machine_readable(self) -> bool {
+        self.is_json() || self.is_stream_json()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -27,6 +32,7 @@ pub struct FinalJsonCollector {
     session_id: Option<String>,
     final_message: String,
     tool_calls: Vec<FinalToolCall>,
+    events: Vec<serde_json::Value>,
     usage: Option<Usage>,
     total_tokens: Option<u64>,
     error: Option<String>,
@@ -94,6 +100,11 @@ impl FinalJsonCollector {
         }
     }
 
+    pub fn record_tool_approval_denied(&mut self, tool_name: &str, reason: &str) {
+        self.events
+            .push(tool_approval_denied_json(tool_name, reason));
+    }
+
     #[must_use]
     pub fn has_error(&self) -> bool {
         self.error.is_some()
@@ -118,6 +129,7 @@ impl FinalJsonCollector {
             "session_id": self.session_id,
             "final_message": self.final_message,
             "tool_calls": self.tool_calls.iter().map(FinalToolCall::to_json).collect::<Vec<_>>(),
+            "events": self.events,
             "usage": self.usage_json(),
             "error": self.error,
         })
@@ -176,6 +188,30 @@ pub fn print_final_error(error: impl Into<String>) {
     collector.print_final();
 }
 
+pub fn print_error_event(error: impl Into<String>) {
+    let value = error_event_json(&error.into());
+    println!(
+        "{}",
+        serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string())
+    );
+}
+
+pub fn print_output_error(output_format: TurnOutputFormat, error: impl Into<String>) {
+    let error = error.into();
+    if output_format.is_json() {
+        print_final_error(error);
+    } else if output_format.is_stream_json() {
+        print_error_event(error);
+    }
+}
+
+pub(crate) fn error_event_json(error: &str) -> serde_json::Value {
+    json!({
+        "type": "error",
+        "error": error,
+    })
+}
+
 pub fn print_session_started(session_id: impl std::fmt::Display, project_root: &std::path::Path) {
     println!(
         "{}",
@@ -209,15 +245,19 @@ pub fn print_event(event: &AgentEvent) {
 }
 
 pub fn print_tool_approval_denied(tool_name: impl AsRef<str>, reason: impl AsRef<str>) {
-    let value = json!({
-        "type": "tool_approval_denied",
-        "tool": tool_name.as_ref(),
-        "reason": reason.as_ref(),
-    });
+    let value = tool_approval_denied_json(tool_name.as_ref(), reason.as_ref());
     println!(
         "{}",
         serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string())
     );
+}
+
+pub(crate) fn tool_approval_denied_json(tool_name: &str, reason: &str) -> serde_json::Value {
+    json!({
+        "type": "tool_approval_denied",
+        "tool": tool_name,
+        "reason": reason,
+    })
 }
 
 pub(crate) fn event_to_json(event: &AgentEvent) -> serde_json::Value {
@@ -365,12 +405,17 @@ pub(crate) fn event_to_json(event: &AgentEvent) -> serde_json::Value {
             agent_id,
             tool_name,
             arguments,
+            policy_decision,
             ..
         } => json!({
             "type": "subagent_approval_request",
             "agent_id": agent_id,
             "tool_name": tool_name,
             "arguments": arguments,
+            "title": policy_decision.display.title,
+            "risk_level": policy_decision.display.risk_level.to_string(),
+            "description": policy_decision.display.description,
+            "details": policy_decision.display.details,
         }),
         AgentEvent::SwarmStarted {
             run_id,
@@ -485,6 +530,35 @@ fn plan_status(status: PlanStepStatus) -> &'static str {
 mod tests {
     use super::*;
     use crate::hooks::HookEvent;
+
+    #[test]
+    fn tool_approval_denied_event_includes_reason() {
+        let value = tool_approval_denied_json("run_command", "policy=ask-no-tty");
+
+        assert_eq!(value["type"], "tool_approval_denied");
+        assert_eq!(value["tool"], "run_command");
+        assert_eq!(value["reason"], "policy=ask-no-tty");
+    }
+
+    #[test]
+    fn error_event_uses_machine_readable_error_field() {
+        let value = error_event_json("requires a project root");
+
+        assert_eq!(value["type"], "error");
+        assert_eq!(value["error"], "requires a project root");
+    }
+
+    #[test]
+    fn final_json_collector_includes_approval_denial_events() {
+        let mut collector = FinalJsonCollector::new("session-1");
+        collector.record_tool_approval_denied("run_command", "policy=deny");
+
+        let value = collector.final_value();
+        assert_eq!(value["events"].as_array().expect("events").len(), 1);
+        assert_eq!(value["events"][0]["type"], "tool_approval_denied");
+        assert_eq!(value["events"][0]["tool"], "run_command");
+        assert_eq!(value["events"][0]["reason"], "policy=deny");
+    }
 
     #[test]
     fn maps_tool_and_hook_events_to_stable_names() {

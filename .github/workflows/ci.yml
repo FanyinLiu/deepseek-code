@@ -141,6 +141,8 @@ jobs:
           if-no-files-found: ignore
 
   release:
+    permissions:
+      contents: write
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [test, windows-parity]
     strategy:
@@ -161,8 +163,62 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - run: cargo build --release --target ${{ matrix.target }}
+      - name: Build release package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force dist | Out-Null
+
+          $Tag = "${{ github.ref_name }}"
+          $Target = "${{ matrix.target }}"
+          $IsWin = "${{ runner.os }}" -eq "Windows"
+          $BinExt = if ($IsWin) { ".exe" } else { "" }
+          $Package = if ($IsWin) {
+            "octo-$Tag-$Target.zip"
+          } else {
+            "octo-$Tag-$Target.tar.gz"
+          }
+
+          $Octocode = "target/$Target/release/octocode$BinExt"
+          $Octo = "target/$Target/release/octo$BinExt"
+          if (-not (Test-Path $Octocode)) {
+            throw "missing binary: $Octocode"
+          }
+          if (-not (Test-Path $Octo)) {
+            throw "missing binary: $Octo"
+          }
+
+          $workDir = "dist/stage-$Target"
+          New-Item -ItemType Directory -Force $workDir | Out-Null
+          Copy-Item -Path $Octocode -Destination (Join-Path $workDir "octocode$BinExt") -Force
+          Copy-Item -Path $Octo -Destination (Join-Path $workDir "octo$BinExt") -Force
+          Copy-Item -Path "README.md" -Destination (Join-Path $workDir "README.md") -Force
+
+          if ($IsWin) {
+            Compress-Archive -Path (Join-Path $workDir "*") -DestinationPath "dist/$Package" -Force
+          } else {
+            tar -C $workDir -czf dist/$Package octocode$BinExt octo$BinExt README.md
+          }
+          "PACKAGE_NAME=$Package" | Out-File -FilePath $Env:GITHUB_ENV -Append
+          "TARGET_NAME=$Target" | Out-File -FilePath $Env:GITHUB_ENV -Append
+      - name: Compute checksums
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (-not $env:PACKAGE_NAME) {
+            throw "missing package name from package step."
+          }
+
+          $package = Join-Path dist $env:PACKAGE_NAME
+          if (-not (Test-Path $package)) {
+            throw "missing package: $package"
+          }
+          $out = Join-Path dist "checksums-$env:TARGET_NAME.txt"
+          if (Test-Path $out) { Remove-Item $out }
+          $hash = (Get-FileHash $package -Algorithm SHA256).Hash.ToLowerInvariant()
+          "{0}  {1}" -f $hash, (Split-Path $package -Leaf) | Add-Content -Path $out -Encoding UTF8
       - uses: softprops/action-gh-release@v2
         with:
+          generate_release_notes: true
           files: |
-            target/${{ matrix.target }}/release/octocode*
-            target/${{ matrix.target }}/release/octo*
+            dist/*

@@ -16,6 +16,14 @@ pub enum HookEvent {
     PostToolUse,
     SessionStart,
     SessionEnd,
+    /// Turn was interrupted (user cancel / abort), distinct from session end.
+    Stop,
+    /// A subagent task completed (success or failure).
+    SubagentStop,
+    /// Context compaction is about to run.
+    PreCompact,
+    /// Noteworthy async event surfaced (plan proposed, approval required, error).
+    Notification,
 }
 
 impl HookEvent {
@@ -27,6 +35,10 @@ impl HookEvent {
             Self::PostToolUse => "post_tool_use",
             Self::SessionStart => "session_start",
             Self::SessionEnd => "session_end",
+            Self::Stop => "stop",
+            Self::SubagentStop => "subagent_stop",
+            Self::PreCompact => "pre_compact",
+            Self::Notification => "notification",
         }
     }
 }
@@ -131,10 +143,15 @@ pub fn configured_commands(config: &HooksConfig, event: HookEvent) -> Vec<String
         HookEvent::PostToolUse => config.post_tool.clone(),
         HookEvent::SessionStart => config.session_start.clone(),
         HookEvent::SessionEnd => {
+            // `stop` is a legacy alias kept for backward-compatible configs.
             let mut commands = config.session_end.clone();
             commands.extend(config.stop.clone());
             commands
         }
+        HookEvent::Stop => config.turn_stop.clone(),
+        HookEvent::SubagentStop => config.subagent_stop.clone(),
+        HookEvent::PreCompact => config.pre_compact.clone(),
+        HookEvent::Notification => config.notification.clone(),
     }
 }
 

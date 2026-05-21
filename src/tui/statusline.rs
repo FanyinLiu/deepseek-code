@@ -1,7 +1,7 @@
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
+    style::{Color, Style},
+    text::{Line, Span},
     widgets::Paragraph,
     Frame,
 };
@@ -9,7 +9,7 @@ use ratatui::{
 use crate::deepseek::{CacheUsage, DeepSeekModel};
 use crate::tui::{status_bar::AppMode, theme};
 
-const CONTEXT_LIMIT_TOKENS: u64 = 1_000_000;
+const DEFAULT_CONTEXT_BUDGET_TOKENS: u64 = 12_000;
 
 pub struct StatuslineProps<'a> {
     pub mode: AppMode,
@@ -23,6 +23,7 @@ pub struct StatuslineProps<'a> {
     pub cache: Option<&'a CacheUsage>,
     pub permissions: &'a str,
     pub context_limit: Option<u64>,
+    pub chinese: bool,
 }
 
 pub fn render_statusline(f: &mut Frame, area: Rect, props: StatuslineProps<'_>) {
@@ -31,70 +32,102 @@ pub fn render_statusline(f: &mut Frame, area: Rect, props: StatuslineProps<'_>) 
     }
 
     let p = theme::palette();
-    let divider = "─".repeat(area.width as usize);
-    let lines = vec![
-        Line::from(Span::styled(
-            divider,
-            Style::default().fg(p.divider).bg(p.canvas),
-        )),
-        Line::from(statusline_row(&props, p.canvas, area.width)),
-    ];
-
+    let line_area = Rect {
+        y: area.y + area.height.saturating_sub(1),
+        height: 1,
+        ..area
+    };
     f.render_widget(
-        Paragraph::new(Text::from(lines)).style(Style::default().fg(p.text).bg(p.canvas)),
-        area,
+        Paragraph::new(Line::from(statusline_row(&props, p.canvas, area.width)))
+            .style(Style::default().fg(p.text).bg(p.canvas)),
+        line_area,
     );
 }
 
 fn statusline_row(props: &StatuslineProps<'_>, canvas: Color, width: u16) -> Vec<Span<'static>> {
     let colors = statusline_colors(theme::palette());
+    let mut spans = Vec::new();
+    let context_limit = props.context_limit.unwrap_or(DEFAULT_CONTEXT_BUDGET_TOKENS);
     let narrow = width < 88;
-    let mut spans = vec![Span::styled("  ", Style::default().bg(canvas))];
-    let context_limit = props.context_limit.unwrap_or(CONTEXT_LIMIT_TOKENS);
-    push_chip(
+
+    push_label(
         &mut spans,
-        " octocode ".to_string(),
-        colors.project_bg,
-        colors.project_fg,
+        label(props.chinese, "Context", "上下文"),
+        colors.label,
     );
-    push_gap(&mut spans, canvas);
-    push_chip(
+    push_text(
         &mut spans,
-        format!(" {} ", props.mode.label()),
-        colors.mode_bg,
-        colors.mode_fg,
+        context_value_for_width(props.tokens, width, context_limit),
+        colors.text,
     );
+    push_sep(&mut spans, canvas, colors.sep);
+    push_label(
+        &mut spans,
+        label(props.chinese, "Mode", "模式"),
+        colors.label,
+    );
+    push_text(&mut spans, props.mode.label().to_string(), colors.text);
     if !narrow {
-        push_gap(&mut spans, canvas);
-        push_chip(
+        push_sep(&mut spans, canvas, colors.sep);
+        push_label(
             &mut spans,
-            format!(" {} ", compact_model_label(props.model)),
-            colors.model_bg,
-            colors.model_fg,
+            label(props.chinese, "Model", "模型"),
+            colors.label,
+        );
+        push_text(
+            &mut spans,
+            compact_model_label(props.model).to_string(),
+            colors.text,
         );
     }
-    push_gap(&mut spans, canvas);
-    push_chip(
+    if !narrow {
+        if let Some(cache) = props.cache {
+            if cache.prompt_cache_hit_tokens + cache.prompt_cache_miss_tokens > 0 {
+                push_sep(&mut spans, canvas, colors.sep);
+                push_label(
+                    &mut spans,
+                    label(props.chinese, "Cache", "缓存"),
+                    colors.label,
+                );
+                let rate = cache.hit_rate() * 100.0;
+                let fg = if rate >= 80.0 {
+                    colors.permission
+                } else if rate >= 50.0 {
+                    colors.text
+                } else {
+                    colors.sep
+                };
+                push_text(&mut spans, format!("{:.0}%", rate), fg);
+            }
+        }
+    }
+    push_sep(&mut spans, canvas, colors.sep);
+    push_label(
         &mut spans,
-        format!(" {} ", props.status),
-        colors.ctx_bg,
-        colors.ctx_fg,
+        label(props.chinese, "State", "状态"),
+        colors.label,
     );
-    push_gap(&mut spans, canvas);
-    push_chip(
+    push_text(&mut spans, props.status.to_string(), colors.text);
+    push_sep(&mut spans, canvas, colors.sep);
+    push_label(
         &mut spans,
-        format!(" {} ", compact_permissions(props.permissions)),
-        colors.permissions_bg,
-        colors.permissions_fg,
+        label(props.chinese, "Permissions", "权限"),
+        colors.label,
     );
-    push_gap(&mut spans, canvas);
-    push_chip(
+    push_text(
         &mut spans,
-        context_segment_for_width(props.tokens, width, context_limit),
-        colors.ctx_bg,
-        colors.ctx_fg,
+        compact_permissions(props.permissions).to_string(),
+        colors.permission,
     );
     spans
+}
+
+fn label(chinese: bool, en: &'static str, zh: &'static str) -> &'static str {
+    if chinese {
+        zh
+    } else {
+        en
+    }
 }
 
 fn compact_model_label(model: &DeepSeekModel) -> &'static str {
@@ -106,43 +139,43 @@ fn compact_model_label(model: &DeepSeekModel) -> &'static str {
     }
 }
 
-fn context_segment_for_width(tokens: u64, width: u16, context_limit: u64) -> String {
+fn context_value_for_width(tokens: u64, width: u16, context_limit: u64) -> String {
     if width >= 112 {
-        context_segment(tokens, context_limit)
+        context_value(tokens, context_limit)
     } else if width >= 88 {
-        compact_context_segment(tokens, context_limit)
+        compact_context_value(tokens, context_limit)
     } else {
-        tiny_context_segment(tokens, context_limit)
+        tiny_context_value(tokens, context_limit)
     }
 }
 
-fn context_segment(tokens: u64, context_limit: u64) -> String {
+fn context_value(tokens: u64, context_limit: u64) -> String {
     let limit = context_limit.max(1);
     let ratio = (tokens as f64 / limit as f64).clamp(0.0, 1.0);
     format!(
-        " {}/{} ({:.1}%) ",
+        "{}/{} ({:.1}%)",
         compact_number(tokens),
         context_limit_label(context_limit),
         ratio * 100.0,
     )
 }
 
-fn compact_context_segment(tokens: u64, context_limit: u64) -> String {
+fn compact_context_value(tokens: u64, context_limit: u64) -> String {
     let limit = context_limit.max(1);
     let ratio = (tokens as f64 / limit as f64).clamp(0.0, 1.0);
     format!(
-        " {}/{} ({:.1}%) ",
+        "{}/{} ({:.1}%)",
         compact_number(tokens),
         context_limit_label(context_limit),
         ratio * 100.0,
     )
 }
 
-fn tiny_context_segment(tokens: u64, context_limit: u64) -> String {
+fn tiny_context_value(tokens: u64, context_limit: u64) -> String {
     let limit = context_limit.max(1);
     let ratio = (tokens as f64 / limit as f64).clamp(0.0, 1.0);
     format!(
-        " {}/{} {:.0}% ",
+        "{}/{} {:.0}%",
         compact_number(tokens),
         context_limit_label(context_limit),
         ratio * 100.0
@@ -159,61 +192,64 @@ fn compact_number(value: u64) -> String {
     }
 }
 
-fn context_limit_label(context_limit: u64) -> &'static str {
+fn context_limit_label(context_limit: u64) -> String {
     if context_limit >= 1_000_000 {
-        "1M"
+        compact_scaled_label(context_limit, 1_000_000, "M")
     } else if context_limit >= 1_000 {
-        "1K"
+        compact_scaled_label(context_limit, 1_000, "K")
     } else {
-        "tok"
+        format!("{}tok", context_limit.max(1))
+    }
+}
+
+fn compact_scaled_label(value: u64, unit: u64, suffix: &str) -> String {
+    if value.is_multiple_of(unit) {
+        format!("{}{suffix}", value / unit)
+    } else {
+        format!("{:.1}{suffix}", value as f64 / unit as f64)
     }
 }
 
 fn compact_permissions(permissions: &str) -> &'static str {
     if permissions.contains("bypass") {
-        "bypass"
+        "auto"
     } else {
-        "ask"
+        "confirm"
     }
 }
 
-fn push_chip(spans: &mut Vec<Span<'static>>, label: String, bg: Color, fg: Color) {
+fn push_label(spans: &mut Vec<Span<'static>>, label: &'static str, fg: Color) {
     spans.push(Span::styled(
-        label,
-        Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+        format!("{label} "),
+        Style::default().fg(fg).bg(theme::palette().canvas),
     ));
 }
 
-fn push_gap(spans: &mut Vec<Span<'static>>, canvas: Color) {
-    spans.push(Span::styled(" ", Style::default().bg(canvas)));
+fn push_text(spans: &mut Vec<Span<'static>>, text: String, fg: Color) {
+    spans.push(Span::styled(
+        text,
+        Style::default().fg(fg).bg(theme::palette().canvas),
+    ));
+}
+
+fn push_sep(spans: &mut Vec<Span<'static>>, canvas: Color, fg: Color) {
+    spans.push(Span::styled("  ·  ", Style::default().fg(fg).bg(canvas)));
 }
 
 #[derive(Clone, Copy)]
 struct StatuslineColors {
-    project_bg: Color,
-    project_fg: Color,
-    ctx_bg: Color,
-    ctx_fg: Color,
-    model_bg: Color,
-    model_fg: Color,
-    mode_bg: Color,
-    mode_fg: Color,
-    permissions_bg: Color,
-    permissions_fg: Color,
+    label: Color,
+    text: Color,
+    sep: Color,
+    permission: Color,
 }
 
 fn statusline_colors(p: theme::ThemePalette) -> StatuslineColors {
     StatuslineColors {
-        project_bg: p.accent,
-        project_fg: p.inverse_text,
-        ctx_bg: p.surface_alt,
-        ctx_fg: p.text,
-        model_bg: p.info,
-        model_fg: p.inverse_text,
-        mode_bg: p.surface_alt,
-        mode_fg: p.text,
-        permissions_bg: p.danger,
-        permissions_fg: p.inverse_text,
+        label: p.assistant,
+        text: p.text,
+        sep: p.muted,
+        permission: p.warning,
     }
 }
 
@@ -223,7 +259,7 @@ mod tests {
     use ratatui::{backend::TestBackend, Terminal};
 
     #[test]
-    fn statusline_renders_colored_metadata_chips() {
+    fn statusline_renders_plain_metadata() {
         let mut terminal = Terminal::new(TestBackend::new(120, 2)).expect("terminal");
         terminal
             .draw(|f| {
@@ -242,6 +278,7 @@ mod tests {
                         cache: None,
                         permissions: "permissions ask",
                         context_limit: None,
+                        chinese: false,
                     },
                 );
             })
@@ -255,25 +292,28 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(!rendered.contains("Model:"));
-        assert!(rendered.contains("octocode"));
-        assert!(rendered.contains("chat"));
-        assert!(rendered.contains("V4 Pro"));
-        assert!(rendered.contains("128/1M (0.0%)"));
+        assert!(!rendered.contains("octo"));
+        assert!(rendered.contains("Mode chat"));
+        assert!(rendered.contains("Model V4 Pro"));
+        assert!(rendered.contains("Context 128/12K (1.1%)"));
         assert!(!rendered.contains("tok "));
         assert!(!rendered.contains("↑"));
         assert!(!rendered.contains("↓"));
         assert!(!rendered.contains("web:on"));
         assert!(!rendered.contains("¥"));
-        assert!(rendered.contains("ask"));
-        let chip = terminal.backend().buffer().cell((2, 1)).expect("chip");
-        assert_ne!(chip.bg, theme::palette().canvas);
+        assert!(rendered.contains("confirm"));
+        let status_cell = terminal.backend().buffer().cell((2, 1)).expect("cell");
+        assert_eq!(status_cell.bg, theme::palette().canvas);
     }
 
     #[test]
     fn context_segment_has_progress_and_compact_limit() {
-        let segment = context_segment(126_300, 1_000_000);
+        let segment = context_value(126_300, 1_000_000);
 
         assert_eq!(segment.trim(), "126.3k/1M (12.6%)");
+
+        let segment = context_value(1_200, 12_000);
+        assert_eq!(segment.trim(), "1.2k/12K (10.0%)");
     }
 
     #[test]
@@ -296,6 +336,7 @@ mod tests {
                         cache: None,
                         permissions: "permissions ask",
                         context_limit: None,
+                        chinese: false,
                     },
                 );
             })
@@ -308,9 +349,9 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect();
-        assert!(rendered.contains("ask"));
+        assert!(rendered.contains("confirm"));
         assert!(rendered.contains("V4 Flash"));
-        assert!(rendered.contains("128/1M (0.0%)"));
+        assert!(rendered.contains("Context 128/12K (1.1%)"));
     }
 
     #[test]
@@ -333,6 +374,7 @@ mod tests {
                         cache: None,
                         permissions: "permissions ask",
                         context_limit: None,
+                        chinese: false,
                     },
                 );
             })
@@ -345,7 +387,7 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect();
-        assert!(rendered.contains("5.7k/1M"));
+        assert!(rendered.contains("Context 5.7k/12K"));
         assert!(!rendered.contains("↑ 742 tokens"));
         assert!(!rendered.contains("↓ 131 tokens"));
         assert!(!rendered.contains("tok 131"));
@@ -371,6 +413,7 @@ mod tests {
                         cache: None,
                         permissions: "permissions ask",
                         context_limit: None,
+                        chinese: false,
                     },
                 );
             })
@@ -383,7 +426,7 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect();
-        assert!(rendered.contains("5.7k/1M"));
+        assert!(rendered.contains("Context 5.7k/12K"));
         assert!(!rendered.contains("↑ 54 tokens"));
         assert!(!rendered.contains("↓ 0"));
         assert!(!rendered.contains("tok "));
@@ -409,6 +452,7 @@ mod tests {
                         cache: None,
                         permissions: "permissions ask",
                         context_limit: None,
+                        chinese: false,
                     },
                 );
             })
@@ -447,6 +491,7 @@ mod tests {
                         cache: None,
                         permissions: "permissions ask",
                         context_limit: None,
+                        chinese: false,
                     },
                 );
             })
@@ -459,7 +504,7 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect();
-        assert!(rendered.contains("16.2k/1M"));
+        assert!(rendered.contains("Context 16.2k/12K"));
         assert!(!rendered.contains("agent 16.2k tokens"));
         assert!(!rendered.contains("↓ 16.2k"));
     }
