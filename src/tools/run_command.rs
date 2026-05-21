@@ -128,21 +128,23 @@ pub async fn run_command_with_sandbox(
     // Spawn background tasks to drain stdout/stderr so the pipe doesn't back-pressure.
     const MAX_OUTPUT_BYTES: u64 = 1024 * 1024; // 1 MiB
 
-    let stdout_handle = child.stdout.take().map(|stdout| {
-        tokio::spawn(async move { capture_output_stream(stdout, MAX_OUTPUT_BYTES).await })
-    });
+    let mut stdout_handle = child
+        .stdout
+        .take()
+        .map(|stdout| OutputCaptureHandle::new(stdout, MAX_OUTPUT_BYTES));
 
-    let stderr_handle = child.stderr.take().map(|stderr| {
-        tokio::spawn(async move { capture_output_stream(stderr, MAX_OUTPUT_BYTES).await })
-    });
+    let mut stderr_handle = child
+        .stderr
+        .take()
+        .map(|stderr| OutputCaptureHandle::new(stderr, MAX_OUTPUT_BYTES));
 
     tokio::select! {
         status = child.wait() => {
             let status = status?;
             process_guard.disarm();
-            let (stdout, stdout_truncated, stdout_original_bytes) = match stdout_handle {
-                Some(h) => {
-                    let output = h.await.unwrap_or_default();
+            let (stdout, stdout_truncated, stdout_original_bytes) = match stdout_handle.take() {
+                Some(handle) => {
+                    let output = collect_output(handle).await;
                     (
                         String::from_utf8_lossy(&output.bytes).to_string(),
                         output.truncated,
@@ -151,9 +153,9 @@ pub async fn run_command_with_sandbox(
                 }
                 None => (String::new(), false, 0),
             };
-            let (stderr, stderr_truncated, stderr_original_bytes) = match stderr_handle {
-                Some(h) => {
-                    let output = h.await.unwrap_or_default();
+            let (stderr, stderr_truncated, stderr_original_bytes) = match stderr_handle.take() {
+                Some(handle) => {
+                    let output = collect_output(handle).await;
                     (
                         String::from_utf8_lossy(&output.bytes).to_string(),
                         output.truncated,
@@ -179,29 +181,25 @@ pub async fn run_command_with_sandbox(
             let _ = child.kill().await;
             let _ = child.wait().await;
             process_guard.disarm();
-            let (stdout, stdout_truncated, stdout_original_bytes) = match stdout_handle {
-                Some(h) => {
-                    match await_output_with_timeout(h).await {
-                        Some(output) => (
-                            String::from_utf8_lossy(&output.bytes).to_string(),
-                            output.truncated,
-                            output.original_bytes,
-                        ),
-                        None => (String::new(), false, 0),
-                    }
+            let (stdout, stdout_truncated, stdout_original_bytes) = match stdout_handle.take() {
+                Some(mut handle) => {
+                    let output = await_output_with_timeout(&mut handle).await;
+                    (
+                        String::from_utf8_lossy(&output.bytes).to_string(),
+                        output.truncated,
+                        output.original_bytes,
+                    )
                 }
                 None => (String::new(), false, 0),
             };
-            let (mut stderr, stderr_truncated, stderr_original_bytes) = match stderr_handle {
-                Some(h) => {
-                    match await_output_with_timeout(h).await {
-                        Some(output) => (
-                            String::from_utf8_lossy(&output.bytes).to_string(),
-                            output.truncated,
-                            output.original_bytes,
-                        ),
-                        None => (String::new(), false, 0),
-                    }
+            let (mut stderr, stderr_truncated, stderr_original_bytes) = match stderr_handle.take() {
+                Some(mut handle) => {
+                    let output = await_output_with_timeout(&mut handle).await;
+                    (
+                        String::from_utf8_lossy(&output.bytes).to_string(),
+                        output.truncated,
+                        output.original_bytes,
+                    )
                 }
                 None => (String::new(), false, 0),
             };
@@ -221,18 +219,43 @@ pub async fn run_command_with_sandbox(
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct OutputCapture {
     bytes: Vec<u8>,
     truncated: bool,
     original_bytes: u64,
 }
 
+struct OutputCaptureHandle {
+    state: std::sync::Arc<tokio::sync::Mutex<OutputCapture>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl OutputCaptureHandle {
+    fn new<R>(stream: R, max_output_bytes: u64) -> Self
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    {
+        let state = std::sync::Arc::new(tokio::sync::Mutex::new(OutputCapture::default()));
+        let task_state = std::sync::Arc::clone(&state);
+
+        let task = tokio::spawn(async move {
+            capture_output_stream(stream, max_output_bytes, task_state).await;
+        });
+
+        Self { state, task }
+    }
+
+    async fn snapshot(&self) -> OutputCapture {
+        self.state.lock().await.clone()
+    }
+}
+
 async fn capture_output_stream<R: tokio::io::AsyncRead + Unpin>(
     mut stream: R,
     max_output_bytes: u64,
-) -> OutputCapture {
-    let mut output = OutputCapture::default();
+    state: std::sync::Arc<tokio::sync::Mutex<OutputCapture>>,
+) {
     let mut buf = vec![0u8; 4096];
 
     loop {
@@ -243,6 +266,7 @@ async fn capture_output_stream<R: tokio::io::AsyncRead + Unpin>(
         };
 
         let bytes_read = bytes_read as u64;
+        let mut output = state.lock().await;
         output.original_bytes += bytes_read;
         let collected = output.bytes.len() as u64;
         if collected < max_output_bytes {
@@ -256,17 +280,18 @@ async fn capture_output_stream<R: tokio::io::AsyncRead + Unpin>(
             output.truncated = true;
         }
     }
-
-    output
 }
 
 async fn await_output_with_timeout(
-    handle: tokio::task::JoinHandle<OutputCapture>,
-) -> Option<OutputCapture> {
-    tokio::time::timeout(Duration::from_millis(100), handle)
-        .await
-        .ok()
-        .and_then(|result| result.ok())
+    handle: &mut OutputCaptureHandle,
+) -> OutputCapture {
+    let _ = tokio::time::timeout(Duration::from_millis(100), &mut handle.task).await;
+    handle.snapshot().await
+}
+
+async fn collect_output(handle: OutputCaptureHandle) -> OutputCapture {
+    let _ = handle.task.await;
+    handle.snapshot().await
 }
 
 fn append_timeout_marker(stderr: &mut String, timeout_seconds: u64) {
