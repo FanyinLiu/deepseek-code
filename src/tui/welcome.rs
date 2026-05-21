@@ -1,17 +1,16 @@
 use std::path::{Path, PathBuf};
 
+use crate::{
+    deepseek::{DeepSeekModel, ThinkingMode},
+    storage::{self, SessionStore},
+    tui::theme,
+};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Paragraph, Wrap},
     Frame,
-};
-
-use crate::{
-    deepseek::{DeepSeekModel, ThinkingMode},
-    storage::{self, SessionStore},
-    tui::{ascii_art, theme},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +27,7 @@ pub struct WelcomeDashboardData {
     pub mcp_servers: Vec<McpServerItem>,
     pub agents_md: AgentsMdInfo,
     pub detected_language: String,
+    pub display_language: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -272,6 +272,9 @@ impl WelcomeDashboardData {
     ) -> Self {
         let recent_sessions = recent_sessions.into_iter().take(3).collect();
         let detected_language = detect_project_language(root);
+        let display_language = config
+            .map(|config| config.ui.language.clone())
+            .unwrap_or_else(|| storage::Config::default().ui.language);
 
         let skills = vec![
             SkillItem {
@@ -381,7 +384,57 @@ impl WelcomeDashboardData {
             mcp_servers,
             agents_md,
             detected_language,
+            display_language,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiLanguage {
+    EnUs,
+    ZhCn,
+}
+
+pub fn is_chinese_display_language(value: &str) -> bool {
+    ui_language_from_config(value) == UiLanguage::ZhCn
+}
+
+fn display_language(data: &WelcomeDashboardData) -> UiLanguage {
+    ui_language_from_config(&data.display_language)
+}
+
+fn ui_language_from_config(value: &str) -> UiLanguage {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    match normalized.as_str() {
+        "auto" | "" => auto_ui_language(),
+        "zh" | "zh-cn" | "zh-hans" | "zh-hans-cn" | "chinese" => UiLanguage::ZhCn,
+        "en" | "en-us" | "en-gb" | "english" => UiLanguage::EnUs,
+        value if value.starts_with("zh") => UiLanguage::ZhCn,
+        _ => UiLanguage::EnUs,
+    }
+}
+
+fn auto_ui_language() -> UiLanguage {
+    ["LC_ALL", "LC_MESSAGES", "LANGUAGE", "LANG"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .map(|value| value.to_ascii_lowercase().replace('_', "-"))
+        .find_map(|value| {
+            if value.starts_with("zh") {
+                Some(UiLanguage::ZhCn)
+            } else if value.starts_with("en") {
+                Some(UiLanguage::EnUs)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(UiLanguage::EnUs)
+}
+
+fn tr(lang: UiLanguage, en: &'static str, zh: &'static str) -> &'static str {
+    match lang {
+        UiLanguage::EnUs => en,
+        UiLanguage::ZhCn => zh,
     }
 }
 
@@ -400,12 +453,8 @@ pub fn suggested_prompt(index: usize) -> Option<&'static str> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub fn render_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
-    if area.width < 90 || area.height < 18 {
+    if area.width < 110 || area.height < 18 {
         render_compact_welcome(f, area, data);
-        return;
-    }
-    if area.width < 110 {
-        render_focused_welcome(f, area, data);
         return;
     }
 
@@ -416,67 +465,12 @@ pub fn render_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
         vertical: u16::from(area.height >= 22),
     });
 
-    if inner.width < 96 || inner.height < 22 {
+    if inner.width < 96 || inner.height < 20 {
         render_compact_welcome(f, inner, data);
         return;
     }
 
     render_split_welcome(f, inner, data);
-}
-
-fn render_focused_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
-    f.render_widget(Paragraph::new("").style(welcome_bg()), area);
-    let inner = area.inner(Margin {
-        horizontal: 4,
-        vertical: 1,
-    });
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(7),
-            Constraint::Length(4),
-            Constraint::Length(3),
-            Constraint::Length(4),
-            Constraint::Length(4),
-        ])
-        .split(inner);
-
-    render_product_mark(f, chunks[0]);
-
-    let tips = vec![
-        Line::from(vec![
-            Span::styled("◇ ", welcome_accent()),
-            Span::styled(
-                "Ask questions, edit files, or run commands.",
-                welcome_muted(),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("◇ ", welcome_accent()),
-            Span::styled("Be specific for the best results.", welcome_muted()),
-        ]),
-        Line::from(vec![
-            Span::styled("◇ ", welcome_accent()),
-            Span::styled("/help for more information.", welcome_muted()),
-        ]),
-    ];
-    f.render_widget(
-        Paragraph::new(Text::from(tips))
-            .style(welcome_bg())
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: true }),
-        chunks[1],
-    );
-
-    if data.api_key_status == "missing" {
-        render_api_key_setup(f, chunks[2], data);
-        render_quick_access(f, chunks[3], data);
-    } else {
-        render_quick_access(f, chunks[2], data);
-        render_context(f, chunks[3], data);
-    }
-
-    render_invitation_and_footer(f, chunks[4], data);
 }
 
 fn welcome_horizontal_margin(width: u16) -> u16 {
@@ -503,38 +497,66 @@ fn render_split_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) 
 }
 
 fn render_identity(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
-    let product_mark_height = if area.height >= 23 { 17 } else { 7 };
+    let lang = display_language(data);
+    if data.api_key_status == "missing" {
+        render_octo_with_bubble(f, area, data, lang);
+        return;
+    }
+
+    let product_mark_height = if area.height >= 23 { 3 } else { 2 };
+    // When the welcome area is generous, perch the pixel octopus pet above
+    // the wordmark. 10 rows for the sprite + 1 gap; needs ~28 rows total.
+    let show_pet = area.height >= 28;
+    let pet_height = if show_pet { 10 } else { 0 };
+    let pet_gap = if show_pet { 1 } else { 0 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
+            Constraint::Length(pet_height),
+            Constraint::Length(pet_gap),
             Constraint::Length(product_mark_height),
             Constraint::Length(4),
             Constraint::Min(1),
         ])
         .split(area);
 
-    render_product_mark(f, chunks[1]);
+    if show_pet {
+        render_octopus_pet(f, chunks[1]);
+    }
+    render_product_mark(f, chunks[3], lang);
 
     let shortcuts = vec![
         Line::from(vec![
             Span::styled("◇ ", welcome_accent()),
             Span::styled(
-                "Ask questions, edit files, or run commands.",
+                tr(
+                    lang,
+                    "Ask questions, edit files, or run commands.",
+                    "可以提问、改文件或运行命令。",
+                ),
                 welcome_muted(),
             ),
         ]),
         Line::from(vec![
             Span::styled("◇ ", welcome_accent()),
             Span::styled(
-                "Plan, approvals, and agents appear only when needed.",
+                tr(
+                    lang,
+                    "Plan, approvals, and agents appear only when needed.",
+                    "计划、审批和智能体只在需要时出现。",
+                ),
                 welcome_muted(),
             ),
         ]),
         Line::from(vec![
             Span::styled("◇ ", welcome_accent()),
             Span::styled(
-                "/help for commands, @path for files, !cmd for shell, /agents on demand.",
+                tr(
+                    lang,
+                    "/help for commands, @path for files, !cmd for shell, /agents on demand.",
+                    "/help 看命令，@path 引文件，!cmd 跑终端，/agents 调智能体。",
+                ),
                 welcome_muted(),
             ),
         ]),
@@ -543,29 +565,18 @@ fn render_identity(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
         Paragraph::new(Text::from(shortcuts))
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: true }),
-        chunks[2],
+        chunks[4],
     );
 
-    render_capability_line(f, chunks[3], data);
+    render_capability_line(f, chunks[5], data);
 }
 
 // ── Right: Actions ──
 fn render_actions(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
     if data.api_key_status == "missing" {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(5),
-                Constraint::Length(5),
-                Constraint::Length(4),
-                Constraint::Min(1),
-            ])
-            .split(area);
-        render_api_key_setup(f, chunks[0], data);
-        render_quick_access(f, chunks[1], data);
-        render_context(f, chunks[2], data);
-        render_invitation_and_footer(f, chunks[3], data);
+        render_api_key_setup(f, area, data);
     } else {
+        let lang = display_language(data);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -576,8 +587,8 @@ fn render_actions(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
                 Constraint::Min(1),
             ])
             .split(area);
-        render_release_header(f, chunks[0]);
-        render_changelog(f, chunks[1]);
+        render_release_header(f, chunks[0], lang);
+        render_changelog(f, chunks[1], lang);
         render_quick_access(f, chunks[2], data);
         render_context(f, chunks[3], data);
         render_invitation_and_footer(f, chunks[4], data);
@@ -591,44 +602,60 @@ fn render_divider(f: &mut Frame, area: Rect) {
     f.render_widget(Paragraph::new(Text::from(lines)).style(welcome_bg()), area);
 }
 
-fn render_release_header(f: &mut Frame, area: Rect) {
+fn render_release_header(f: &mut Frame, area: Rect, lang: UiLanguage) {
     let lines = vec![Line::from(vec![
         Span::styled(
-            "Ready surface ",
+            tr(lang, "Ready surface ", "工作台就绪 "),
             welcome_accent().add_modifier(Modifier::BOLD),
         ),
         Span::styled("v0.1.0", welcome_text().add_modifier(Modifier::BOLD)),
-        Span::styled("        quiet until work starts", welcome_muted()),
+        Span::styled(
+            tr(
+                lang,
+                "        quiet until work starts",
+                "        开始工作前保持安静",
+            ),
+            welcome_muted(),
+        ),
     ])];
     f.render_widget(Paragraph::new(Text::from(lines)).style(welcome_bg()), area);
 }
 
-fn render_changelog(f: &mut Frame, area: Rect) {
+fn render_changelog(f: &mut Frame, area: Rect, lang: UiLanguage) {
     let lines = vec![
         Line::from(Span::styled(
-            "Start",
+            tr(lang, "Start", "开始"),
             welcome_accent().add_modifier(Modifier::BOLD),
         )),
         Line::from(vec![
-            Span::styled("1 ", welcome_accent().add_modifier(Modifier::BOLD)),
             Span::styled(
-                "New conversation",
+                tr(lang, "New conversation", "新对话"),
                 welcome_text().add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" - describe the change", welcome_muted()),
+            Span::styled(
+                tr(lang, " - describe the change", " - 描述要改什么"),
+                welcome_muted(),
+            ),
         ]),
         Line::from(vec![
-            Span::styled("2 ", welcome_accent().add_modifier(Modifier::BOLD)),
             Span::styled(
-                "Inspect workspace",
+                tr(lang, "Inspect workspace", "检查工作区"),
                 welcome_text().add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" - read files before editing", welcome_muted()),
+            Span::styled(
+                tr(lang, " - read files before editing", " - 先读文件再编辑"),
+                welcome_muted(),
+            ),
         ]),
         Line::from(vec![
-            Span::styled("3 ", welcome_accent().add_modifier(Modifier::BOLD)),
-            Span::styled("Run checks", welcome_text().add_modifier(Modifier::BOLD)),
-            Span::styled(" - verify before summary", welcome_muted()),
+            Span::styled(
+                tr(lang, "Run checks", "运行检查"),
+                welcome_text().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                tr(lang, " - verify before summary", " - 验证后再总结"),
+                welcome_muted(),
+            ),
         ]),
     ];
     f.render_widget(
@@ -640,17 +667,38 @@ fn render_changelog(f: &mut Frame, area: Rect) {
 }
 
 fn render_invitation_and_footer(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
+    let lang = display_language(data);
     let (title, hint, footer) = if data.api_key_status == "missing" {
         (
-            "Connect a provider first",
-            "Paste your API key below.",
-            "enter save key · ctrl+c close",
+            tr(lang, "Connect a provider first", "先连接模型提供方"),
+            tr(
+                lang,
+                "Paste your API key below.",
+                "把 API key 粘贴到底部输入行。",
+            ),
+            tr(
+                lang,
+                "enter save key · ctrl+d twice to exit",
+                "enter 保存密钥 · ctrl+d 连按两次退出",
+            ),
         )
     } else {
         (
-            "What are we changing today?",
-            "Type below, or press 1-3 to load a starter.",
-            "1-3 starters · /help for full command map",
+            tr(
+                lang,
+                "Get started: Describe your next step",
+                "今天要改什么？",
+            ),
+            tr(
+                lang,
+                "Type the work directly, then press Enter.",
+                "直接输入要做的事，按 Enter 发送。",
+            ),
+            tr(
+                lang,
+                "/help · @path · !cmd · ctrl+d twice to exit",
+                "/help · @path · !cmd · ctrl+d 连按两次退出",
+            ),
         )
     };
     let model = format!("{} ({})", model_label(&data.model), data.thinking);
@@ -675,25 +723,75 @@ fn render_invitation_and_footer(f: &mut Frame, area: Rect, data: &WelcomeDashboa
 }
 
 fn render_api_key_setup(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
+    let lang = display_language(data);
+    let inner = area.inner(Margin {
+        horizontal: u16::from(area.width >= 42),
+        vertical: u16::from(area.height >= 14),
+    });
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Length(5),
+            Constraint::Length(3),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            tr(lang, "API setup required", "需要配置 API"),
+            welcome_accent().add_modifier(Modifier::BOLD),
+        )]))
+        .style(welcome_bg())
+        .wrap(Wrap { trim: true }),
+        chunks[0],
+    );
+
+    f.render_widget(
+        Paragraph::new(Text::from(vec![
+            Line::from(vec![Span::styled(
+                tr(
+                    lang,
+                    "Paste your API key in the input line below.",
+                    "把 API key 粘贴到底部输入行。",
+                ),
+                welcome_text(),
+            )]),
+            Line::from(vec![Span::styled(
+                tr(
+                    lang,
+                    "Octocode saves it, then opens the normal workbench.",
+                    "保存后会进入正常工作台。",
+                ),
+                welcome_muted(),
+            )]),
+        ]))
+        .style(welcome_bg())
+        .wrap(Wrap { trim: true }),
+        chunks[1],
+    );
+
     let lines = vec![
         Line::from(vec![Span::styled(
-            "API setup required",
-            welcome_accent().add_modifier(Modifier::BOLD),
+            tr(
+                lang,
+                "Paste key into the input line.",
+                "把密钥粘贴到输入行。",
+            ),
+            welcome_text().add_modifier(Modifier::BOLD),
         )]),
-        Line::from(vec![
-            Span::styled("1 ", welcome_accent().add_modifier(Modifier::BOLD)),
-            Span::styled("Paste your API key in the input line", welcome_text()),
-        ]),
-        Line::from(vec![
-            Span::styled("2 ", welcome_accent().add_modifier(Modifier::BOLD)),
-            Span::styled("Press Enter to save it", welcome_text()),
-        ]),
-        Line::from(vec![
-            Span::styled("3 ", welcome_accent().add_modifier(Modifier::BOLD)),
-            Span::styled("Continue with your coding task", welcome_text()),
-        ]),
         Line::from(vec![Span::styled(
-            format!("{} ({})", model_label(&data.model), data.thinking),
+            tr(lang, "Press Enter to save.", "按 Enter 保存。"),
+            welcome_text().add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![Span::styled(
+            tr(
+                lang,
+                "The workbench opens after saving.",
+                "保存后进入工作台。",
+            ),
             welcome_muted(),
         )]),
     ];
@@ -702,44 +800,69 @@ fn render_api_key_setup(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) 
         Paragraph::new(Text::from(lines))
             .style(welcome_bg())
             .wrap(Wrap { trim: true }),
-        area,
+        chunks[2],
+    );
+
+    let model = format!("{} ({})", model_label(&data.model), data.thinking);
+    f.render_widget(
+        Paragraph::new(Text::from(vec![
+            context_line(
+                tr(lang, "workspace", "工作区"),
+                pretty_workspace(&data.workspace_path),
+            ),
+            context_line(tr(lang, "model", "模型"), model),
+        ]))
+        .style(welcome_bg())
+        .wrap(Wrap { trim: true }),
+        chunks[3],
     );
 }
 
 fn render_context(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
+    let lang = display_language(data);
     let agents = if data.agents_md.loaded {
-        format!("{} rules", data.agents_md.rule_count)
+        if lang == UiLanguage::ZhCn {
+            format!("{} 条规则", data.agents_md.rule_count)
+        } else {
+            format!("{} rules", data.agents_md.rule_count)
+        }
     } else {
-        "none".to_string()
+        tr(lang, "none", "无").to_string()
     };
-    let recent = data
-        .recent_sessions
-        .first()
-        .map_or_else(|| "none yet".to_string(), |s| s.label.clone());
+    let recent = data.recent_sessions.first().map_or_else(
+        || tr(lang, "none yet", "暂无").to_string(),
+        |s| s.label.clone(),
+    );
 
     let lines = vec![
         context_line(
-            "workspace",
+            tr(lang, "workspace", "工作区"),
             format!("{}  ·  {}", data.workspace_name, data.detected_language),
         ),
         context_line(
-            "model",
+            tr(lang, "model", "模型"),
             format!(
-                "{}  ·  think:{}",
+                "{}  ·  {}:{}",
                 data.model,
+                tr(lang, "think", "思考"),
                 data.thinking.to_string().to_lowercase()
             ),
         ),
         context_line(
-            "state",
+            tr(lang, "state", "状态"),
             format!(
                 "api:{}  ·  config:{}",
                 data.api_key_status, data.config_status
             ),
         ),
         context_line(
-            "memory",
-            format!("AGENTS.md {}  ·  recent:{}", agents, recent),
+            tr(lang, "memory", "记忆"),
+            format!(
+                "AGENTS.md {}  ·  {}:{}",
+                agents,
+                tr(lang, "recent", "最近"),
+                recent
+            ),
         ),
     ];
 
@@ -752,10 +875,11 @@ fn render_context(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
 }
 
 fn render_compact_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
+    let lang = display_language(data);
     f.render_widget(Paragraph::new("").style(welcome_bg()), area);
 
     if data.api_key_status == "missing" {
-        render_compact_api_onboarding(f, area, data);
+        render_compact_api_welcome(f, area, data);
         return;
     }
 
@@ -764,28 +888,26 @@ fn render_compact_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData
         return;
     }
 
-    let headline = "What are we changing today?";
+    let headline = tr(
+        lang,
+        "Describe your next step to start.",
+        "请输入下一步要做的事。",
+    );
     let footer = vec![
-        key_span("1-3"),
-        action_span(" starters   "),
         key_span("enter"),
-        action_span(" send"),
-        key_span(" /help"),
-        action_span(" commands"),
+        action_span(tr(lang, " send   ", " 发送   ")),
+        key_span("/help"),
+        action_span(tr(lang, " commands", " 命令")),
     ];
     let mut lines = Vec::new();
     lines.extend([
         Line::from(vec![Span::styled(
-            ascii_art::OCTOCODE_TINY.to_string(),
-            welcome_badge(),
+            "OCTOCODE".to_string(),
+            welcome_text().add_modifier(Modifier::BOLD),
         )]),
         Line::from(vec![Span::styled(headline, welcome_muted())]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled(&data.workspace_name, welcome_text()),
-            Span::styled(" · ", welcome_muted()),
-            Span::styled(data.model.to_string(), welcome_muted()),
-        ]),
+        Line::from(vec![Span::styled(data.model.to_string(), welcome_muted())]),
         Line::from(""),
         Line::from(footer),
     ]);
@@ -798,6 +920,7 @@ fn render_compact_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData
 }
 
 fn render_compact_brand_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
+    let lang = display_language(data);
     let inner = area.inner(Margin {
         horizontal: 2,
         vertical: 1,
@@ -805,29 +928,47 @@ fn render_compact_brand_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboa
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(7),
+            Constraint::Length(3),
             Constraint::Length(2),
             Constraint::Length(2),
             Constraint::Min(1),
         ])
         .split(inner);
 
-    render_product_mark(f, chunks[0]);
+    render_product_mark(f, chunks[0], lang);
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            "What are we changing today?",
-            welcome_muted(),
-        )]))
+        Paragraph::new(Text::from(vec![
+            Line::from(vec![Span::styled(
+                tr(
+                    lang,
+                    "Get started: Describe your next step",
+                    "今天要改什么？",
+                ),
+                welcome_muted(),
+            )]),
+            Line::from(vec![Span::styled(
+                tr(
+                    lang,
+                    "Type the work directly, then press Enter.",
+                    "直接输入要做的事，按 Enter 发送。",
+                ),
+                welcome_muted(),
+            )]),
+        ]))
         .style(welcome_bg())
         .alignment(Alignment::Center),
         chunks[1],
     );
 
     let workspace = Line::from(vec![
+        Span::styled(tr(lang, "workspace ", "工作区 "), welcome_muted()),
         Span::styled(&data.workspace_name, welcome_text()),
         Span::styled(" · ", welcome_muted()),
-        Span::styled(data.model.to_string(), welcome_muted()),
+        Span::styled(
+            format!("{}  ·  api:{}", data.model, data.api_key_status),
+            welcome_muted(),
+        ),
     ]);
     f.render_widget(
         Paragraph::new(workspace)
@@ -838,12 +979,10 @@ fn render_compact_brand_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboa
     );
 
     let footer = Line::from(vec![
-        key_span("1-3"),
-        action_span(" starters   "),
         key_span("enter"),
-        action_span(" send"),
-        key_span(" /help"),
-        action_span(" commands"),
+        action_span(tr(lang, " send   ", " 发送   ")),
+        key_span("/help"),
+        action_span(tr(lang, " commands", " 命令")),
     ]);
     f.render_widget(
         Paragraph::new(footer)
@@ -854,52 +993,106 @@ fn render_compact_brand_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboa
     );
 }
 
-fn render_compact_api_onboarding(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
+fn render_compact_api_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
+    let lang = display_language(data);
     let inner = area.inner(Margin {
         horizontal: 2,
-        vertical: 0,
+        vertical: u16::from(area.height >= 12),
     });
-    let lines = vec![
-        Line::from(vec![
-            Span::styled("OCTOCODE", welcome_text().add_modifier(Modifier::BOLD)),
-            Span::styled("  ·  ", welcome_muted()),
-            Span::styled(
-                "API setup required",
-                welcome_accent().add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![Span::styled(
-            "Paste your API key in the input line below, then press Enter.",
-            welcome_muted(),
-        )]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("1 ", welcome_accent().add_modifier(Modifier::BOLD)),
-            Span::styled("paste key", welcome_text().add_modifier(Modifier::BOLD)),
-            Span::styled("   2 ", welcome_accent().add_modifier(Modifier::BOLD)),
-            Span::styled("enter to save", welcome_text().add_modifier(Modifier::BOLD)),
-            Span::styled("   3 ", welcome_accent().add_modifier(Modifier::BOLD)),
-            Span::styled("start coding", welcome_text().add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from(vec![
-            Span::styled("workspace ", welcome_muted()),
-            Span::styled(&data.workspace_name, welcome_text()),
-            Span::styled("  ·  model ", welcome_muted()),
-            Span::styled(data.model.to_string(), welcome_text()),
-        ]),
-        Line::from(vec![Span::styled(
-            format!("{} ({})", model_label(&data.model), data.thinking),
-            welcome_muted(),
-        )]),
-    ];
+
+    let mark_rows = match inner.height {
+        0..=5 => 2,
+        6..=10 => 4,
+        _ => 3,
+    };
+    let show_steps = inner.height >= 10;
+    let show_hint = inner.height >= 8;
+    let show_context = inner.height >= 9;
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(mark_rows),
+            Constraint::Length(2),
+            Constraint::Length(u16::from(show_hint)),
+            Constraint::Length(u16::from(show_steps) * 2),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+
+    render_product_mark(f, chunks[0], lang);
 
     f.render_widget(
-        Paragraph::new(Text::from(lines))
-            .style(welcome_bg())
-            .alignment(Alignment::Left)
-            .wrap(Wrap { trim: true }),
-        inner,
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                tr(lang, "API setup required", "需要配置 API"),
+                welcome_accent().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ·  ", welcome_muted()),
+            Span::styled(
+                tr(
+                    lang,
+                    "connect once, then start coding",
+                    "连接一次，然后开始编码",
+                ),
+                welcome_muted(),
+            ),
+        ]))
+        .style(welcome_bg())
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true }),
+        chunks[1],
     );
+
+    if show_hint {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(
+                tr(
+                    lang,
+                    "Paste your API key below, then press Enter.",
+                    "粘贴 API key 后按 Enter 保存。",
+                ),
+                welcome_text(),
+            )]))
+            .style(welcome_bg())
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+            chunks[2],
+        );
+    }
+
+    if show_steps {
+        let steps = Line::from(vec![Span::styled(
+            tr(
+                lang,
+                "Paste key below, then press Enter.",
+                "在下方粘贴密钥，然后按 Enter。",
+            ),
+            welcome_muted(),
+        )]);
+        f.render_widget(
+            Paragraph::new(steps)
+                .style(welcome_bg())
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true }),
+            chunks[3],
+        );
+    }
+
+    if show_context {
+        let model = format!("{} ({})", model_label(&data.model), data.thinking);
+        let workspace = Line::from(vec![
+            Span::styled(&data.workspace_name, welcome_text()),
+            Span::styled(" · ", welcome_muted()),
+            Span::styled(model, welcome_muted()),
+        ]);
+        f.render_widget(
+            Paragraph::new(workspace)
+                .style(welcome_bg())
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true }),
+            chunks[4],
+        );
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -933,219 +1126,197 @@ fn action_span(text: &str) -> Span<'static> {
     Span::styled(text.to_string(), welcome_muted())
 }
 
-fn render_product_mark(f: &mut Frame, area: Rect) {
-    if area.width < 48 || area.height < 6 {
-        let lines = vec![
-            Line::from(vec![Span::styled(ascii_art::OCTO_TINY, welcome_badge())]),
-            Line::from(vec![Span::styled(
-                "OCTOCODE",
-                welcome_text().add_modifier(Modifier::BOLD),
-            )]),
-        ];
-        f.render_widget(
-            Paragraph::new(Text::from(lines))
-                .style(welcome_bg())
-                .alignment(Alignment::Center)
-                .wrap(Wrap { trim: true }),
-            area,
-        );
-        return;
-    }
-
-    let mark_width = ascii_art::welcome_octocode_solid_width();
-    if area.height >= 17 {
-        render_centered_clawd_product_mark(f, area, mark_width);
-        return;
-    }
-
-    let mark_width = ascii_art::welcome_octo_compact_mark_width();
-    let title_width = "Octocode multi-model coding shell".chars().count();
-    let lockup_width = mark_width + 4 + title_width;
-    if area.width as usize <= lockup_width {
-        render_centered_product_mark(f, area, ascii_art::welcome_octocode_solid_width());
-        return;
-    }
-
-    let left_x = area.x + ((area.width as usize).saturating_sub(lockup_width) / 2) as u16;
-    let title_x = left_x + mark_width as u16 + 4;
-    let title_rows: [Vec<Span<'static>>; 5] = [
-        vec![Span::styled(
-            "OCTOCODE",
-            welcome_accent().add_modifier(Modifier::BOLD),
-        )],
-        vec![Span::styled(
-            "Octocode multi-model coding shell",
-            welcome_muted(),
-        )],
-        vec![],
-        vec![Span::styled("Droid-style local workbench", welcome_muted())],
-        vec![],
-    ];
-
-    for idx in 0..ascii_art::WELCOME_OCTO_COMPACT_MARK_HEIGHT {
-        let row_y = area.y + idx as u16;
-        if row_y >= area.y + area.height {
-            break;
-        }
-
-        render_compact_octo_mark_row(f, area, left_x, row_y, idx);
-
-        if let Some(title_line) = title_rows.get(idx) {
-            let title_area = Rect::new(title_x, row_y, area.right().saturating_sub(title_x), 1);
-            f.render_widget(
-                Paragraph::new(Line::from(title_line.clone())).style(welcome_bg()),
-                title_area,
-            );
+fn pretty_workspace(path: &Path) -> String {
+    let display = path.display().to_string();
+    if let Some(home) = dirs::home_dir() {
+        let home_str = home.display().to_string();
+        if let Some(rest) = display.strip_prefix(&home_str) {
+            let trimmed = rest.trim_start_matches(['/', '\\']);
+            if trimmed.is_empty() {
+                return "~".to_string();
+            }
+            return format!("~/{}", trimmed.replace('\\', "/"));
         }
     }
+    display
 }
 
-fn render_compact_octo_mark_row(
+fn render_octo_with_bubble(
     f: &mut Frame,
     area: Rect,
-    left_x: u16,
-    row_y: u16,
-    row_idx: usize,
+    data: &WelcomeDashboardData,
+    lang: UiLanguage,
 ) {
-    let line = ascii_art::WELCOME_OCTO_COMPACT_MARK
-        .get(row_idx)
-        .copied()
-        .unwrap_or("");
-    f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            line.to_string(),
-            welcome_badge(),
-        )]))
-        .style(welcome_bg()),
-        Rect::new(left_x, row_y, area.right().saturating_sub(left_x), 1),
-    );
+    // Need at least 14 rows + 60 cols for the pet + bubble side-by-side to
+    // breathe. Below that, degrade to the wordmark only.
+    if area.height < 14 || area.width < 60 {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(if area.height >= 6 { 3 } else { 2 }),
+                Constraint::Min(0),
+            ])
+            .split(area);
+        render_product_mark(f, chunks[1], lang);
+        return;
+    }
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(28), Constraint::Min(20)])
+        .split(area);
+
+    let left = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(12),
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
+        .split(cols[0]);
+    render_octopus_pet(f, left[1]);
+    render_product_mark(f, left[3], lang);
+
+    let lines = compose_octo_dialogue(data, lang);
+    let bubble_inner = lines.len() as u16;
+    let bubble_outer = bubble_inner
+        .saturating_add(2)
+        .min(area.height.saturating_sub(2));
+    let pad_top = area.height.saturating_sub(bubble_outer) / 2;
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(pad_top),
+            Constraint::Length(bubble_outer),
+            Constraint::Min(0),
+        ])
+        .split(cols[1]);
+    render_speech_bubble(f, right[1], lines);
 }
 
-fn render_centered_clawd_product_mark(f: &mut Frame, area: Rect, mark_width: usize) {
-    let clawd_width = ascii_art::welcome_clawd_pixel_render_width();
-    for (idx, row) in ascii_art::WELCOME_CLAWD_PIXEL_MARK.iter().enumerate() {
-        let row_y = area.y + idx as u16;
-        if row_y >= area.y + area.height {
-            return;
-        }
-        let left_x = area.x + ((area.width as usize).saturating_sub(clawd_width) / 2) as u16;
-        render_clawd_pixel_mark_row(f, area, left_x, row_y, row);
-    }
-
-    let mark_y = area.y + ascii_art::WELCOME_CLAWD_PIXEL_MARK_HEIGHT as u16 + 1;
-    let left_x = area.x + ((area.width as usize).saturating_sub(mark_width) / 2) as u16;
-    for idx in 0..ascii_art::WELCOME_OCTO_SOLID_HEIGHT {
-        let row_y = mark_y + idx as u16;
-        if row_y >= area.y + area.height {
-            return;
-        }
-        render_solid_product_mark_row(f, area, left_x, row_y, idx);
-    }
-
-    let label = "OCTOCODE";
-    let label_y = mark_y + ascii_art::WELCOME_OCTO_SOLID_HEIGHT as u16;
-    if label_y < area.y + area.height && area.width as usize >= label.len() {
-        let label_x = area.x + ((area.width as usize).saturating_sub(label.len()) / 2) as u16;
-        f.render_widget(
-            Paragraph::new(gradient_label(label)).style(welcome_bg()),
-            Rect::new(label_x, label_y, area.right().saturating_sub(label_x), 1),
-        );
-    }
+fn compose_octo_dialogue(data: &WelcomeDashboardData, lang: UiLanguage) -> Vec<Line<'static>> {
+    let p = theme::palette();
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let greeting = tr(lang, "Hi, I'm Octo.", "嗨，我是 Octo。");
+    lines.push(Line::from(Span::styled(
+        greeting.to_string(),
+        Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        tr(
+            lang,
+            "You haven't set an API key yet.",
+            "你还没配 API key。",
+        )
+        .to_string(),
+        Style::default().fg(p.text),
+    )));
+    lines.push(Line::from(Span::styled(
+        tr(
+            lang,
+            "Paste it into the input row to start.",
+            "粘贴到下方输入行就能开工。",
+        )
+        .to_string(),
+        Style::default().fg(p.dim),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(
+            tr(lang, "workspace ", "工作区   ").to_string(),
+            Style::default().fg(p.dim),
+        ),
+        Span::styled(
+            pretty_workspace(&data.workspace_path),
+            Style::default().fg(p.text),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            tr(lang, "model     ", "模型     ").to_string(),
+            Style::default().fg(p.dim),
+        ),
+        Span::styled(
+            format!("{} ({})", model_label(&data.model), data.thinking),
+            Style::default().fg(p.dim),
+        ),
+    ]));
+    lines
 }
 
-fn render_clawd_pixel_mark_row(f: &mut Frame, area: Rect, left_x: u16, row_y: u16, row: &str) {
-    let spans = row
-        .chars()
-        .map(|ch| {
-            if ch == '_' {
-                Span::styled("  ", welcome_bg())
-            } else {
-                Span::styled("██", clawd_pixel_style(ch))
-            }
+fn render_speech_bubble(f: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
+    let p = theme::palette();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(p.assistant).bg(p.canvas))
+        .style(Style::default().bg(p.canvas));
+    let para = Paragraph::new(Text::from(lines))
+        .block(block)
+        .style(Style::default().bg(p.canvas))
+        .wrap(Wrap { trim: false });
+    f.render_widget(para, area);
+}
+
+fn render_octopus_pet(f: &mut Frame, area: Rect) {
+    use crate::tui::ascii_art::WELCOME_OCTO_GHOST;
+    let p = theme::palette();
+    // Tentacle tips: 60% blend of body toward canvas/dim to read as shadow.
+    let tip = p.dim;
+    let lines: Vec<Line> = WELCOME_OCTO_GHOST
+        .iter()
+        .map(|row| {
+            let spans: Vec<Span> = row
+                .chars()
+                .map(|ch| {
+                    let (block, fg, bg) = match ch {
+                        'B' => ("██", p.assistant, p.canvas),
+                        'D' => ("██", tip, p.canvas),
+                        'E' => ("██", p.canvas, p.canvas),
+                        _ => ("  ", p.canvas, p.canvas),
+                    };
+                    Span::styled(block, Style::default().fg(fg).bg(bg))
+                })
+                .collect();
+            Line::from(spans)
         })
-        .collect::<Vec<_>>();
+        .collect();
     f.render_widget(
-        Paragraph::new(Line::from(spans)).style(welcome_bg()),
-        Rect::new(left_x, row_y, area.right().saturating_sub(left_x), 1),
+        Paragraph::new(Text::from(lines))
+            .style(welcome_bg())
+            .alignment(Alignment::Center),
+        area,
     );
 }
 
-fn clawd_pixel_style(ch: char) -> Style {
-    let color = match ch {
-        'K' => Some(Color::Rgb(30, 22, 16)),
-        'B' => Some(Color::Rgb(212, 120, 74)),
-        'L' => Some(Color::Rgb(234, 168, 120)),
-        'E' => Some(Color::Rgb(12, 8, 4)),
-        'P' => Some(Color::Rgb(240, 160, 184)),
-        _ => None,
-    };
-    color.map_or_else(welcome_bg, |color| {
-        Style::default().fg(color).add_modifier(Modifier::BOLD)
-    })
-}
-
-fn render_centered_product_mark(f: &mut Frame, area: Rect, mark_width: usize) {
-    let left_x = area.x + ((area.width as usize).saturating_sub(mark_width) / 2) as u16;
-    for idx in 0..ascii_art::WELCOME_OCTO_SOLID_HEIGHT {
-        let row_y = area.y + idx as u16;
-        if row_y >= area.y + area.height {
-            break;
-        }
-        render_solid_product_mark_row(f, area, left_x, row_y, idx);
-    }
-    let label = "OCTOCODE";
-    let label_y = area.y + ascii_art::WELCOME_OCTO_SOLID_HEIGHT as u16;
-    if label_y < area.y + area.height && area.width as usize >= label.len() {
-        let label_x = area.x + ((area.width as usize).saturating_sub(label.len()) / 2) as u16;
-        f.render_widget(
-            Paragraph::new(gradient_label(label)).style(welcome_bg()),
-            Rect::new(label_x, label_y, area.right().saturating_sub(label_x), 1),
-        );
-    }
-}
-
-fn render_solid_product_mark_row(f: &mut Frame, area: Rect, left_x: u16, row_y: u16, row: usize) {
-    let mut spans = Vec::new();
-    for (idx, glyph) in ascii_art::WELCOME_OCTO_SOLID.iter().enumerate() {
-        if idx > 0 {
-            spans.push(Span::raw(" ".repeat(ascii_art::WELCOME_OCTO_GAP)));
-        }
-        spans.push(Span::styled(
-            glyph.rows[row].to_string(),
-            welcome_logo_color(idx).add_modifier(Modifier::BOLD),
-        ));
-    }
-    f.render_widget(
-        Paragraph::new(Line::from(spans)).style(welcome_bg()),
-        Rect::new(left_x, row_y, area.right().saturating_sub(left_x), 1),
+fn render_product_mark(f: &mut Frame, area: Rect, lang: UiLanguage) {
+    let workspace_line = tr(lang, "Octocode Workbench", "Octocode 工作台");
+    let subtitle = tr(
+        lang,
+        "Local, minimal, and continuous stream.",
+        "本地、轻量、持续滚动输出。",
     );
-}
+    let mut lines = vec![Line::from(vec![
+        Span::styled("OCTOCODE", welcome_accent().add_modifier(Modifier::BOLD)),
+        Span::styled(" · ", welcome_muted()),
+        Span::styled(workspace_line, welcome_text()),
+    ])];
 
-fn gradient_label(label: &'static str) -> Line<'static> {
-    Line::from(
-        label
-            .chars()
-            .enumerate()
-            .map(|(idx, ch)| {
-                Span::styled(
-                    ch.to_string(),
-                    welcome_logo_color(idx).add_modifier(Modifier::BOLD),
-                )
-            })
-            .collect::<Vec<_>>(),
-    )
-}
+    if area.height >= 2 {
+        lines.push(Line::from(Span::styled(subtitle, welcome_muted())));
+    }
 
-fn welcome_logo_color(index: usize) -> Style {
-    let color = match index % 6 {
-        0 => Color::Rgb(66, 133, 244),
-        1 => Color::Rgb(23, 156, 137),
-        2 => Color::Rgb(171, 71, 188),
-        3 => Color::Rgb(234, 67, 53),
-        4 => Color::Rgb(251, 188, 5),
-        _ => Color::Rgb(52, 168, 83),
-    };
-    Style::default().fg(color)
+    f.render_widget(
+        Paragraph::new(Text::from(lines))
+            .style(welcome_bg())
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        area,
+    );
 }
 
 fn render_capability_line(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
@@ -1158,28 +1329,38 @@ fn render_capability_line(f: &mut Frame, area: Rect, data: &WelcomeDashboardData
     );
 }
 
-fn render_quick_access(f: &mut Frame, area: Rect, _data: &WelcomeDashboardData) {
+fn render_quick_access(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
+    let lang = display_language(data);
     let lines = vec![
         Line::from(vec![
-            Span::styled("Quick start", welcome_accent()),
+            Span::styled(tr(lang, "Quick start", "快速开始"), welcome_accent()),
             Span::styled(" : ", welcome_muted()),
-            Span::styled("/help for all commands", welcome_text()),
+            Span::styled(
+                tr(lang, "/help for all commands", "/help 查看所有命令"),
+                welcome_text(),
+            ),
         ]),
         Line::from(vec![
             Span::styled("/agents", welcome_accent()),
-            Span::styled("  list / switch agents", welcome_muted()),
+            Span::styled(
+                tr(lang, "  list / switch agents", "  查看 / 切换智能体"),
+                welcome_muted(),
+            ),
         ]),
         Line::from(vec![
             Span::styled("/model", welcome_accent()),
-            Span::styled("  switch model", welcome_muted()),
+            Span::styled(tr(lang, "  switch model", "  切换模型"), welcome_muted()),
         ]),
         Line::from(vec![
             Span::styled("@path", welcome_accent()),
-            Span::styled("  mention files", welcome_muted()),
+            Span::styled(tr(lang, "  mention files", "  引用文件"), welcome_muted()),
         ]),
         Line::from(vec![
             Span::styled("!command", welcome_accent()),
-            Span::styled("  shell quick action", welcome_muted()),
+            Span::styled(
+                tr(lang, "  shell quick action", "  快速执行终端命令"),
+                welcome_muted(),
+            ),
         ]),
     ];
 
@@ -1235,12 +1416,6 @@ fn welcome_muted() -> Style {
 
 fn welcome_accent() -> Style {
     welcome_bg().fg(theme::palette().accent)
-}
-
-fn welcome_badge() -> Style {
-    welcome_bg()
-        .fg(theme::palette().info)
-        .add_modifier(Modifier::BOLD)
 }
 
 fn welcome_ok() -> Style {
@@ -1320,38 +1495,25 @@ mod tests {
             .expect("draw welcome");
         let rendered = buffer_text(terminal.backend());
         assert!(rendered.contains("OCTO"));
-        assert!(rendered.contains("What are we changing today?"));
-        assert!(rendered.contains("starters"));
+        assert!(rendered.contains("Describe your next step"));
+        assert!(rendered.contains("/help"));
         assert!(rendered.contains("workspace"));
         assert!(rendered.contains("memory"));
         assert!(!rendered.contains("Project"));
     }
 
     #[test]
-    fn wide_render_uses_multicolor_solid_wordmark() {
+    fn wide_render_uses_simple_header() {
         let data = test_data(Vec::new(), true);
         let mut terminal = Terminal::new(TestBackend::new(120, 28)).expect("create test terminal");
         terminal
             .draw(|f| render_welcome(f, f.area(), &data))
             .expect("draw welcome");
+        let rendered = buffer_text(terminal.backend());
+        let compact = rendered.replace(' ', "");
 
-        let mut solid_cells = 0usize;
-        let mut colors = std::collections::HashSet::new();
-        for cell in terminal.backend().buffer().content() {
-            if cell.symbol() == "█" {
-                solid_cells += 1;
-                colors.insert(format!("{:?}", cell.fg));
-            }
-        }
-
-        assert!(
-            solid_cells > 60,
-            "solid glyph should render as filled blocks"
-        );
-        assert!(
-            colors.len() >= 4,
-            "solid glyph should use multiple letter colors, got {colors:?}"
-        );
+        assert!(rendered.contains("OCTOCODE"));
+        assert!(compact.to_lowercase().contains("octocode"));
     }
 
     #[test]
@@ -1363,9 +1525,9 @@ mod tests {
             .expect("draw welcome");
         let rendered = buffer_text(terminal.backend());
         assert!(rendered.contains("OCTO"));
-        assert!(rendered.contains("What are we changing today?"));
+        assert!(rendered.contains("Get started"));
         assert!(rendered.contains("workspace"));
-        assert!(rendered.contains("starters"));
+        assert!(rendered.contains("/help"));
     }
 
     #[test]
@@ -1377,10 +1539,11 @@ mod tests {
             .expect("draw welcome");
         let rendered = buffer_text(terminal.backend());
         assert!(rendered.contains("OCTO"));
-        assert!(rendered.contains("Connect a provider first"));
+        assert!(rendered.contains("API setup required"));
         assert!(rendered.contains("Paste your API key"));
-        assert!(rendered.contains("enter"));
+        assert!(rendered.contains("Press Enter"));
         assert!(!rendered.contains("Type below, or press 1-3"));
+        assert!(!rendered.contains("Quick start"));
     }
 
     #[test]
@@ -1392,8 +1555,9 @@ mod tests {
             .expect("draw compact welcome");
         let rendered = buffer_text(terminal.backend());
         assert!(rendered.contains("OCTO"));
-        assert!(rendered.contains("1-3"));
+        assert!(!rendered.contains("1-3"));
         assert!(rendered.contains("enter"));
+        assert!(rendered.contains("/help"));
     }
 
     #[test]
@@ -1405,15 +1569,32 @@ mod tests {
             .expect("draw compact welcome");
         let rendered = buffer_text(terminal.backend());
         assert!(rendered.contains("API setup required"));
-        assert!(rendered.contains("enter to save"));
+        assert!(rendered.contains("press Enter"));
         assert!(!rendered.contains("starters"));
+    }
+
+    #[test]
+    fn chinese_language_renders_api_setup_copy() {
+        let mut data = test_data(Vec::new(), false);
+        data.display_language = "zh-CN".to_string();
+        let mut terminal = Terminal::new(TestBackend::new(120, 28)).expect("create test terminal");
+        terminal
+            .draw(|f| render_welcome(f, f.area(), &data))
+            .expect("draw welcome");
+        let rendered = buffer_text(terminal.backend());
+        let compact = rendered.replace(' ', "");
+
+        assert!(compact.contains("需要配置API"));
+        assert!(compact.contains("密钥粘贴"));
+        assert!(compact.contains("按Enter保存"));
+        assert!(!rendered.contains("API setup required"));
     }
 
     fn test_data(
         recent_sessions: Vec<RecentSessionItem>,
         has_api_key: bool,
     ) -> WelcomeDashboardData {
-        WelcomeDashboardData::from_parts(
+        let mut data = WelcomeDashboardData::from_parts(
             Path::new("D:/octocode"),
             DeepSeekModel::Flash,
             ThinkingMode::Auto,
@@ -1421,7 +1602,9 @@ mod tests {
             true,
             "no turn yet",
             recent_sessions,
-        )
+        );
+        data.display_language = "en-US".to_string();
+        data
     }
 
     fn buffer_text(backend: &TestBackend) -> String {

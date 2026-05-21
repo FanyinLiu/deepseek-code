@@ -102,7 +102,6 @@ pub async fn run_command_with_sandbox(
     }
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         command_builder.creation_flags(CREATE_NEW_PROCESS_GROUP);
     }
@@ -245,10 +244,6 @@ impl OutputCaptureHandle {
 
         Self { state, task }
     }
-
-    async fn snapshot(&self) -> OutputCapture {
-        self.state.lock().await.clone()
-    }
 }
 
 async fn capture_output_stream<R: tokio::io::AsyncRead + Unpin>(
@@ -282,16 +277,18 @@ async fn capture_output_stream<R: tokio::io::AsyncRead + Unpin>(
     }
 }
 
-async fn await_output_with_timeout(
-    handle: &mut OutputCaptureHandle,
-) -> OutputCapture {
+async fn await_output_with_timeout(handle: &mut OutputCaptureHandle) -> OutputCapture {
+    let state = std::sync::Arc::clone(&handle.state);
     let _ = tokio::time::timeout(Duration::from_millis(100), &mut handle.task).await;
-    handle.snapshot().await
+    let output = state.lock().await.clone();
+    output
 }
 
 async fn collect_output(handle: OutputCaptureHandle) -> OutputCapture {
+    let state = handle.state;
     let _ = handle.task.await;
-    handle.snapshot().await
+    let output = state.lock().await.clone();
+    output
 }
 
 fn append_timeout_marker(stderr: &mut String, timeout_seconds: u64) {
@@ -339,7 +336,7 @@ fn terminate_process_tree(pid: Option<u32>) {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn terminate_process_tree(pid: Option<u32>) {
     let Some(pid) = pid else {
         return;
@@ -347,8 +344,13 @@ fn terminate_process_tree(pid: Option<u32>) {
 
     let _ = std::process::Command::new("taskkill")
         .args(["/F", "/T", "/PID", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status();
 }
+
+#[cfg(all(not(unix), not(windows)))]
+fn terminate_process_tree(_pid: Option<u32>) {}
 
 fn sanitized_command_env() -> Vec<(String, String)> {
     sanitized_command_env_from(std::env::vars())
@@ -494,7 +496,7 @@ mod tests {
 
         let result = run_command(root.path(), &command, None, 1).await.unwrap();
 
-        assert!(result.timed_out);
+        assert!(result.timed_out, "expected timeout, got {result:?}");
         let pid = std::fs::read_to_string(&pid_file)
             .expect("pid file")
             .trim()
@@ -511,45 +513,71 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn timeout_kills_shell_child_process_tree() {
-        use std::time::Duration;
-        use std::{process::Command, thread};
-
         let root = tempfile::tempdir().expect("tempdir");
         let pid_file = root.path().join("child.pid");
-        // command under test should spawn a child process that runs for a while:
-        // `cmd /C ping -n 30 127.0.0.1 > nul`.
+        let escaped_pid_file = pid_file.display().to_string().replace('\'', "''");
+        let script = format!(
+            "[System.IO.File]::WriteAllText('{escaped_pid_file}', [string]$PID); cmd /C ping -n 30 127.0.0.1"
+        );
         let command = format!(
-            "powershell -NoProfile -Command \"$p = Start-Process -FilePath cmd -ArgumentList '/C','ping -n 30 127.0.0.1 > nul' -PassThru; Set-Content '{}' $p.Id; $p.WaitForExit()\"",
-            pid_file.display()
+            "powershell -NoProfile -EncodedCommand {}",
+            powershell_encoded_command(&script)
         );
 
-        let result = run_command(root.path(), &command, None, 1).await.unwrap();
-        assert!(result.timed_out);
+        let result = run_command(root.path(), &command, None, 2).await.unwrap();
+        assert!(result.timed_out, "expected timeout, got {result:?}");
 
         let pid = std::fs::read_to_string(&pid_file)
             .expect("pid file")
             .trim()
-            .to_string();
+            .parse::<u32>()
+            .expect("pid should parse");
         for _ in 0..10 {
-            let exists = Command::new("tasklist")
-                .args(["/FO", "CSV", "/NH", "/FI", &format!("PID eq {pid}")])
-                .output()
-                .map(|output| {
-                    let text = String::from_utf8_lossy(&output.stdout);
-                    text.lines().any(|line| {
-                        let mut fields = line.split(',');
-                        fields.next();
-                        fields.next().is_some_and(|field| field.trim() == format!("\"{pid}\""))
-                    })
-                })
-                .unwrap_or(false);
-            if !exists {
+            if !windows_process_exists(pid) {
                 return;
             }
-            thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
         panic!("child process {pid} should be gone after timeout");
+    }
+
+    #[cfg(windows)]
+    fn powershell_encoded_command(script: &str) -> String {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use std::os::windows::ffi::OsStrExt;
+
+        let bytes = std::ffi::OsStr::new(script)
+            .encode_wide()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<u8>>();
+        STANDARD.encode(bytes)
+    }
+
+    #[cfg(windows)]
+    fn windows_process_exists(pid: u32) -> bool {
+        use std::ffi::c_void;
+
+        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn OpenProcess(
+                dwDesiredAccess: u32,
+                bInheritHandle: i32,
+                dwProcessId: u32,
+            ) -> *mut c_void;
+            fn CloseHandle(hObject: *mut c_void) -> i32;
+        }
+
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return false;
+        }
+        unsafe {
+            CloseHandle(handle);
+        }
+        true
     }
 
     #[test]
@@ -578,7 +606,7 @@ mod tests {
     async fn capture_output_stream_tracks_truncation_and_original_bytes() {
         let source = vec![b'x'; 1024 * 1024 + 1024];
         let state = std::sync::Arc::new(tokio::sync::Mutex::new(OutputCapture::default()));
-        let stream = tokio::io::Cursor::new(source.clone());
+        let stream = std::io::Cursor::new(source.clone());
 
         capture_output_stream(stream, 1024 * 1024, state.clone()).await;
 

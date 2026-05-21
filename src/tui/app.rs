@@ -1,5 +1,6 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{hash_map::DefaultHasher, HashMap, VecDeque},
+    hash::{Hash, Hasher},
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     sync::{
@@ -9,16 +10,14 @@ use std::{
 };
 
 use crossterm::{
-    cursor::{position as cursor_position, Hide, MoveTo, Show},
+    cursor::{position as cursor_position, Hide, Show},
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, Event as CEvent,
         KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
     },
     execute,
-    style::{
-        Color as CrosstermColor, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
-    },
-    terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+    style::{Attribute, SetAttribute},
+    terminal::{Clear, ClearType},
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -33,6 +32,77 @@ use tokio::task::JoinHandle;
 
 const PAGE_SCROLL_LINES: usize = 20;
 const MOUSE_SCROLL_LINES: usize = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InputState {
+    text_hash: u64,
+    cursor_pos: usize,
+    input_height: u16,
+    api_key_entry: bool,
+    pending_options: usize,
+    history_search_active: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TranscriptState {
+    messages_len: usize,
+    last_message_hash: u64,
+    pending_user_hash: u64,
+    queued_inputs_len: usize,
+    stream_hash: u64,
+    reasoning_hash: u64,
+    scroll_offset: usize,
+    plan_hash: u64,
+    subagents_len: usize,
+    diffs_len: usize,
+    settings_open: bool,
+    showing_welcome: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StatusState {
+    render_epoch: u64,
+    streaming_bucket: u64,
+    idle_seconds: u64,
+    notice_hash: u64,
+    status_hash: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RenderDirtyState {
+    input: InputState,
+    transcript: TranscriptState,
+    status: StatusState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RenderDirtyFlags {
+    input: bool,
+    transcript: bool,
+    status: bool,
+}
+
+impl RenderDirtyState {
+    fn diff(self, previous: Self) -> RenderDirtyFlags {
+        RenderDirtyFlags {
+            input: self.input != previous.input,
+            transcript: self.transcript != previous.transcript,
+            status: self.status != previous.status,
+        }
+    }
+}
+
+impl RenderDirtyFlags {
+    fn any(self) -> bool {
+        self.input || self.transcript || self.status
+    }
+}
+
+fn stable_hash<T: Hash>(value: &T) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
 
 fn animated_token_count(target: u64, elapsed_ms: u64) -> u64 {
     if target == 0 {
@@ -54,17 +124,15 @@ use crate::deepseek::{
     ToolCallFunction,
 };
 use crate::policy::ApprovalDisplay;
-use crate::provider::{build_provider, Provider, ProviderKind};
+use crate::provider::{build_provider, context_budget_for, Provider, ProviderKind};
 use crate::storage;
 
 use super::{
     approval_popup, diff_viewer, file_tree, input, layout, model_hint, motion, plan_tracker,
-    render_core, settings_panel, status_bar, statusline, subagent_cards, theme, transcript_view,
-    welcome,
+    render_core, select_popup, settings_panel, status_bar, statusline, subagent_cards, theme,
+    transcript_view, welcome,
 };
-use render_core::{
-    render_canvas, render_classic_divider, render_jump_to_bottom_hint, render_top_model_badge,
-};
+use render_core::{render_canvas, render_jump_to_bottom_hint};
 
 type ApprovalRequest = (ApprovalDisplay, tokio::sync::oneshot::Sender<bool>);
 
@@ -85,6 +153,7 @@ pub struct TuiApp {
     current_turn_usage_finalized: bool,
     input_token_animation_started: Option<std::time::Instant>,
     pub total_cost: f64,
+    pub session_id: Option<SessionId>,
     pub session_name: Option<String>,
     pub welcome: welcome::WelcomeDashboardData,
     api_key_state: ApiKeyState,
@@ -102,6 +171,7 @@ pub struct TuiApp {
     pub session_auto_approve: bool,
     pub interaction_mode: InteractionMode,
     pub running: bool,
+    exit_confirm_pending: bool,
     pub plan_steps: Vec<plan_tracker::PlanStepItem>,
     pub plan_current_step: usize,
     pub plan_total_steps: usize,
@@ -112,6 +182,12 @@ pub struct TuiApp {
     pub file_diffs: Vec<diff_viewer::FileDiffItem>,
     pub options_needed: Option<DecisionPrompt>,
     pub pending_options: Option<(String, Vec<String>)>,
+    pub todo_summary: crate::tools::todo_state::TodoSummary,
+    pub recent_tool_summaries: VecDeque<String>,
+    pub last_user_question_summary: Option<String>,
+    pub latest_compact_summary: Option<String>,
+    pub latest_compact_reason: Option<String>,
+    compact_notice: Option<String>,
     pub selected_option_index: usize,
     pub selected_slash_index: usize,
     pub selected_file_mention_index: usize,
@@ -193,15 +269,12 @@ impl RendererMode {
     }
 
     #[must_use]
-    fn from_config_for_environment(value: &str, env: &TerminalEnvironment) -> Self {
+    fn from_config_for_environment(value: &str, _env: &TerminalEnvironment) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
-            "" | "auto" | "default" => {
-                if env.prefers_classic_renderer() {
-                    Self::Classic
-                } else {
-                    Self::Fullscreen
-                }
-            }
+            // Auto now prefers the inline viewport so the transcript stays in
+            // the terminal's native scrollback. Users who
+            // explicitly want the legacy full-screen mode can still ask for it.
+            "" | "auto" | "default" => Self::Classic,
             "fullscreen" | "full-screen" | "alternate" | "alt" => Self::Fullscreen,
             _ => Self::Classic,
         }
@@ -213,11 +286,6 @@ impl RendererMode {
             Self::Classic => "classic",
             Self::Fullscreen => "fullscreen",
         }
-    }
-
-    #[must_use]
-    fn uses_alternate_screen(self) -> bool {
-        self == Self::Fullscreen
     }
 
     #[must_use]
@@ -287,6 +355,7 @@ impl ApiKeyState {
 struct TuiStartupData {
     config: storage::Config,
     config_loaded: bool,
+    config_load_error: Option<String>,
     api_key_available: bool,
     probe_keyring: bool,
 }
@@ -294,8 +363,10 @@ struct TuiStartupData {
 impl TuiStartupData {
     fn load(root: &Path) -> (Self, Option<String>) {
         let config_result = storage::Config::load(Some(root));
-        let config_loaded = config_result.is_ok();
-        let config = config_result.unwrap_or_default();
+        let (config_loaded, config_load_error, config) = match config_result {
+            Ok(cfg) => (true, None, cfg),
+            Err(err) => (false, Some(err.to_string()), storage::Config::default()),
+        };
         let provider = config.provider.default;
         let api_key = storage::get_api_key_without_keyring_for_provider(
             provider,
@@ -309,6 +380,7 @@ impl TuiStartupData {
             Self {
                 config,
                 config_loaded,
+                config_load_error,
                 api_key_available,
                 probe_keyring,
             },
@@ -320,6 +392,7 @@ impl TuiStartupData {
         Self {
             config: storage::Config::default(),
             config_loaded: false,
+            config_load_error: None,
             api_key_available,
             probe_keyring: false,
         }
@@ -388,6 +461,7 @@ fn load_welcome_with_startup(
         mcp_servers: welcome_mcp_servers(config),
         agents_md: welcome_agents_md(root),
         detected_language: detect_project_language(root),
+        display_language: config.ui.language.clone(),
     }
 }
 
@@ -585,12 +659,20 @@ impl TuiApp {
 
         let api_key_state = ApiKeyState::from_welcome(welcome.api_key_status);
         let api_key_missing = !api_key_state.is_ready();
+        let config_load_error = startup.config_load_error.clone();
+        let initial_activity = if let Some(err) = &config_load_error {
+            vec![format!("config load failed (using defaults): {err}")]
+        } else {
+            Vec::new()
+        };
 
         Self {
             input_text: String::new(),
             cursor_pos: 0,
             scroll_offset: 0,
-            status_message: if api_key_missing {
+            status_message: if let Some(err) = &config_load_error {
+                format!("config error — using defaults: {err}")
+            } else if api_key_missing {
                 "Enter your provider API key to start".into()
             } else {
                 "Ready".into()
@@ -606,6 +688,7 @@ impl TuiApp {
             current_turn_usage_finalized: false,
             input_token_animation_started: None,
             total_cost: 0.0,
+            session_id: None,
             session_name,
             welcome,
             api_key_state: if api_key_missing {
@@ -614,7 +697,7 @@ impl TuiApp {
                 api_key_state
             },
             api_key_entry: api_key_missing.then(ApiKeyEntry::default),
-            activity_log: Vec::new(),
+            activity_log: initial_activity,
             current_task_title: String::new(),
             pending_user_message: None,
             queued_inputs: VecDeque::new(),
@@ -627,6 +710,7 @@ impl TuiApp {
             session_auto_approve: false,
             interaction_mode: InteractionMode::Ask,
             running: true,
+            exit_confirm_pending: false,
             plan_steps: Vec::new(),
             plan_current_step: 0,
             plan_total_steps: 0,
@@ -637,6 +721,12 @@ impl TuiApp {
             file_diffs: Vec::new(),
             options_needed: None,
             pending_options: None,
+            todo_summary: crate::tools::todo_state::load_todo_summary(&project_root),
+            recent_tool_summaries: VecDeque::new(),
+            last_user_question_summary: None,
+            latest_compact_summary: None,
+            latest_compact_reason: None,
+            compact_notice: None,
             selected_option_index: 0,
             selected_slash_index: 0,
             selected_file_mention_index: 0,
@@ -737,11 +827,208 @@ impl TuiApp {
         )
     }
 
+    fn render_epoch(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        let mode_tag = match self.current_mode() {
+            status_bar::AppMode::Chat => 0u8,
+            status_bar::AppMode::Plan => 1,
+            status_bar::AppMode::Run => 2,
+            status_bar::AppMode::Review => 3,
+        };
+        let interaction_tag = match self.interaction_mode {
+            InteractionMode::Ask => 0u8,
+            InteractionMode::Plan => 1,
+            InteractionMode::AutoReview => 2,
+            InteractionMode::FullAccess => 3,
+        };
+        let model_tag = match self.model {
+            DeepSeekModel::Pro => 0u8,
+            DeepSeekModel::Flash => 1,
+            DeepSeekModel::LegacyChat => 2,
+            DeepSeekModel::LegacyReasoner => 3,
+        };
+        let thinking_tag = match self.thinking_mode {
+            ThinkingMode::Auto => 0u8,
+            ThinkingMode::On => 1,
+            ThinkingMode::Off => 2,
+        };
+        let renderer_tag = match self.renderer_mode {
+            RendererMode::Classic => 0u8,
+            RendererMode::Fullscreen => 1,
+        };
+        let api_key_state_tag = match self.api_key_state {
+            ApiKeyState::Missing => 0u8,
+            ApiKeyState::Entering => 1,
+            ApiKeyState::Saving => 2,
+            ApiKeyState::Ready => 3,
+            ApiKeyState::Error => 4,
+        };
+
+        mode_tag.hash(&mut hasher);
+        interaction_tag.hash(&mut hasher);
+        model_tag.hash(&mut hasher);
+        thinking_tag.hash(&mut hasher);
+        renderer_tag.hash(&mut hasher);
+        api_key_state_tag.hash(&mut hasher);
+        self.motion_level.hash(&mut hasher);
+        self.is_streaming.hash(&mut hasher);
+        self.messages.len().hash(&mut hasher);
+        self.stream_buffer.len().hash(&mut hasher);
+        self.reasoning_buffer.len().hash(&mut hasher);
+        self.pending_user_message.is_some().hash(&mut hasher);
+        self.scroll_offset.hash(&mut hasher);
+        self.status_message.len().hash(&mut hasher);
+        self.current_task_title.hash(&mut hasher);
+        self.current_turn_tokens.hash(&mut hasher);
+        self.current_turn_input_tokens.hash(&mut hasher);
+        self.current_turn_output_tokens.hash(&mut hasher);
+        self.current_turn_usage_finalized.hash(&mut hasher);
+        self.total_tokens.hash(&mut hasher);
+        self.total_cost.to_bits().hash(&mut hasher);
+        self.input_text.len().hash(&mut hasher);
+        self.cursor_pos.hash(&mut hasher);
+        self.plan_steps.len().hash(&mut hasher);
+        self.plan_current_step.hash(&mut hasher);
+        self.plan_total_steps.hash(&mut hasher);
+        self.subagents.len().hash(&mut hasher);
+        self.options_needed.is_some().hash(&mut hasher);
+        self.pending_options
+            .as_ref()
+            .map(|(_, options)| options.len())
+            .hash(&mut hasher);
+        self.history_search_active.hash(&mut hasher);
+        self.status_notice().hash(&mut hasher);
+        self.todo_summary.total.hash(&mut hasher);
+        self.todo_summary.pending.hash(&mut hasher);
+        self.todo_summary.in_progress.hash(&mut hasher);
+        self.todo_summary.completed.hash(&mut hasher);
+        self.todo_summary.cancelled.hash(&mut hasher);
+        self.todo_summary.active.is_some().hash(&mut hasher);
+        self.file_diffs.len().hash(&mut hasher);
+        self.queued_inputs.len().hash(&mut hasher);
+        self.show_file_tree.hash(&mut hasher);
+        self.file_tree.nodes.len().hash(&mut hasher);
+        self.file_tree.selected.hash(&mut hasher);
+        self.file_tree.scroll_offset.hash(&mut hasher);
+        self.settings_open.hash(&mut hasher);
+        self.settings_selected.hash(&mut hasher);
+        match self.settings_tab {
+            settings_panel::SettingsTab::Model => 0u8,
+            settings_panel::SettingsTab::Safety => 1,
+            settings_panel::SettingsTab::Interface => 2,
+            settings_panel::SettingsTab::Agents => 3,
+        }
+        .hash(&mut hasher);
+
+        self.exit_confirm_pending.hash(&mut hasher);
+        self.stream_start.is_some().hash(&mut hasher);
+        self.current_turn_reasoning_tokens.hash(&mut hasher);
+        self.is_chinese_ui().hash(&mut hasher);
+        self.welcome.workspace_name.len().hash(&mut hasher);
+        self.active_swarm.is_some().hash(&mut hasher);
+
+        hasher.finish()
+    }
+
+    fn render_dirty_state(&self) -> RenderDirtyState {
+        RenderDirtyState {
+            input: self.input_state(),
+            transcript: self.transcript_state(),
+            status: self.status_state(),
+        }
+    }
+
+    fn input_state(&self) -> InputState {
+        InputState {
+            text_hash: stable_hash(&self.input_text),
+            cursor_pos: self.cursor_pos,
+            input_height: self.input_height(),
+            api_key_entry: self.api_key_entry.is_some(),
+            pending_options: self
+                .pending_options
+                .as_ref()
+                .map_or(0, |(_, opts)| opts.len()),
+            history_search_active: self.history_search_active,
+        }
+    }
+
+    fn transcript_state(&self) -> TranscriptState {
+        let last_message_hash = self.messages.last().map_or(0, |message| {
+            let visibility_tag = match message.visibility {
+                MessageVisibility::UserVisible => 0u8,
+                MessageVisibility::InternalProtocolState => 1,
+                MessageVisibility::AuditOnly => 2,
+            };
+            stable_hash(&(
+                &message.id,
+                message.role.to_string(),
+                message.content.to_string_lossy(),
+                message.tool_calls.len(),
+                message.tool_results.len(),
+                visibility_tag,
+            ))
+        });
+        let plan_hash = stable_hash(&(
+            self.plan_summary.as_deref(),
+            self.plan_steps.len(),
+            self.plan_current_step,
+            self.plan_total_steps,
+            self.plan_warnings.len(),
+        ));
+
+        TranscriptState {
+            messages_len: self.messages.len(),
+            last_message_hash,
+            pending_user_hash: stable_hash(&self.pending_user_message),
+            queued_inputs_len: self.queued_inputs.len(),
+            stream_hash: stable_hash(&self.stream_buffer),
+            reasoning_hash: stable_hash(&(
+                &self.reasoning_buffer,
+                self.current_turn_reasoning_tokens,
+                self.show_reasoning,
+            )),
+            scroll_offset: self.scroll_offset,
+            plan_hash,
+            subagents_len: self.subagents.len(),
+            diffs_len: self.file_diffs.len(),
+            settings_open: self.settings_open,
+            showing_welcome: self.is_showing_welcome(),
+        }
+    }
+
+    fn status_state(&self) -> StatusState {
+        let streaming_bucket = if self.is_streaming {
+            self.stream_motion_frame().elapsed_ms / motion::MotionFrame::TICK_MS
+        } else {
+            0
+        };
+        let idle_seconds = if !self.is_streaming && self.ui_started_at.elapsed().as_secs() >= 3 {
+            self.ui_started_at.elapsed().as_secs()
+        } else {
+            0
+        };
+
+        StatusState {
+            render_epoch: self.render_epoch(),
+            streaming_bucket,
+            idle_seconds,
+            notice_hash: stable_hash(&self.status_notice()),
+            status_hash: stable_hash(&(
+                &self.status_message,
+                &self.current_task_title,
+                self.current_turn_tokens,
+                self.current_turn_input_tokens,
+                self.current_turn_output_tokens,
+                self.live_agent_tokens(),
+            )),
+        }
+    }
+
     pub fn set_renderer_mode(&mut self, mode: RendererMode) {
         self.renderer_mode = mode;
         self.config.ui.renderer = mode.label().to_string();
         self.status_message = format!(
-            "TUI renderer set to {}; restart octocode to apply terminal mode",
+            "TUI renderer set to {}; restart octo to apply terminal mode",
             mode.label()
         );
         self.push_activity(format!("renderer: {}", mode.label()));
@@ -757,7 +1044,7 @@ impl TuiApp {
         self.renderer_mode = RendererMode::from_config(stored);
         self.config.ui.renderer = stored.to_string();
         self.status_message = format!(
-            "TUI renderer set to {} (resolved to {}); restart octocode to apply terminal mode",
+            "TUI renderer set to {} (resolved to {}); restart octo to apply terminal mode",
             stored,
             self.renderer_mode.label()
         );
@@ -768,19 +1055,43 @@ impl TuiApp {
         ));
     }
 
+    fn input_placeholder(&self) -> &'static str {
+        ""
+    }
+
+    fn api_key_input_placeholder(&self) -> &'static str {
+        if self.is_chinese_ui() {
+            "粘贴 API key"
+        } else {
+            "paste API key"
+        }
+    }
+
+    fn is_chinese_ui(&self) -> bool {
+        welcome::is_chinese_display_language(&self.config.ui.language)
+    }
+
     pub fn open_settings_panel(&mut self) {
         self.settings_open = true;
         self.settings_selected = self
             .settings_selected
             .min(settings_panel::row_count(self.settings_tab).saturating_sub(1));
-        self.status_message = "Settings: Enter/Space/←/→ edits selected value".into();
+        self.status_message = if self.is_chinese_ui() {
+            "设置：Enter/Space/←/→ 修改当前项".into()
+        } else {
+            "Settings: Enter/Space/←/→ edits selected value".into()
+        };
     }
 
     fn handle_settings_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
                 self.settings_open = false;
-                self.status_message = "Settings closed".into();
+                self.status_message = if self.is_chinese_ui() {
+                    "设置已关闭".into()
+                } else {
+                    "Settings closed".into()
+                };
             }
             KeyCode::Tab => {
                 self.settings_tab = self.settings_tab.next();
@@ -921,6 +1232,17 @@ impl TuiApp {
 
     fn apply_interface_setting_change(&mut self, delta: i32) -> bool {
         match self.settings_selected {
+            0 => {
+                self.config.ui.language = cycle_ui_language(&self.config.ui.language, delta);
+                self.welcome.display_language = self.config.ui.language.clone();
+                self.status_message = if self.is_chinese_ui() {
+                    format!("界面语言：{}", self.config.ui.language)
+                } else {
+                    format!("Display language: {}", self.config.ui.language)
+                };
+                self.push_activity(format!("language: {}", self.config.ui.language));
+                true
+            }
             1 => {
                 let next = cycle_theme_mode(self.theme_mode, delta);
                 self.set_theme_mode(next);
@@ -998,10 +1320,10 @@ impl TuiApp {
             return;
         }
         if is_exit_key(key) {
-            self.running = false;
-            self.status_message = "Exiting".into();
+            self.handle_exit_key();
             return;
         }
+        self.clear_exit_confirmation();
 
         // Decision selection mode: arrow keys + Enter, with digit/letter shortcuts.
         if let Some(decision) = self.options_needed.take() {
@@ -1115,8 +1437,6 @@ impl TuiApp {
             return;
         }
 
-        let showing_welcome = self.is_showing_welcome();
-
         match key.code {
             KeyCode::Enter => {
                 // File tree: read selected file
@@ -1157,7 +1477,9 @@ impl TuiApp {
                         if let Some((_, options)) = self.pending_options.take() {
                             let choice = try_match_option(&input, &options);
                             if let Some((idx, text)) = choice {
-                                let _ = tx.send(TuiAction::Submit(text));
+                                let _ = tx.send(TuiAction::Submit(format_pending_option_reply(
+                                    idx, &text,
+                                )));
                                 self.status_message = format!("Selected option {}", idx);
                                 return;
                             }
@@ -1368,15 +1690,6 @@ impl TuiApp {
                         self.status_message = "File tree OFF".into();
                     }
                 }
-                '1' | '2' | '3' if showing_welcome && self.input_text.is_empty() => {
-                    if let Some(prompt) =
-                        welcome::suggested_prompt(c.to_digit(10).unwrap() as usize)
-                    {
-                        self.input_text = prompt.to_string();
-                        self.cursor_pos = self.input_text.chars().count();
-                        self.status_message = format!("Loaded launch prompt {c}");
-                    }
-                }
                 'j' if self.input_text.is_empty()
                     && !self.diff_focused
                     && !self.file_tree_focused =>
@@ -1514,7 +1827,11 @@ impl TuiApp {
             }
             KeyCode::Esc => {
                 self.selected_slash_index = 0;
-                self.status_message = "Command suggestions dismissed".into();
+                self.status_message = if self.is_chinese_ui() {
+                    "命令建议已关闭".into()
+                } else {
+                    "Command suggestions dismissed".into()
+                };
                 false
             }
             _ => false,
@@ -1529,7 +1846,11 @@ impl TuiApp {
         self.input_text = format!("{} ", suggestions[idx].0);
         self.cursor_pos = self.input_text.chars().count();
         self.selected_slash_index = idx;
-        self.status_message = format!("Command: {}", suggestions[idx].0);
+        self.status_message = if self.is_chinese_ui() {
+            format!("命令：{}", suggestions[idx].0)
+        } else {
+            format!("Command: {}", suggestions[idx].0)
+        };
     }
 
     fn slash_command_suggestions(&self) -> Vec<(String, String)> {
@@ -1540,6 +1861,7 @@ impl TuiApp {
         }
 
         let registry = crate::commands::CommandRegistry::new();
+        let language = &self.config.ui.language;
         registry
             .match_prefix(trimmed)
             .into_iter()
@@ -1557,9 +1879,13 @@ impl TuiApp {
                     display_name.to_string(),
                     format!(
                         "{} · {} · {}",
-                        slash_command_group(cmd.name),
-                        cmd.description,
-                        cmd.usage
+                        slash_command_group(cmd.name, self.is_chinese_ui()),
+                        crate::commands::localized_command_description(
+                            cmd.name,
+                            cmd.description,
+                            language
+                        ),
+                        crate::commands::localized_command_usage(cmd.usage, language)
                     ),
                 )
             })
@@ -1823,7 +2149,10 @@ impl TuiApp {
         let selected = options[idx].clone();
         self.selected_option_index = 0;
         self.status_message = format!("Selected: {selected}");
-        let _ = tx.send(TuiAction::Submit(selected));
+        let _ = tx.send(TuiAction::Submit(format_pending_option_reply(
+            idx + 1,
+            &selected,
+        )));
     }
 
     fn open_history_search(&mut self) {
@@ -1935,11 +2264,15 @@ impl TuiApp {
             return;
         }
 
-        if self.history_cursor.is_none() {
-            self.draft_input = self.input_text.clone();
-            self.history_cursor = Some(self.input_history.len() - 1);
-        } else if self.history_cursor.unwrap() > 0 {
-            self.history_cursor = Some(self.history_cursor.unwrap() - 1);
+        match self.history_cursor {
+            None => {
+                self.draft_input = self.input_text.clone();
+                self.history_cursor = Some(self.input_history.len() - 1);
+            }
+            Some(cursor) if cursor > 0 => {
+                self.history_cursor = Some(cursor - 1);
+            }
+            Some(_) => {}
         }
 
         if let Some(idx) = self.history_cursor {
@@ -1986,10 +2319,22 @@ impl TuiApp {
             [cmd] => {
                 self.input_text = format!("{} ", cmd.name);
                 self.cursor_pos = self.input_text.chars().count();
-                self.status_message = format!("{} — {}", cmd.name, cmd.description);
+                self.status_message = format!(
+                    "{} — {}",
+                    cmd.name,
+                    crate::commands::localized_command_description(
+                        cmd.name,
+                        cmd.description,
+                        &self.config.ui.language
+                    )
+                );
             }
             [] => {
-                self.status_message = format!("No slash command matches {trimmed}");
+                self.status_message = if self.is_chinese_ui() {
+                    format!("没有匹配的斜杠命令：{trimmed}")
+                } else {
+                    format!("No slash command matches {trimmed}")
+                };
             }
             many => {
                 let names = many
@@ -1997,7 +2342,11 @@ impl TuiApp {
                     .map(|cmd| cmd.name)
                     .collect::<Vec<_>>()
                     .join(" ");
-                self.status_message = format!("Slash commands: {names}");
+                self.status_message = if self.is_chinese_ui() {
+                    format!("斜杠命令：{names}")
+                } else {
+                    format!("Slash commands: {names}")
+                };
             }
         }
         true
@@ -2114,7 +2463,7 @@ impl TuiApp {
 
     fn input_height(&self) -> u16 {
         if self.api_key_entry.is_some() {
-            return 5; // bordered panel needs room for frame + content + hint
+            return 1;
         }
         logical_line_count(&self.input_text).clamp(1, 5) as u16
     }
@@ -2139,7 +2488,16 @@ impl TuiApp {
     }
 
     fn is_showing_welcome(&self) -> bool {
-        self.messages.is_empty() && self.stream_buffer.is_empty() && !self.is_streaming
+        !self.api_key_state.is_ready()
+            && self.messages.is_empty()
+            && self.stream_buffer.is_empty()
+            && !self.is_streaming
+    }
+
+    fn runtime_idle_title(&self) -> Option<String> {
+        // Quiet by default when idle. No badge, no ticking counter —
+        // the user can see they're idle without us announcing it every second.
+        None
     }
 
     fn clear_input_editor(&mut self) {
@@ -2251,6 +2609,187 @@ impl TuiApp {
         self.welcome.api_key_status = self.api_key_state.welcome_status();
     }
 
+    pub fn refresh_todo_summary(&mut self) {
+        self.todo_summary = crate::tools::todo_state::load_todo_summary(&self.file_tree.root);
+    }
+
+    fn push_recent_tool_summary(&mut self, tool_name: &str, success: bool, summary: &str) {
+        let status = if success { "ok" } else { "error" };
+        let line = format!("{tool_name} [{status}]: {}", first_line(summary));
+        if self
+            .recent_tool_summaries
+            .back()
+            .is_some_and(|existing| existing == &line)
+        {
+            return;
+        }
+        self.recent_tool_summaries.push_back(line);
+        while self.recent_tool_summaries.len() > 5 {
+            self.recent_tool_summaries.pop_front();
+        }
+    }
+
+    fn restore_recoverable_state_from_events(&mut self, events: &[crate::storage::SessionEvent]) {
+        self.recent_tool_summaries.clear();
+        let mut latest_user_index = None;
+        let mut latest_question: Option<(usize, String, Vec<String>, String)> = None;
+        let mut latest_compact: Option<(String, String)> = None;
+        for (index, event) in events.iter().enumerate() {
+            match &event.kind {
+                crate::storage::SessionEventKind::UserMessage { .. } => {
+                    latest_user_index = Some(index);
+                }
+                crate::storage::SessionEventKind::ToolCallFinished {
+                    name,
+                    success,
+                    summary,
+                    ..
+                } => self.push_recent_tool_summary(name, *success, summary),
+                crate::storage::SessionEventKind::UserQuestionRequested {
+                    title,
+                    options,
+                    summary,
+                    ..
+                } => {
+                    latest_question =
+                        Some((index, title.clone(), options.clone(), summary.clone()));
+                }
+                crate::storage::SessionEventKind::ContextCompacted {
+                    summary, reason, ..
+                } => {
+                    latest_compact = Some((summary.clone(), reason.clone()));
+                }
+                _ => {}
+            }
+        }
+
+        if let Some((summary, reason)) = latest_compact {
+            self.latest_compact_summary = Some(summary);
+            self.latest_compact_reason = Some(reason);
+        }
+
+        if let Some((question_index, title, options, summary)) = latest_question {
+            self.last_user_question_summary = Some(summary);
+            if latest_user_index.is_none_or(|user_index| question_index > user_index)
+                && !options.is_empty()
+            {
+                self.pending_options = Some((title, options));
+                self.selected_option_index = 0;
+            }
+        }
+    }
+
+    pub fn compact_local_context(
+        &mut self,
+        root: &Path,
+        messages_to_keep: usize,
+        reason: &str,
+    ) -> crate::agent::compact::CompactSnapshot {
+        let mut session = self.session_snapshot(root);
+        let mut events = Vec::new();
+        for line in &self.recent_tool_summaries {
+            events.push(crate::storage::SessionEvent::new(
+                session.id,
+                None,
+                crate::storage::SessionEventKind::ToolCallFinished {
+                    tool_call_id: String::new(),
+                    name: "tool".to_string(),
+                    success: !line.contains("[error]"),
+                    summary: line.clone(),
+                    duration_ms: 0,
+                    changed_files: Vec::new(),
+                },
+            ));
+        }
+        if let Some(summary) = &self.last_user_question_summary {
+            let (title, options) = self
+                .pending_options
+                .as_ref()
+                .map(|(title, options)| (title.clone(), options.clone()))
+                .unwrap_or_else(|| ("pending question".to_string(), Vec::new()));
+            events.push(crate::storage::SessionEvent::new(
+                session.id,
+                None,
+                crate::storage::SessionEventKind::UserQuestionRequested {
+                    tool_call_id: String::new(),
+                    name: "ask_user".to_string(),
+                    title,
+                    options,
+                    summary: summary.clone(),
+                },
+            ));
+        }
+        if let (Some(summary), Some(reason)) =
+            (&self.latest_compact_summary, &self.latest_compact_reason)
+        {
+            events.push(crate::storage::SessionEvent::new(
+                session.id,
+                None,
+                crate::storage::SessionEventKind::ContextCompacted {
+                    before_tokens: 0,
+                    after_tokens: 0,
+                    before_messages: 0,
+                    after_messages: 0,
+                    retained_start: 0,
+                    retained_count: 0,
+                    summary: summary.clone(),
+                    reason: reason.clone(),
+                },
+            ));
+        }
+
+        session.messages = self.messages.clone();
+        let snapshot = crate::agent::compact::build_compact_snapshot(
+            &session,
+            Some(&events),
+            messages_to_keep,
+            reason,
+        );
+        self.messages = crate::agent::compact::retained_messages(&session, messages_to_keep);
+        self.latest_compact_summary = Some(snapshot.summary.clone());
+        self.latest_compact_reason = Some(snapshot.reason.clone());
+        self.compact_notice = Some(if self.is_chinese_ui() {
+            format!(
+                "已压缩上下文：{} -> {} tokens",
+                compact_token_label(snapshot.before_tokens),
+                compact_token_label(snapshot.after_tokens)
+            )
+        } else {
+            format!(
+                "Context compacted: {} -> {} tokens",
+                compact_token_label(snapshot.before_tokens),
+                compact_token_label(snapshot.after_tokens)
+            )
+        });
+        self.push_activity(format!(
+            "compact: {} -> {} tokens, kept {} messages",
+            snapshot.before_tokens, snapshot.after_tokens, snapshot.retained_count
+        ));
+
+        if let (Some(home), Some(session_id)) = (dirs::home_dir(), self.session_id) {
+            let store = crate::storage::EventLogStore::new(home.join(".octocode"));
+            let event = crate::storage::SessionEvent::new(
+                session_id,
+                None,
+                crate::storage::SessionEventKind::ContextCompacted {
+                    before_tokens: snapshot.before_tokens,
+                    after_tokens: snapshot.after_tokens,
+                    before_messages: snapshot.before_messages,
+                    after_messages: snapshot.after_messages,
+                    retained_start: snapshot.retained_start,
+                    retained_count: snapshot.retained_count,
+                    summary: snapshot.summary.clone(),
+                    reason: snapshot.reason.clone(),
+                },
+            );
+            if let Err(error) = store.append(root, &event) {
+                self.push_activity(format!("compact event write failed: {error}"));
+            }
+        }
+
+        snapshot
+    }
+
     fn mark_api_key_ready_from_storage(&mut self, root: &Path) {
         self.set_api_key_state(ApiKeyState::Ready);
         self.api_key_entry = None;
@@ -2277,7 +2816,7 @@ impl TuiApp {
         self.set_api_key_state(ApiKeyState::Error);
         self.status_message = format!("API key save failed: {error}");
         self.stream_buffer = format!(
-            "Could not save API key.\n\n{error}\n\nTry again, or run `octocode login --api-key <key>`."
+            "Could not save API key.\n\n{error}\n\nTry again, or run `octo login --api-key <key>`."
         );
         if let Some(entry) = self.api_key_entry.as_mut() {
             entry.saving = false;
@@ -2304,6 +2843,7 @@ impl TuiApp {
         self.pending_user_message = Some(input.to_string());
         self.stream_buffer.clear();
         self.pending_options = None;
+        self.compact_notice = None;
         self.selected_option_index = 0;
         self.push_activity(format!("turn started: {}", self.current_task_title));
         self.status_message = "Running turn...".into();
@@ -2380,6 +2920,44 @@ impl TuiApp {
         } else {
             self.status_message = "No active swarm to cancel".into();
         }
+    }
+
+    fn handle_exit_key(&mut self) -> bool {
+        if self.exit_confirm_pending {
+            self.exit_confirm_pending = false;
+            self.running = false;
+            self.status_message = if self.is_chinese_ui() {
+                "正在退出".into()
+            } else {
+                "Exiting".into()
+            };
+            true
+        } else {
+            self.exit_confirm_pending = true;
+            self.status_message = self.exit_confirm_message().into();
+            false
+        }
+    }
+
+    fn clear_exit_confirmation(&mut self) {
+        self.exit_confirm_pending = false;
+    }
+
+    fn exit_confirm_message(&self) -> &'static str {
+        if self.is_chinese_ui() {
+            "再次按 Ctrl+D 退出"
+        } else {
+            "Press Ctrl+D again to exit"
+        }
+    }
+
+    fn status_notice(&self) -> Option<&str> {
+        if self.exit_confirm_pending && !self.status_message.trim().is_empty() {
+            return Some(self.status_message.as_str());
+        }
+        self.compact_notice
+            .as_deref()
+            .filter(|notice| !notice.trim().is_empty())
     }
 
     fn enqueue_approval(
@@ -2476,7 +3054,7 @@ impl TuiApp {
 
     fn session_snapshot(&self, root: &Path) -> Session {
         Session {
-            id: SessionId::new_v4(),
+            id: self.session_id.unwrap_or_else(SessionId::new_v4),
             name: self.session_name.clone(),
             project_root: root.to_path_buf(),
             messages: self.messages.clone(),
@@ -2538,6 +3116,10 @@ impl TuiApp {
                 summary,
             } => {
                 let status = if success { "ok" } else { "error" };
+                self.push_recent_tool_summary(&tool_name, success, &summary);
+                if success && tool_name == "todo_write" {
+                    self.refresh_todo_summary();
+                }
                 self.push_activity(format!(
                     "tool {} [{}]: {}",
                     tool_name,
@@ -2545,6 +3127,51 @@ impl TuiApp {
                     first_line(&summary)
                 ));
                 self.status_message = format!("Tool {tool_name} [{status}]: {summary}");
+            }
+            AgentEvent::UserQuestionRequested {
+                title,
+                options,
+                summary,
+            } => {
+                self.last_user_question_summary = Some(summary);
+                self.pending_options = Some((title.clone(), options));
+                self.selected_option_index = 0;
+                self.is_streaming = false;
+                self.stream_start = None;
+                self.status_message = format!(
+                    "{}：{}",
+                    if self.is_chinese_ui() {
+                        "需要选择"
+                    } else {
+                        "Select an option"
+                    },
+                    title
+                );
+            }
+            AgentEvent::ContextCompacted {
+                summary,
+                reason,
+                before_tokens,
+                after_tokens,
+            } => {
+                self.latest_compact_summary = Some(summary);
+                self.latest_compact_reason = Some(reason.clone());
+                self.compact_notice = Some(if self.is_chinese_ui() {
+                    format!(
+                        "已自动压缩上下文：{} -> {} tokens",
+                        compact_token_label(before_tokens),
+                        compact_token_label(after_tokens)
+                    )
+                } else {
+                    format!(
+                        "Context auto-compacted: {} -> {} tokens",
+                        compact_token_label(before_tokens),
+                        compact_token_label(after_tokens)
+                    )
+                });
+                self.push_activity(format!(
+                    "context compacted [{reason}]: {before_tokens} -> {after_tokens} tokens"
+                ));
             }
             AgentEvent::HookExecuted { .. } => {}
             AgentEvent::StreamDone { usage, cache, .. } => {
@@ -2997,18 +3624,53 @@ impl TuiApp {
         }
 
         // Status bar (minimal). Swarm progress is rendered in the transcript as
-        // agent rows, so the top activity line stays blank to avoid duplicate UI.
+        // agent rows, so the status line focuses on live activity.
         if !showing_welcome {
+            let stream_elapsed_ms = self.stream_motion_frame().elapsed_ms;
+            let up_time_ms = self.ui_started_at.elapsed().as_millis() as u64;
+            let idle_title = self.runtime_idle_title();
+            let status_activity = if self.is_streaming {
+                Some(status_bar::StatusActivity {
+                    title: self.current_task_title.as_str(),
+                    elapsed_ms: stream_elapsed_ms,
+                    input_tokens: self.activity_input_tokens(),
+                    tokens: self.current_turn_output_tokens,
+                    agent_tokens: self.live_agent_tokens(),
+                    thought_seconds: self.stream_start.map_or(0, |started| {
+                        thought_seconds_from_reasoning(
+                            &self.reasoning_buffer,
+                            started.elapsed().as_secs(),
+                        )
+                    }),
+                })
+            } else {
+                idle_title
+                    .as_deref()
+                    .map(|title| status_bar::StatusActivity {
+                        title,
+                        elapsed_ms: up_time_ms,
+                        input_tokens: 0,
+                        tokens: 0,
+                        agent_tokens: 0,
+                        thought_seconds: 0,
+                    })
+            };
+            let status_motion = if self.is_streaming {
+                self.stream_motion_frame()
+            } else {
+                motion::MotionFrame::disabled()
+            };
             status_bar::render_status_bar(
                 f,
                 status_area,
                 status_bar::StatusBarProps {
                     mode: self.current_mode(),
                     thinking: &self.thinking_mode,
-                    activity: None,
+                    activity: status_activity,
+                    chinese: self.is_chinese_ui(),
+                    motion: status_motion,
                 },
             );
-            render_top_model_badge(f, status_area, &self.model);
         }
 
         // Welcome page: full body (only when empty)
@@ -3080,7 +3742,9 @@ impl TuiApp {
 
         // Options panel (between content and activity)
         if options_h > 0 {
+            let mut render_select_popup = false;
             let (kind, title, options) = if let Some(decision) = &self.options_needed {
+                render_select_popup = true;
                 (
                     decision.kind,
                     decision.title.as_str(),
@@ -3093,27 +3757,39 @@ impl TuiApp {
                     history_options.as_slice(),
                 )
             } else if let Some((t, opts)) = &self.pending_options {
+                render_select_popup = true;
                 (DecisionKind::Clarification, t.as_str(), opts.as_slice())
             } else {
                 (DecisionKind::Clarification, "", &[][..])
             };
             if !options.is_empty() {
-                plan_tracker::render_options_panel(
-                    f,
-                    options_area,
-                    kind,
-                    title,
-                    options,
-                    self.selected_option_index,
-                );
+                if render_select_popup {
+                    select_popup::render_select_popup(
+                        f,
+                        options_area,
+                        title,
+                        options,
+                        self.selected_option_index,
+                    );
+                } else {
+                    plan_tracker::render_options_panel(
+                        f,
+                        options_area,
+                        kind,
+                        title,
+                        options,
+                        self.selected_option_index,
+                    );
+                }
             } else if shell_hint_active {
-                plan_tracker::render_shell_hint_panel(f, options_area);
+                plan_tracker::render_shell_hint_panel(f, options_area, self.is_chinese_ui());
             } else if !slash_suggestions.is_empty() {
                 plan_tracker::render_slash_command_panel(
                     f,
                     options_area,
                     &slash_suggestions,
                     self.selected_slash_index,
+                    self.is_chinese_ui(),
                 );
             } else if !file_mention_suggestions.is_empty() {
                 plan_tracker::render_file_mention_panel(
@@ -3121,6 +3797,7 @@ impl TuiApp {
                     options_area,
                     &file_mention_suggestions,
                     self.selected_file_mention_index,
+                    self.is_chinese_ui(),
                 );
             }
         }
@@ -3146,6 +3823,11 @@ impl TuiApp {
             self.current_mode(),
             self.stream_motion_frame(),
         );
+        if !self.is_streaming {
+            if let Some(notice) = self.status_notice() {
+                render_status_notice(f, model_hint_area, notice);
+            }
+        }
 
         // Divider line above the input.
         {
@@ -3167,21 +3849,26 @@ impl TuiApp {
             self.pending_options.as_ref().map(|(_, o)| o.as_slice())
         };
         if self.api_key_entry.is_some() {
-            input::render_api_key_input_with_motion(
+            input::render_api_key_input_with_motion_and_placeholder(
                 f,
                 input_area,
                 &self.input_text,
                 self.cursor_pos,
                 self.motion_frame(),
+                self.api_key_input_placeholder(),
             );
         } else {
-            input::render_input_with_motion(
+            input::render_input_with_options(
                 f,
                 input_area,
                 &self.input_text,
                 self.cursor_pos,
-                opts_for_input,
-                self.motion_frame(),
+                input::InputRenderOptions {
+                    pending_options: opts_for_input,
+                    motion: self.motion_frame(),
+                    placeholder: self.input_placeholder(),
+                    chinese: self.is_chinese_ui(),
+                },
             );
         }
         let (cursor_x, cursor_y) = input::terminal_cursor_position(
@@ -3206,10 +3893,7 @@ impl TuiApp {
     }
 
     fn should_render_minimal_runtime_surface(&self) -> bool {
-        !self.is_showing_welcome()
-            && !self.settings_open
-            && self.api_key_entry.is_none()
-            && !self.show_file_tree
+        !self.settings_open && self.api_key_entry.is_none() && !self.show_file_tree
     }
 
     fn render_minimal_runtime_surface(&self, f: &mut Frame, area: Rect) {
@@ -3274,7 +3958,6 @@ impl TuiApp {
             self.render_command_options(f, rows[1], &slash_suggestions, &file_mention_suggestions);
         }
         self.render_minimal_runtime_activity(f, rows[2]);
-        render_classic_divider(f, rows[3]);
         if prompt_h > 0 {
             self.render_minimal_runtime_prompt(f, rows[4]);
         }
@@ -3296,6 +3979,8 @@ impl TuiApp {
 
     fn should_show_minimal_runtime_activity(&self) -> bool {
         self.is_streaming
+            || self.status_notice().is_some()
+            || self.ui_started_at.elapsed().as_secs() >= 3
     }
 
     fn render_minimal_runtime_activity(&self, f: &mut Frame, area: Rect) {
@@ -3303,24 +3988,51 @@ impl TuiApp {
             return;
         }
 
-        let p = theme::palette();
-        let mut activity = self.streaming_status_activity();
-        activity.title = "Thinking";
-        let text = status_bar::activity_hint_text_with_motion(
-            &activity,
-            &self.thinking_mode,
-            self.stream_motion_frame(),
-        );
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                text,
-                Style::default()
-                    .fg(self.current_mode().color())
-                    .bg(p.canvas)
-                    .add_modifier(ratatui::style::Modifier::BOLD),
-            )))
-            .style(Style::default().fg(p.text).bg(p.canvas)),
+        if let Some(notice) = self.status_notice() {
+            if !self.is_streaming {
+                render_status_notice(f, area, notice);
+            }
+            return;
+        }
+
+        if self.is_streaming {
+            let mut activity = self.streaming_status_activity();
+            activity.title = "Thinking";
+            status_bar::render_status_bar(
+                f,
+                area,
+                status_bar::StatusBarProps {
+                    mode: self.current_mode(),
+                    thinking: &self.thinking_mode,
+                    activity: Some(activity),
+                    chinese: self.is_chinese_ui(),
+                    motion: self.stream_motion_frame(),
+                },
+            );
+            return;
+        }
+
+        let up_time_ms = self.ui_started_at.elapsed().as_millis() as u64;
+        let Some(idle_title) = self.runtime_idle_title() else {
+            return;
+        };
+        status_bar::render_status_bar(
+            f,
             area,
+            status_bar::StatusBarProps {
+                mode: self.current_mode(),
+                thinking: &self.thinking_mode,
+                activity: Some(status_bar::StatusActivity {
+                    title: &idle_title,
+                    elapsed_ms: up_time_ms,
+                    input_tokens: 0,
+                    tokens: 0,
+                    agent_tokens: 0,
+                    thought_seconds: 0,
+                }),
+                chinese: self.is_chinese_ui(),
+                motion: self.stream_motion_frame(),
+            },
         );
     }
 
@@ -3329,6 +4041,10 @@ impl TuiApp {
             return;
         }
         render_canvas(f, area);
+        if self.is_showing_welcome() {
+            welcome::render_welcome(f, area, &self.welcome);
+            return;
+        }
         let elapsed = self.stream_motion_frame().elapsed_ms;
         let empty_subagents: &[subagent_cards::SubagentCard] = &[];
         let visible_subagents = if self.active_swarm.is_some() {
@@ -3384,13 +4100,17 @@ impl TuiApp {
         } else {
             self.pending_options.as_ref().map(|(_, o)| o.as_slice())
         };
-        input::render_input_with_motion(
+        input::render_input_with_options(
             f,
             area,
             &self.input_text,
             self.cursor_pos,
-            opts_for_input,
-            self.motion_frame(),
+            input::InputRenderOptions {
+                pending_options: opts_for_input,
+                motion: self.motion_frame(),
+                placeholder: self.input_placeholder(),
+                chinese: self.is_chinese_ui(),
+            },
         );
         let (cursor_x, cursor_y) =
             input::terminal_cursor_position(area, &self.input_text, self.cursor_pos, false);
@@ -3406,7 +4126,9 @@ impl TuiApp {
     ) {
         let history_options = self.history_search_options();
         let shell_hint_active = self.shell_hint_active();
+        let mut render_select_popup = false;
         let (kind, title, options) = if let Some(decision) = &self.options_needed {
+            render_select_popup = true;
             (
                 decision.kind,
                 decision.title.as_str(),
@@ -3419,27 +4141,39 @@ impl TuiApp {
                 history_options.as_slice(),
             )
         } else if let Some((t, opts)) = &self.pending_options {
+            render_select_popup = true;
             (DecisionKind::Clarification, t.as_str(), opts.as_slice())
         } else {
             (DecisionKind::Clarification, "", &[][..])
         };
         if !options.is_empty() {
-            plan_tracker::render_options_panel(
-                f,
-                area,
-                kind,
-                title,
-                options,
-                self.selected_option_index,
-            );
+            if render_select_popup {
+                select_popup::render_select_popup(
+                    f,
+                    area,
+                    title,
+                    options,
+                    self.selected_option_index,
+                );
+            } else {
+                plan_tracker::render_options_panel(
+                    f,
+                    area,
+                    kind,
+                    title,
+                    options,
+                    self.selected_option_index,
+                );
+            }
         } else if shell_hint_active {
-            plan_tracker::render_shell_hint_panel(f, area);
+            plan_tracker::render_shell_hint_panel(f, area, self.is_chinese_ui());
         } else if !slash_suggestions.is_empty() {
             plan_tracker::render_slash_command_panel(
                 f,
                 area,
                 slash_suggestions,
                 self.selected_slash_index,
+                self.is_chinese_ui(),
             );
         } else if !file_mention_suggestions.is_empty() {
             plan_tracker::render_file_mention_panel(
@@ -3447,6 +4181,7 @@ impl TuiApp {
                 area,
                 file_mention_suggestions,
                 self.selected_file_mention_index,
+                self.is_chinese_ui(),
             );
         }
     }
@@ -3488,7 +4223,7 @@ impl TuiApp {
         } else {
             0
         };
-        let activity_h = u16::from(self.is_streaming);
+        let activity_h = u16::from(self.should_show_minimal_runtime_activity());
         let inner = area.inner(Margin {
             horizontal: u16::from(area.width >= 60),
             vertical: 0,
@@ -3509,7 +4244,7 @@ impl TuiApp {
         let activity_area = chunks[2];
         let top_divider_area = chunks[3];
         let input_area = chunks[4];
-        let bottom_divider_area = chunks[5];
+        let _bottom_divider_area = chunks[5];
 
         let showing_welcome = self.is_showing_welcome();
         if self.settings_open {
@@ -3572,16 +4307,14 @@ impl TuiApp {
                 },
             );
         }
-        if !self.settings_open {
-            render_top_model_badge(f, content_area, &self.model);
-        }
-
         if self.scroll_offset > 0 {
             render_jump_to_bottom_hint(f, content_area);
         }
 
         if options_h > 0 {
+            let mut render_select_popup = false;
             let (kind, title, options) = if let Some(decision) = &self.options_needed {
+                render_select_popup = true;
                 (
                     decision.kind,
                     decision.title.as_str(),
@@ -3594,27 +4327,39 @@ impl TuiApp {
                     history_options.as_slice(),
                 )
             } else if let Some((t, opts)) = &self.pending_options {
+                render_select_popup = true;
                 (DecisionKind::Clarification, t.as_str(), opts.as_slice())
             } else {
                 (DecisionKind::Clarification, "", &[][..])
             };
             if !options.is_empty() {
-                plan_tracker::render_options_panel(
-                    f,
-                    options_area,
-                    kind,
-                    title,
-                    options,
-                    self.selected_option_index,
-                );
+                if render_select_popup {
+                    select_popup::render_select_popup(
+                        f,
+                        options_area,
+                        title,
+                        options,
+                        self.selected_option_index,
+                    );
+                } else {
+                    plan_tracker::render_options_panel(
+                        f,
+                        options_area,
+                        kind,
+                        title,
+                        options,
+                        self.selected_option_index,
+                    );
+                }
             } else if shell_hint_active {
-                plan_tracker::render_shell_hint_panel(f, options_area);
+                plan_tracker::render_shell_hint_panel(f, options_area, self.is_chinese_ui());
             } else if !slash_suggestions.is_empty() {
                 plan_tracker::render_slash_command_panel(
                     f,
                     options_area,
                     &slash_suggestions,
                     self.selected_slash_index,
+                    self.is_chinese_ui(),
                 );
             } else if !file_mention_suggestions.is_empty() {
                 plan_tracker::render_file_mention_panel(
@@ -3622,6 +4367,7 @@ impl TuiApp {
                     options_area,
                     &file_mention_suggestions,
                     self.selected_file_mention_index,
+                    self.is_chinese_ui(),
                 );
             }
         }
@@ -3646,35 +4392,61 @@ impl TuiApp {
                             )
                         }),
                     }),
+                    chinese: self.is_chinese_ui(),
+                    motion: self.stream_motion_frame(),
+                },
+            );
+        } else if let Some(notice) = self.status_notice() {
+            render_status_notice(f, activity_area, notice);
+        } else if let Some(idle_title) = self.runtime_idle_title() {
+            status_bar::render_status_bar(
+                f,
+                activity_area,
+                status_bar::StatusBarProps {
+                    mode: self.current_mode(),
+                    thinking: &self.thinking_mode,
+                    activity: Some(status_bar::StatusActivity {
+                        title: &idle_title,
+                        elapsed_ms: self.ui_started_at.elapsed().as_millis() as u64,
+                        input_tokens: 0,
+                        tokens: 0,
+                        agent_tokens: 0,
+                        thought_seconds: 0,
+                    }),
+                    chinese: self.is_chinese_ui(),
+                    motion: motion::MotionFrame::disabled(),
                 },
             );
         }
 
-        render_classic_divider(f, top_divider_area);
         let opts_for_input = if self.history_search_active {
             Some(history_options.as_slice())
         } else {
             self.pending_options.as_ref().map(|(_, o)| o.as_slice())
         };
         if self.api_key_entry.is_some() {
-            input::render_api_key_input_with_motion(
+            input::render_api_key_input_with_motion_and_placeholder(
                 f,
                 input_area,
                 &self.input_text,
                 self.cursor_pos,
                 self.motion_frame(),
+                self.api_key_input_placeholder(),
             );
         } else {
-            input::render_input_with_motion(
+            input::render_input_with_options(
                 f,
                 input_area,
                 &self.input_text,
                 self.cursor_pos,
-                opts_for_input,
-                self.motion_frame(),
+                input::InputRenderOptions {
+                    pending_options: opts_for_input,
+                    motion: self.motion_frame(),
+                    placeholder: self.input_placeholder(),
+                    chinese: self.is_chinese_ui(),
+                },
             );
         }
-        render_classic_divider(f, bottom_divider_area);
 
         let (cursor_x, cursor_y) = input::terminal_cursor_position(
             input_area,
@@ -3704,6 +4476,11 @@ impl TuiApp {
         } else {
             "ready"
         };
+        let status_label = if self.todo_summary.is_empty() {
+            status.to_string()
+        } else {
+            format!("{status} · {}", self.todo_summary.compact_line())
+        };
         let permissions = if self.session_auto_approve {
             "bypass permissions on"
         } else {
@@ -3716,17 +4493,37 @@ impl TuiApp {
             statusline::StatuslineProps {
                 mode: self.current_mode(),
                 model: &self.model,
-                status,
-                tokens: self.visible_context_tokens(),
+                status: &status_label,
+                tokens: if self.ui_started_at.elapsed().as_millis() < 3_000 {
+                    0
+                } else {
+                    self.visible_context_tokens()
+                },
                 input_tokens: self.visible_input_tokens(),
                 output_tokens: self.current_turn_output_tokens,
                 agent_tokens: self.live_agent_tokens(),
                 cost: self.total_cost,
                 cache: self.cache.as_ref(),
                 permissions,
-                context_limit: Some(self.config.search.max_context_tokens as u64),
+                context_limit: Some(self.effective_context_budget_tokens()),
+                chinese: self.is_chinese_ui(),
             },
         );
+    }
+
+    fn effective_context_budget_tokens(&self) -> u64 {
+        // Display the model's actual context window when known, not the local
+        // retrieval assembly cap. Falling back to the assembly budget only when
+        // the provider doesn't declare a window keeps the statusline honest.
+        crate::provider::model_context_window_tokens(self.config.provider.default, &self.model)
+            .unwrap_or_else(|| {
+                context_budget_for(
+                    self.config.provider.default,
+                    &self.model,
+                    self.config.search.max_context_tokens,
+                )
+                .effective_budget_tokens
+            })
     }
 
     fn streaming_status_activity(&self) -> status_bar::StatusActivity<'_> {
@@ -3998,7 +4795,7 @@ pub fn render_preview_snapshot(
                 plan_tracker::PlanStepStatus::Running,
             ),
             plan_tracker::PlanStepItem::new(
-                "对标 Claude Code / OpenCode / Manus",
+                "对标主流智能体工作台（含 OpenCode / Manus）",
                 plan_tracker::PlanStepStatus::Pending,
             ),
             plan_tracker::PlanStepItem::new(
@@ -4100,7 +4897,6 @@ struct RunningTurn {
 
 struct TerminalSession {
     active: bool,
-    renderer: RendererMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4140,7 +4936,7 @@ impl TerminalEnvironment {
         let term = self.term.as_deref().unwrap_or("<unset>");
         anyhow::bail!(
             "TUI requires an interactive terminal (stdin: {stdin}, stdout: {stdout}, TERM: {term}). \
-Run `octocode` from a real terminal/PTY, or use `octocode preview-tui` for a non-interactive snapshot."
+Run `octo` from a real terminal/PTY, or use `octo preview-tui` for a non-interactive snapshot."
         );
     }
 
@@ -4154,35 +4950,15 @@ Run `octocode` from a real terminal/PTY, or use `octocode preview-tui` for a non
                 None => true,
             }
     }
-
-    fn prefers_classic_renderer(&self) -> bool {
-        self.codex_shell || self.skips_cursor_position_probe()
-    }
 }
 
 impl TerminalSession {
-    fn enter(renderer: RendererMode) -> Result<Self, anyhow::Error> {
+    fn enter(_renderer: RendererMode) -> Result<Self, anyhow::Error> {
         crossterm::terminal::enable_raw_mode()?;
         let mut stdout = io::stdout();
-        if renderer.uses_alternate_screen() {
-            execute!(
-                stdout,
-                EnterAlternateScreen,
-                Hide,
-                MoveTo(0, 0),
-                Clear(ClearType::Purge),
-                Clear(ClearType::All),
-                MoveTo(0, 0),
-                EnableBracketedPaste
-            )?;
-        } else {
-            execute!(stdout, Hide, EnableBracketedPaste)?;
-        }
+        execute!(stdout, Hide, EnableBracketedPaste,)?;
         stdout.flush()?;
-        Ok(Self {
-            active: true,
-            renderer,
-        })
+        Ok(Self { active: true })
     }
 }
 
@@ -4196,27 +4972,10 @@ impl Drop for TerminalSession {
                 DisableBracketedPaste,
                 DisableMouseCapture,
                 Show,
-                ResetColor,
-                SetForegroundColor(CrosstermColor::Reset),
-                SetBackgroundColor(CrosstermColor::Reset),
-                SetAttribute(crossterm::style::Attribute::Reset),
-                ResetColor,
-                SetForegroundColor(CrosstermColor::Reset),
-                SetBackgroundColor(CrosstermColor::Reset),
-                SetAttribute(crossterm::style::Attribute::Reset)
+                SetAttribute(Attribute::Reset),
             );
-            if self.renderer.uses_alternate_screen() {
-                let _ = execute!(stdout, LeaveAlternateScreen);
-                reset_terminal_scroll_region(&mut stdout);
-            } else {
-                reset_terminal_scroll_region(&mut stdout);
-                let _ = execute!(
-                    stdout,
-                    Clear(ClearType::All),
-                    MoveTo(0, shell_prompt_row_after_clear()),
-                    Clear(ClearType::CurrentLine)
-                );
-            }
+            reset_terminal_scroll_region(&mut stdout);
+            let _ = execute!(stdout, Clear(ClearType::CurrentLine));
             let _ = write!(stdout, "\x1b[0m\x1b[39m\x1b[49m");
             let _ = stdout.flush();
         }
@@ -4227,16 +4986,6 @@ fn reset_terminal_scroll_region(stdout: &mut impl Write) {
     // Ratatui inline/fixed viewports may leave DECSTBM scroll margins active in
     // some terminals. Reset them before handing the screen back to the shell.
     let _ = write!(stdout, "\x1b[r\x1b[?7h");
-}
-
-fn shell_prompt_row_after_clear() -> u16 {
-    crossterm::terminal::size()
-        .map(|(_, height)| shell_prompt_row_after_clear_for_terminal(height))
-        .unwrap_or(0)
-}
-
-fn shell_prompt_row_after_clear_for_terminal(_height: u16) -> u16 {
-    0
 }
 
 fn classic_viewport_height() -> u16 {
@@ -4310,6 +5059,16 @@ fn classic_fixed_viewport_area_for_terminal(
 
 fn first_line(value: &str) -> &str {
     value.lines().next().unwrap_or("")
+}
+
+fn compact_token_label(value: u64) -> String {
+    if value >= 1_000_000 {
+        format!("{:.1}M", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}K", value as f64 / 1_000.0)
+    } else {
+        value.to_string()
+    }
 }
 
 fn subagent_tool_approval_display(
@@ -4536,13 +5295,38 @@ fn mention_prefix_at_cursor(text: &str, cursor_pos: usize) -> Option<(usize, Str
     Some((token_start, prefix.replace('\\', "/")))
 }
 
-fn slash_command_group(name: &str) -> &'static str {
-    match name {
+fn render_status_notice(f: &mut Frame, area: Rect, notice: &str) {
+    if area.width == 0 || area.height == 0 || notice.trim().is_empty() {
+        return;
+    }
+    let p = theme::palette();
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            notice.to_string(),
+            Style::default().fg(p.warning).bg(p.canvas),
+        )))
+        .style(Style::default().fg(p.text).bg(p.canvas)),
+        area,
+    );
+}
+
+fn slash_command_group(name: &str, chinese: bool) -> &'static str {
+    let group = match name {
         "/help" | "/features" | "/settings" | "/theme" | "/model" | "/status" => "core",
         "/mcp" | "/hooks" | "/tools" | "/permissions" | "/sandbox" => "runtime",
         "/agents" | "/swarm" | "/tasks" | "/plan" | "/mission" => "agents",
         "/diff" | "/files" | "/search" | "/review" => "workspace",
         _ => "commands",
+    };
+    if !chinese {
+        return group;
+    }
+    match group {
+        "core" => "核心",
+        "runtime" => "运行",
+        "agents" => "智能体",
+        "workspace" => "工作区",
+        _ => "命令",
     }
 }
 
@@ -5098,6 +5882,19 @@ fn cycle_theme_mode(current: theme::ThemeMode, delta: i32) -> theme::ThemeMode {
     )]
 }
 
+fn cycle_ui_language(current: &str, delta: i32) -> String {
+    let values = ["auto", "zh-CN", "en-US"];
+    values[cycle_index(
+        values
+            .iter()
+            .position(|value| value.eq_ignore_ascii_case(current))
+            .unwrap_or(1),
+        values.len(),
+        delta,
+    )]
+    .to_string()
+}
+
 fn cycle_index(current: usize, len: usize, delta: i32) -> usize {
     if len == 0 {
         return 0;
@@ -5180,6 +5977,10 @@ fn try_match_option(input: &str, options: &[String]) -> Option<(usize, String)> 
     }
 
     None
+}
+
+fn format_pending_option_reply(index: usize, option: &str) -> String {
+    format!("Selected option {index}: {option}")
 }
 
 fn apply_session_model_selection(
@@ -5281,7 +6082,6 @@ pub async fn run_tui(
     // Set up terminal
     let _terminal_session = TerminalSession::enter(renderer_mode)?;
     let mut terminal = tui_terminal(renderer_mode)?;
-    terminal.clear()?;
 
     let (action_tx, mut action_rx) = mpsc::unbounded_channel::<TuiAction>();
     let mut app = TuiApp::new_with_startup(
@@ -5291,14 +6091,24 @@ pub async fn run_tui(
         root.clone(),
         startup,
     );
+    app.session_id = orchestrator.as_ref().map(|orch| orch.session.id);
     if let Some(ref orch) = orchestrator {
         app.mcp_status = orch.mcp_status();
+    }
+    app.refresh_todo_summary();
+    if let Some(session_id) = orchestrator.as_ref().map(|orch| orch.session.id) {
+        let event_store = storage::EventLogStore::new(home.join(".octocode"));
+        if let Ok(events) = event_store.load(&root, &session_id) {
+            app.restore_recoverable_state_from_events(&events);
+        }
     }
     let mut running_turn: Option<RunningTurn> = None;
     let mut local_task: Option<JoinHandle<()>> = None;
     let mut keyring_task =
         probe_keyring.then(|| tokio::task::spawn_blocking(storage::get_keyring_api_key));
     let mut yolo_mode = false;
+    let mut last_render_state = app.render_dirty_state();
+    let mut force_render = true;
 
     // Main event loop
     let result: Result<(), anyhow::Error> = loop {
@@ -5306,10 +6116,17 @@ pub async fn run_tui(
             break Ok(());
         }
 
-        // Draw
-        terminal
-            .draw(|f| app.render(f))
-            .map_err(|e| anyhow::anyhow!("TUI draw failed: {e}"))?;
+        let new_render_state = app.render_dirty_state();
+        let dirty = new_render_state.diff(last_render_state);
+        let should_draw = force_render || dirty.any();
+
+        if should_draw {
+            terminal
+                .draw(|f| app.render(f))
+                .map_err(|e| anyhow::anyhow!("TUI draw failed: {e}"))?;
+            force_render = false;
+            last_render_state = new_render_state;
+        }
 
         if let Some(running) = running_turn.as_mut() {
             while let Ok(ev) = running.events.try_recv() {
@@ -5317,11 +6134,7 @@ pub async fn run_tui(
             }
         }
 
-        if running_turn
-            .as_ref()
-            .is_some_and(|running| running.handle.is_finished())
-        {
-            let mut running = running_turn.take().unwrap();
+        if let Some(mut running) = running_turn.take_if(|running| running.handle.is_finished()) {
             while let Ok(ev) = running.events.try_recv() {
                 app.apply_agent_event(ev);
             }
@@ -5342,6 +6155,7 @@ pub async fn run_tui(
                     if let Some(error) = run_error {
                         app.status_message = format!("Turn failed: {error}");
                     }
+                    app.session_id = Some(returned_orchestrator.session.id);
                     orchestrator = Some(returned_orchestrator);
                 }
                 Err(error) if error.is_cancelled() => {
@@ -5407,13 +6221,21 @@ pub async fn run_tui(
                         continue;
                     }
                     if is_exit_key(key) {
-                        break Ok(());
+                        if app.handle_exit_key() {
+                            break Ok(());
+                        }
+                        continue;
                     }
                     if is_interrupt_key(key) {
+                        app.clear_exit_confirmation();
                         if running_turn.is_some() || local_task.is_some() || app.is_streaming {
                             let _ = action_tx.send(TuiAction::Interrupt);
                         } else {
-                            app.status_message = "Press Ctrl+D to exit".into();
+                            app.status_message = if app.is_chinese_ui() {
+                                "按 Ctrl+D 退出".into()
+                            } else {
+                                "Press Ctrl+D to exit".into()
+                            };
                         }
                         continue;
                     }
@@ -5426,10 +6248,15 @@ pub async fn run_tui(
                     app.handle_key(key, &action_tx);
                 }
                 CEvent::Paste(text) => {
+                    app.clear_exit_confirmation();
                     app.handle_paste(&text);
                 }
                 CEvent::Mouse(mouse) => {
+                    app.clear_exit_confirmation();
                     app.handle_mouse(mouse);
+                }
+                CEvent::Resize(width, height) => {
+                    let _ = terminal.resize(Rect::new(0, 0, width, height));
                 }
                 _ => {}
             }
@@ -5478,6 +6305,23 @@ pub async fn run_tui(
                                 if input.split_whitespace().next() == Some("/model") {
                                     if let Some(orchestrator) = orchestrator.as_mut() {
                                         orchestrator.set_active_model(app.model.clone());
+                                    }
+                                }
+                                if matches!(
+                                    input.split_whitespace().next(),
+                                    Some("/compact" | "/compress")
+                                ) {
+                                    if let Some(orchestrator) = orchestrator.as_mut() {
+                                        orchestrator.session.messages = app.messages.clone();
+                                        if let Some(home) = dirs::home_dir() {
+                                            let store =
+                                                storage::SessionStore::new(home.join(".octocode"));
+                                            if let Err(e) = store.save(&orchestrator.session) {
+                                                app.push_activity(format!(
+                                                    "warning: failed to persist session after compact: {e}"
+                                                ));
+                                            }
+                                        }
                                     }
                                 }
                                 if is_swarm_cancel_command(&input) {
@@ -5609,14 +6453,18 @@ pub async fn run_tui(
                             .err()
                             .map(|e| e.to_string());
 
-                        if run_error.is_none() {
+                        let mut effective_error = run_error;
+                        if effective_error.is_none() {
                             if let Some(home) = dirs::home_dir() {
                                 let store = storage::SessionStore::new(home.join(".octocode"));
-                                let _ = store.save(&turn_orchestrator.session);
+                                if let Err(e) = store.save(&turn_orchestrator.session) {
+                                    effective_error =
+                                        Some(format!("failed to persist session: {e}"));
+                                }
                             }
                         }
 
-                        (turn_orchestrator, run_error)
+                        (turn_orchestrator, effective_error)
                     });
 
                     running_turn = Some(RunningTurn {
@@ -5651,11 +6499,13 @@ pub async fn run_tui(
                         let _ = handle.await;
                     }
                     app.cancel_running_work();
-                    orchestrator = Some(Orchestrator::new(
+                    let replacement = Orchestrator::new(
                         active_client.clone(),
                         root.clone(),
                         app.session_snapshot(&root),
-                    ));
+                    );
+                    app.session_id = Some(replacement.session.id);
+                    orchestrator = Some(replacement);
                 }
                 TuiAction::ResumeSession => {
                     app.status_message = "Use /resume command in CLI mode".into();
@@ -5674,6 +6524,11 @@ pub async fn run_tui(
                 }
                 _ => {}
             }
+        }
+
+        let latest_state = app.render_dirty_state();
+        if latest_state.diff(last_render_state).any() {
+            force_render = true;
         }
     };
 
@@ -5746,7 +6601,7 @@ mod tests {
         terminal
             .draw(|f| {
                 render_canvas(f, f.area());
-                render_top_model_badge(f, f.area(), &DeepSeekModel::Pro);
+                render_core::render_top_model_badge(f, f.area(), &DeepSeekModel::Pro);
             })
             .expect("draw");
 
@@ -5859,13 +6714,15 @@ mod tests {
             codex_shell: true,
         };
 
+        // Auto now defaults to Classic (inline viewport) for both normal and
+        // probe-skipping terminals, so the transcript lives in scrollback.
         assert_eq!(
             RendererMode::from_config_for_environment("auto", &normal),
-            RendererMode::Fullscreen
+            RendererMode::Classic
         );
         assert_eq!(
             RendererMode::from_config_for_environment("", &normal),
-            RendererMode::Fullscreen
+            RendererMode::Classic
         );
         assert_eq!(
             RendererMode::from_config_for_environment("auto", &codex),
@@ -5890,14 +6747,6 @@ mod tests {
         assert_eq!(classic_viewport_height_for_terminal(24), 14);
         assert_eq!(classic_viewport_height_for_terminal(40), 22);
         assert_eq!(classic_viewport_height_for_terminal(80), 22);
-    }
-
-    #[test]
-    fn shell_prompt_row_after_exit_clear_uses_terminal_top() {
-        assert_eq!(shell_prompt_row_after_clear_for_terminal(0), 0);
-        assert_eq!(shell_prompt_row_after_clear_for_terminal(1), 0);
-        assert_eq!(shell_prompt_row_after_clear_for_terminal(24), 0);
-        assert_eq!(shell_prompt_row_after_clear_for_terminal(40), 0);
     }
 
     #[test]
@@ -5961,6 +6810,19 @@ mod tests {
     }
 
     #[test]
+    fn welcome_digit_key_stays_literal_input() {
+        let mut app = test_app();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        assert!(!app.is_showing_welcome());
+        app.handle_key(key(KeyCode::Char('1'), KeyEventKind::Press), &tx);
+
+        assert_eq!(app.input_text, "1");
+        assert_eq!(app.cursor_pos, 1);
+        assert!(!app.status_message.contains("Loaded launch prompt"));
+    }
+
+    #[test]
     fn enter_while_streaming_queues_user_input() {
         let mut app = test_app();
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -5998,6 +6860,22 @@ mod tests {
         assert_eq!(app.queued_inputs.pop_front().as_deref(), Some("第一条"));
         assert_eq!(app.queued_inputs.pop_front().as_deref(), Some("第二条"));
         assert!(app.status_message.contains("2"));
+    }
+
+    #[test]
+    fn single_digit_enter_while_streaming_is_queued_and_visible() {
+        let mut app = test_app();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.is_streaming = true;
+        app.input_text = "1".to_string();
+        app.cursor_pos = app.input_text.chars().count();
+
+        app.handle_key(key(KeyCode::Enter, KeyEventKind::Press), &tx);
+
+        assert!(rx.try_recv().is_err());
+        assert_eq!(app.queued_inputs.front().map(String::as_str), Some("1"));
+        assert!(app.input_text.is_empty());
+        assert!(app.status_message.contains("已排队"));
     }
 
     #[test]
@@ -6209,7 +7087,7 @@ mod tests {
     #[test]
     fn running_turn_renders_transcript_instead_of_welcome() {
         let mut app = test_app();
-        assert!(app.is_showing_welcome());
+        assert!(!app.is_showing_welcome());
 
         app.begin_running_turn("苹果怎么截图");
         app.apply_agent_event(AgentEvent::ContentDelta(
@@ -6239,7 +7117,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal.draw(|f| app.render(f)).expect("draw");
 
-        terminal.backend_mut().assert_cursor_position((7, 31));
+        terminal.backend_mut().assert_cursor_position((9, 29));
     }
 
     #[test]
@@ -6779,7 +7657,7 @@ mod tests {
 
         assert_eq!(app.input_text, "/doctor ");
         assert_eq!(app.cursor_pos, 8);
-        assert_eq!(app.status_message, "Command: /doctor");
+        assert_eq!(app.status_message, "命令：/doctor");
     }
 
     #[test]
@@ -6792,6 +7670,12 @@ mod tests {
 
         assert!(!suggestions.is_empty());
         assert!(suggestions.iter().all(|(name, _)| name.starts_with('/')));
+        assert!(suggestions
+            .iter()
+            .any(|(name, desc)| name == "/agents" && desc.contains("智能体")));
+        assert!(!suggestions
+            .iter()
+            .any(|(name, desc)| name == "/agents" && desc.contains("List built-in")));
     }
 
     #[test]
@@ -7023,6 +7907,27 @@ mod tests {
             .expect("settings should persist");
         assert!(local_config.contains("[provider]"));
         assert!(local_config.contains("default = \"qwen\""));
+    }
+
+    #[test]
+    fn settings_panel_can_edit_and_persist_display_language() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut app = test_app_with_root(root.path().to_path_buf());
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        app.config.ui.language = "zh-CN".to_string();
+        app.welcome.display_language = app.config.ui.language.clone();
+        app.open_settings_panel();
+        app.settings_tab = settings_panel::SettingsTab::Interface;
+        app.settings_selected = 0;
+        app.handle_key(key(KeyCode::Enter, KeyEventKind::Press), &tx);
+
+        assert_eq!(app.config.ui.language, "en-US");
+        assert_eq!(app.welcome.display_language, "en-US");
+        let local_config = std::fs::read_to_string(root.path().join(".octocode/local.toml"))
+            .expect("settings should persist");
+        assert!(local_config.contains("[ui]"));
+        assert!(local_config.contains("language = \"en-US\""));
     }
 
     #[tokio::test]
@@ -7274,11 +8179,11 @@ mod tests {
     }
 
     #[test]
-    fn api_key_entry_uses_five_input_rows() {
+    fn api_key_entry_uses_single_input_row() {
         let mut app = test_app();
         app.begin_api_key_entry(None);
 
-        assert_eq!(app.input_height(), 5);
+        assert_eq!(app.input_height(), 1);
     }
 
     #[test]
@@ -7636,7 +8541,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_d_routed_to_handle_key_exits_without_editing_input() {
+    fn ctrl_d_routed_to_handle_key_requires_second_press() {
         let mut app = test_app();
         let (tx, _rx) = mpsc::unbounded_channel();
         app.input_text = "draft".to_string();
@@ -7651,10 +8556,52 @@ mod tests {
             &tx,
         );
 
-        assert!(!app.running);
+        assert!(app.running);
         assert_eq!(app.input_text, "draft");
         assert_eq!(app.cursor_pos, 5);
-        assert_eq!(app.status_message, "Exiting");
+        assert_eq!(app.status_message, "再次按 Ctrl+D 退出");
+
+        app.handle_key(
+            modified_key(
+                KeyCode::Char('d'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            ),
+            &tx,
+        );
+
+        assert!(!app.running);
+        assert_eq!(app.status_message, "正在退出");
+    }
+
+    #[test]
+    fn ctrl_d_exit_confirmation_resets_after_other_input() {
+        let mut app = test_app();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        app.handle_key(
+            modified_key(
+                KeyCode::Char('d'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            ),
+            &tx,
+        );
+        assert!(app.exit_confirm_pending);
+
+        app.handle_key(key(KeyCode::Char('x'), KeyEventKind::Press), &tx);
+        assert!(!app.exit_confirm_pending);
+
+        app.handle_key(
+            modified_key(
+                KeyCode::Char('d'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            ),
+            &tx,
+        );
+        assert!(app.running);
+        assert_eq!(app.status_message, "再次按 Ctrl+D 退出");
     }
 
     #[test]
@@ -7722,15 +8669,15 @@ mod tests {
         )
         .expect("render snapshot");
 
-        assert!(snapshot.contains("API setup required"));
-        assert!(snapshot.contains("Paste your API key"));
-        assert!(snapshot.contains("paste API key"));
+        assert!(snapshot.contains("需要配置 API"));
+        assert!(snapshot.contains("粘贴 API key"));
+        assert!(!snapshot.contains("粘贴 API key..."));
         assert!(snapshot.contains("DeepSeek V4 Flash (auto)"));
         assert!(!snapshot.contains("Type below, or press 1-3"));
     }
 
     #[test]
-    fn preview_snapshot_ready_shows_starters() {
+    fn preview_snapshot_ready_shows_direct_input_hint() {
         let snapshot = render_preview_snapshot(
             PathBuf::from("D:/octocode"),
             false,
@@ -7742,10 +8689,12 @@ mod tests {
         )
         .expect("render snapshot");
 
-        assert!(snapshot.contains("What are we changing today?"));
-        assert!(snapshot.contains("Type below, or press 1-3"));
-        assert!(snapshot.contains("api:ready"));
-        assert!(snapshot.contains("DeepSeek V4 Flash (auto)"));
+        assert!(!snapshot.contains("今天要改什么？"));
+        assert!(!snapshot.contains("直接输入要做的事"));
+        assert!(!snapshot.contains("按 1-3"));
+        assert!(snapshot.contains(">"));
+        assert!(snapshot.contains("上下文") || snapshot.contains("Context"));
+        assert!(snapshot.contains("V4 Flash"));
     }
 
     #[test]
@@ -7761,8 +8710,8 @@ mod tests {
         )
         .expect("render snapshot");
 
-        assert!(snapshot.contains("octocode"));
-        assert!(snapshot.contains("api:ready"));
+        assert!(!snapshot.contains("Octocode 工作台"));
+        assert!(snapshot.contains("Context") || snapshot.contains("上下文"));
     }
 
     #[test]
@@ -7781,7 +8730,7 @@ mod tests {
         assert!(snapshot.contains("Mission Control"));
         assert!(snapshot.contains("Agent Team"));
         assert!(snapshot.contains("Review multi-agent UI"));
-        assert!(snapshot.contains("octocode"));
+        assert!(!snapshot.contains("octo "));
         assert!(!snapshot.contains("OCTOCODE"));
         assert!(!snapshot.contains("Model:"));
     }
@@ -7802,11 +8751,11 @@ mod tests {
         let thinking_lines: Vec<usize> = lines
             .iter()
             .enumerate()
-            .filter_map(|(idx, line)| line.contains("* Thinking").then_some(idx))
+            .filter_map(|(idx, line)| line.contains("↓ 131 token").then_some(idx))
             .collect();
         let input_idx = lines
             .iter()
-            .position(|line| line.contains("type message..."))
+            .position(|line| line.trim_start().starts_with('>'))
             .expect("input line");
 
         assert_eq!(thinking_lines.len(), 1);
@@ -7920,7 +8869,96 @@ mod tests {
         assert!(app.pending_options.is_none());
         assert_eq!(app.selected_option_index, 0);
         match rx.try_recv().expect("submit action") {
-            TuiAction::Submit(input) => assert_eq!(input, "Review code"),
+            TuiAction::Submit(input) => assert_eq!(input, "Selected option 2: Review code"),
+            _ => panic!("expected submit action"),
+        }
+    }
+
+    #[test]
+    fn ask_user_event_sets_pending_options_panel() {
+        let mut app = test_app();
+
+        app.apply_agent_event(AgentEvent::UserQuestionRequested {
+            title: "Library · Which one?".into(),
+            options: vec!["serde - standard".into(), "miniserde - small".into()],
+            summary: "2 options for Library".into(),
+        });
+
+        assert_eq!(
+            app.pending_options
+                .as_ref()
+                .map(|(_, options)| options.len()),
+            Some(2)
+        );
+        assert_eq!(
+            app.last_user_question_summary.as_deref(),
+            Some("2 options for Library")
+        );
+        assert!(!app.is_streaming);
+    }
+
+    #[test]
+    fn compact_event_sets_stable_notice() {
+        let mut app = test_app();
+
+        app.apply_agent_event(AgentEvent::ContextCompacted {
+            summary: "[Context compact summary]\nrecent user goals:\n- fix cli".into(),
+            reason: "auto threshold".into(),
+            before_tokens: 12_000,
+            after_tokens: 2_400,
+        });
+
+        assert_eq!(app.latest_compact_reason.as_deref(), Some("auto threshold"));
+        assert!(app
+            .latest_compact_summary
+            .as_deref()
+            .is_some_and(|summary| summary.contains("fix cli")));
+        assert!(app.status_notice().is_some_and(
+            |notice| notice.contains("压缩上下文") || notice.contains("Context auto-compacted")
+        ));
+    }
+
+    #[test]
+    fn restore_recoverable_state_loads_latest_compact_summary() {
+        let mut app = test_app();
+        let session_id = SessionId::new_v4();
+        let events = vec![crate::storage::SessionEvent::new(
+            session_id,
+            None,
+            crate::storage::SessionEventKind::ContextCompacted {
+                before_tokens: 10_000,
+                after_tokens: 1_000,
+                before_messages: 40,
+                after_messages: 10,
+                retained_start: 30,
+                retained_count: 10,
+                summary: "summary after compact".into(),
+                reason: "manual /compact".into(),
+            },
+        )];
+
+        app.restore_recoverable_state_from_events(&events);
+
+        assert_eq!(
+            app.latest_compact_summary.as_deref(),
+            Some("summary after compact")
+        );
+        assert_eq!(
+            app.latest_compact_reason.as_deref(),
+            Some("manual /compact")
+        );
+    }
+
+    #[test]
+    fn pending_option_digit_submits_structured_selection() {
+        let mut app = test_app();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.pending_options = Some(("Choose".into(), vec!["A".into(), "B".into()]));
+
+        app.handle_key(key(KeyCode::Char('1'), KeyEventKind::Press), &tx);
+
+        match rx.try_recv().expect("submit action") {
+            TuiAction::Submit(input) => assert_eq!(input, "Selected option 1: A"),
             _ => panic!("expected submit action"),
         }
     }
@@ -7939,6 +8977,24 @@ mod tests {
             TuiAction::Submit(input) => assert_eq!(input, "x"),
             _ => panic!("expected submit action"),
         }
+    }
+
+    #[test]
+    fn todo_summary_loads_from_project_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        crate::tools::todo_state::write_todo_items(
+            temp.path(),
+            vec![
+                serde_json::json!({"content":"Implement","active_form":"Implementing","status":"in_progress"}),
+                serde_json::json!({"content":"Verify","status":"pending"}),
+            ],
+        )
+        .expect("write todos");
+
+        let app = test_app_with_root(temp.path().to_path_buf());
+
+        assert_eq!(app.todo_summary.total, 2);
+        assert_eq!(app.todo_summary.active.as_deref(), Some("Implementing"));
     }
 
     #[test]

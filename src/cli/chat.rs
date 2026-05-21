@@ -1,6 +1,8 @@
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use crate::agent::orchestrator::{AgentEvent, Orchestrator};
+use crate::cli::inline_popup::{self, ApprovalChoice};
 use crate::cli::{resolve_project_root, TurnOutputFormat};
 use crate::deepseek::{ReasoningState, Session, SessionId, SessionMetadata, ThinkingMode};
 use crate::provider::{build_provider, ModelSelection, Provider};
@@ -156,13 +158,23 @@ pub async fn chat(
             (orch, result)
         });
 
+        let is_tty = cli_prompt_tty();
+        let mut auto_approve_session = false;
         while let Some(event) = ev_rx.recv().await {
             if let Some(collector) = final_json.as_mut() {
                 collector.observe(&event);
                 match event {
-                    AgentEvent::ToolApprovalNeeded { respond, .. }
-                    | AgentEvent::SubagentToolApprovalNeeded { respond, .. } => {
+                    AgentEvent::ToolApprovalNeeded {
+                        tool_name, respond, ..
+                    }
+                    | AgentEvent::SubagentToolApprovalNeeded {
+                        tool_name, respond, ..
+                    } => {
                         let _ = respond.send(false);
+                        crate::cli::stream_json::print_tool_approval_denied(
+                            &tool_name,
+                            "policy=deny",
+                        );
                     }
                     AgentEvent::OptionsNeeded { respond, .. } => {
                         let _ = respond.send(0);
@@ -174,9 +186,17 @@ pub async fn chat(
             if output_format.is_stream_json() {
                 crate::cli::stream_json::print_event(&event);
                 match event {
-                    AgentEvent::ToolApprovalNeeded { respond, .. }
-                    | AgentEvent::SubagentToolApprovalNeeded { respond, .. } => {
+                    AgentEvent::ToolApprovalNeeded {
+                        tool_name, respond, ..
+                    }
+                    | AgentEvent::SubagentToolApprovalNeeded {
+                        tool_name, respond, ..
+                    } => {
                         let _ = respond.send(false);
+                        crate::cli::stream_json::print_tool_approval_denied(
+                            &tool_name,
+                            "policy=deny",
+                        );
                     }
                     AgentEvent::OptionsNeeded { respond, .. } => {
                         let _ = respond.send(0);
@@ -191,24 +211,25 @@ pub async fn chat(
                 AgentEvent::ReasoningDelta(_) => {}
                 AgentEvent::TokenDelta { .. } => {}
                 AgentEvent::ToolApprovalNeeded {
-                    tool_name: _,
+                    tool_name,
                     display,
                     respond,
                 } => {
-                    println!(
-                        "\n[Tool: {} — Risk: {}] {}",
-                        display.title, display.risk_level, display.description
-                    );
-                    if !display.details.is_empty() {
-                        println!("{}", display.details);
-                    }
-                    // In one-shot mode, only auto-approve reads that policy has
-                    // classified as safe, not every read_file/list_dir request.
-                    let is_safe_read =
-                        matches!(display.risk_level, crate::policy::RiskLevel::SafeRead);
-                    let _ = respond.send(is_safe_read);
-                    if !is_safe_read {
-                        println!("[Denied — use `octocode run` for interactive tool approval]");
+                    let approved = if is_tty {
+                        prompt_cli_approval(&display, &mut auto_approve_session).await
+                    } else {
+                        println!(
+                            "\n[Tool: {} — Risk: {}] {}",
+                            display.title, display.risk_level, display.description
+                        );
+                        if !display.details.is_empty() {
+                            println!("{}", display.details);
+                        }
+                        matches!(display.risk_level, crate::policy::RiskLevel::SafeRead)
+                    };
+                    let _ = respond.send(approved);
+                    if !approved {
+                        println!("[Denied: {tool_name}]");
                     }
                 }
                 AgentEvent::ToolStarted { .. } => {}
@@ -222,6 +243,22 @@ pub async fn chat(
                         tool_name,
                         if success { "ok" } else { "error" },
                         summary
+                    );
+                }
+                AgentEvent::UserQuestionRequested { title, options, .. } => {
+                    println!("\n[Question] {title}");
+                    for (i, option) in options.iter().enumerate() {
+                        println!("  {}. {option}", i + 1);
+                    }
+                }
+                AgentEvent::ContextCompacted {
+                    reason,
+                    before_tokens,
+                    after_tokens,
+                    ..
+                } => {
+                    println!(
+                        "\n[Context compacted: {reason}] {before_tokens} -> {after_tokens} tokens"
                     );
                 }
                 AgentEvent::HookExecuted { .. } => {}
@@ -276,21 +313,22 @@ pub async fn chat(
                     arguments,
                     respond,
                 } => {
-                    println!("\n[Subagent {agent_id} tool: {tool_name}] {arguments}");
                     let decision = crate::policy::evaluate_tool(
                         &tool_name,
                         &arguments,
                         &policy_root,
                         &config.policy,
                     );
-                    let is_safe_read = matches!(
-                        decision.display.risk_level,
-                        crate::policy::RiskLevel::SafeRead
-                    );
-                    let _ = respond.send(is_safe_read);
-                    if !is_safe_read {
-                        println!("[Denied — use `octocode run` for interactive tool approval]");
-                    }
+                    let approved = if is_tty {
+                        prompt_cli_approval(&decision.display, &mut auto_approve_session).await
+                    } else {
+                        println!("\n[Subagent {agent_id} tool: {tool_name}] {arguments}");
+                        matches!(
+                            decision.display.risk_level,
+                            crate::policy::RiskLevel::SafeRead
+                        )
+                    };
+                    let _ = respond.send(approved);
                 }
                 AgentEvent::PlanStepUpdate {
                     index,
@@ -345,18 +383,7 @@ pub async fn chat(
                     options,
                     respond,
                 } => {
-                    println!("\n{title}");
-                    for (i, opt) in options.iter().enumerate() {
-                        println!("  {}. {opt}", i + 1);
-                    }
-                    println!("Select option (1–{}): ", options.len());
-                    let mut answer = String::new();
-                    let _ = std::io::stdin().read_line(&mut answer);
-                    let choice = answer
-                        .trim()
-                        .parse::<usize>()
-                        .unwrap_or(options.len())
-                        .saturating_sub(1);
+                    let choice = prompt_cli_select(&title, &options, is_tty).await;
                     let _ = respond.send(choice);
                 }
             }
@@ -462,6 +489,7 @@ pub async fn chat(
             });
 
             let mut auto_approve_session = false;
+            let is_tty = cli_prompt_tty();
             while let Some(event) = ev_rx.recv().await {
                 match event {
                     AgentEvent::UserMessage { .. } => {}
@@ -484,6 +512,8 @@ pub async fn chat(
                         let approved = if auto_approve_session {
                             println!("\n[Auto-approved: {tool_name} — {}]", display.risk_level);
                             true
+                        } else if is_tty {
+                            prompt_cli_approval(&display, &mut auto_approve_session).await
                         } else {
                             println!();
                             println!("{}", "─".repeat(50));
@@ -524,6 +554,10 @@ pub async fn chat(
                         let approved = if auto_approve_session {
                             println!("\n[Auto-approved subagent {agent_id}: {tool_name}]");
                             true
+                        } else if is_tty {
+                            let display =
+                                subagent_approval_display(&agent_id, &tool_name, &arguments);
+                            prompt_cli_approval(&display, &mut auto_approve_session).await
                         } else {
                             println!();
                             println!("{}", "─".repeat(50));
@@ -558,6 +592,22 @@ pub async fn chat(
                         } else {
                             println!("\n  [{tool_name} ✗]");
                         }
+                    }
+                    AgentEvent::UserQuestionRequested { title, options, .. } => {
+                        println!("\n[Question] {title}");
+                        for (i, option) in options.iter().enumerate() {
+                            println!("  {}. {option}", i + 1);
+                        }
+                    }
+                    AgentEvent::ContextCompacted {
+                        reason,
+                        before_tokens,
+                        after_tokens,
+                        ..
+                    } => {
+                        println!(
+                            "\n[Context compacted: {reason}] {before_tokens} -> {after_tokens} tokens"
+                        );
                     }
                     AgentEvent::HookExecuted { .. } => {}
                     AgentEvent::ReasoningDelta(_) => {}
@@ -634,18 +684,7 @@ pub async fn chat(
                         options,
                         respond,
                     } => {
-                        println!("\n{title}");
-                        for (i, opt) in options.iter().enumerate() {
-                            println!("  {}. {opt}", i + 1);
-                        }
-                        println!("Select option (1–{}): ", options.len());
-                        let mut answer = String::new();
-                        let _ = std::io::stdin().read_line(&mut answer);
-                        let choice = answer
-                            .trim()
-                            .parse::<usize>()
-                            .unwrap_or(options.len())
-                            .saturating_sub(1);
+                        let choice = prompt_cli_select(&title, &options, is_tty).await;
                         let _ = respond.send(choice);
                     }
                 }
@@ -666,7 +705,9 @@ pub async fn chat(
                 let home = dirs::home_dir()
                     .ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?;
                 let store = storage::SessionStore::new(home.join(".octocode"));
-                let _ = store.save(&o.session);
+                if let Err(e) = store.save(&o.session) {
+                    eprintln!("warning: failed to persist session: {e}");
+                }
             }
             println!();
         }
@@ -683,4 +724,61 @@ fn json_error_result<T>(
         crate::cli::stream_json::print_final_error(error.to_string());
     }
     Err(error)
+}
+
+fn cli_prompt_tty() -> bool {
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+async fn prompt_cli_approval(
+    display: &crate::policy::ApprovalDisplay,
+    auto_approve_session: &mut bool,
+) -> bool {
+    match inline_popup::prompt_approval_inline(display)
+        .await
+        .unwrap_or(ApprovalChoice::Deny)
+    {
+        ApprovalChoice::ApproveOnce => true,
+        ApprovalChoice::ApproveSession => {
+            *auto_approve_session = true;
+            true
+        }
+        ApprovalChoice::Deny => false,
+    }
+}
+
+async fn prompt_cli_select(title: &str, options: &[String], is_tty: bool) -> usize {
+    if is_tty {
+        return inline_popup::prompt_select_inline(title, options)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+    }
+
+    println!("\n{title}");
+    for (i, opt) in options.iter().enumerate() {
+        println!("  {}. {opt}", i + 1);
+    }
+    println!("Select option (1–{}): ", options.len());
+    let mut answer = String::new();
+    let _ = std::io::stdin().read_line(&mut answer);
+    answer
+        .trim()
+        .parse::<usize>()
+        .unwrap_or(options.len())
+        .saturating_sub(1)
+}
+
+fn subagent_approval_display(
+    agent_id: &str,
+    tool_name: &str,
+    arguments: &str,
+) -> crate::policy::ApprovalDisplay {
+    crate::policy::ApprovalDisplay {
+        title: format!("Subagent tool: {tool_name}"),
+        description: "Subagent requested a tool call".to_string(),
+        risk_level: crate::policy::RiskLevel::CommandExecution,
+        details: format!("Agent: {agent_id}\nArguments: {arguments}"),
+    }
 }

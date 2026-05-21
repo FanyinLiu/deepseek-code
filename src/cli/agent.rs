@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -11,6 +12,7 @@ use crate::agent::subagent::{
     PermissionMode, SubagentConfig, SubagentExecutor, SubagentRegistry, SubagentResult,
     SubagentTask,
 };
+use crate::cli::inline_popup::{self, ApprovalChoice};
 use crate::cli::resolve_project_root;
 use crate::provider::{build_provider, Provider};
 use crate::storage;
@@ -439,7 +441,7 @@ async fn run_agent(
             }
             event = event_rx.recv() => {
                 if let Some(event) = event {
-                    handle_run_event(event, show_events);
+                    handle_run_event(event, show_events).await;
                 }
             }
         }
@@ -448,7 +450,7 @@ async fn run_agent(
     Ok(run_payload_from_result(name, task_text, result))
 }
 
-fn handle_run_event(event: AgentEvent, show_events: bool) {
+async fn handle_run_event(event: AgentEvent, show_events: bool) {
     match event {
         AgentEvent::SubagentStarted {
             agent_type,
@@ -461,14 +463,37 @@ fn handle_run_event(event: AgentEvent, show_events: bool) {
             print!("{content}");
         }
         AgentEvent::SubagentToolApprovalNeeded {
-            tool_name, respond, ..
+            agent_id,
+            tool_name,
+            arguments,
+            respond,
         } => {
-            if show_events {
+            let is_tty = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+            let approved = if show_events && is_tty {
+                let display = crate::policy::ApprovalDisplay {
+                    title: format!("Subagent tool: {tool_name}"),
+                    description: "Agent run requested a tool call".to_string(),
+                    risk_level: crate::policy::RiskLevel::CommandExecution,
+                    details: format!("Agent: {agent_id}\nArguments: {arguments}"),
+                };
+                matches!(
+                    inline_popup::prompt_approval_inline(&display)
+                        .await
+                        .unwrap_or(ApprovalChoice::Deny),
+                    ApprovalChoice::ApproveOnce | ApprovalChoice::ApproveSession
+                )
+            } else {
+                if show_events {
+                    tracing::warn!("tool approval requested without tty; denying");
+                }
+                false
+            };
+            if show_events && !approved {
                 println!(
                     "tool approval required for {tool_name}; denied in non-interactive agent run"
                 );
             }
-            let _ = respond.send(false);
+            let _ = respond.send(approved);
         }
         AgentEvent::SubagentCompleted { result, .. } if show_events => {
             let status = if result.success { "ok" } else { "failed" };

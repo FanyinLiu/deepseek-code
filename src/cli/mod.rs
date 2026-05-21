@@ -9,6 +9,7 @@ pub mod doctor;
 pub mod evolution;
 pub mod features;
 pub mod goal;
+pub mod inline_popup;
 pub mod knowledge;
 pub mod login;
 pub mod mcp;

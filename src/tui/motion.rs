@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MotionLevel {
     Subtle,
     Off,
@@ -35,7 +35,7 @@ pub struct MotionFrame {
 }
 
 impl MotionFrame {
-    pub const TICK_MS: u64 = 100;
+    pub const TICK_MS: u64 = 50;
 
     #[must_use]
     pub fn new(level: MotionLevel, elapsed_ms: u64) -> Self {
@@ -50,10 +50,16 @@ impl MotionFrame {
     #[must_use]
     pub fn running_icon(self) -> &'static str {
         if !self.level.is_enabled() {
-            return "*";
+            return "◉";
         }
-        const FRAMES: [&str; 4] = ["*", "✳", "✶", "✳"];
-        FRAMES[self.frame_index(FRAMES.len())]
+        const FRAMES: [&str; 6] = [" ", "◐", "◓", "◑", "◒", "◕"];
+        const FULL_PHASES: usize = FRAMES.len() * 2;
+        let tick = self.frame_index(FULL_PHASES);
+        if tick < FRAMES.len() {
+            FRAMES[tick]
+        } else {
+            FRAMES[FULL_PHASES - tick - 1]
+        }
     }
 
     #[must_use]
@@ -88,6 +94,11 @@ impl MotionFrame {
         self.level.is_enabled() && self.elapsed_ms < 700
     }
 
+    #[must_use]
+    pub fn is_stalled(self, threshold_ms: u64) -> bool {
+        self.elapsed_ms >= threshold_ms
+    }
+
     fn frame_index(self, len: usize) -> usize {
         ((self.elapsed_ms / Self::TICK_MS) as usize) % len.max(1)
     }
@@ -110,13 +121,36 @@ mod tests {
     }
 
     #[test]
-    fn spinner_uses_roughly_hundred_ms_frames() {
+    fn spinner_uses_smooth_50ms_frames_with_12_step_cycle() {
         let first = MotionFrame::new(MotionLevel::Subtle, 0).running_icon();
         let second = MotionFrame::new(MotionLevel::Subtle, MotionFrame::TICK_MS).running_icon();
-        let looped = MotionFrame::new(MotionLevel::Subtle, MotionFrame::TICK_MS * 4).running_icon();
+        let looped =
+            MotionFrame::new(MotionLevel::Subtle, MotionFrame::TICK_MS * 12).running_icon();
 
         assert_ne!(first, second);
         assert_eq!(first, looped);
+    }
+
+    #[test]
+    fn spinner_has_6_frame_forward_then_reverse_cycle() {
+        let frames: Vec<&str> = (0..12)
+            .map(|step| {
+                MotionFrame::new(MotionLevel::Subtle, step * MotionFrame::TICK_MS).running_icon()
+            })
+            .collect();
+
+        assert_eq!(frames[0], " ");
+        assert_eq!(frames[1], "◐");
+        assert_eq!(frames[2], "◓");
+        assert_eq!(frames[3], "◑");
+        assert_eq!(frames[4], "◒");
+        assert_eq!(frames[5], "◕");
+        assert_eq!(frames[6], "◕");
+        assert_eq!(frames[7], "◒");
+        assert_eq!(frames[8], "◑");
+        assert_eq!(frames[9], "◓");
+        assert_eq!(frames[10], "◐");
+        assert_eq!(frames[11], " ");
     }
 
     #[test]
