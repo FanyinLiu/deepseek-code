@@ -48,6 +48,10 @@ pub async fn run_command_with_sandbox(
             exit_code: -1,
             duration_ms: 0,
             timed_out: false,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            stdout_original_bytes: 0,
+            stderr_original_bytes: 0,
         });
     }
 
@@ -58,6 +62,10 @@ pub async fn run_command_with_sandbox(
             exit_code: -1,
             duration_ms: 0,
             timed_out: false,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            stdout_original_bytes: 0,
+            stderr_original_bytes: 0,
         });
     }
 
@@ -92,6 +100,12 @@ pub async fn run_command_with_sandbox(
     {
         command_builder.process_group(0);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command_builder.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
 
     let mut child = match command_builder.spawn() {
         Ok(c) => c,
@@ -102,6 +116,10 @@ pub async fn run_command_with_sandbox(
                 exit_code: -1,
                 duration_ms: start.elapsed().as_millis() as u64,
                 timed_out: false,
+                stdout_truncated: false,
+                stderr_truncated: false,
+                stdout_original_bytes: 0,
+                stderr_original_bytes: 0,
             });
         }
     };
@@ -111,34 +129,38 @@ pub async fn run_command_with_sandbox(
     const MAX_OUTPUT_BYTES: u64 = 1024 * 1024; // 1 MiB
 
     let stdout_handle = child.stdout.take().map(|stdout| {
-        tokio::spawn(async move {
-            let mut limited = stdout.take(MAX_OUTPUT_BYTES);
-            let mut buf = Vec::new();
-            let _ = tokio::io::AsyncReadExt::read_to_end(&mut limited, &mut buf).await;
-            buf
-        })
+        tokio::spawn(async move { capture_output_stream(stdout, MAX_OUTPUT_BYTES).await })
     });
 
     let stderr_handle = child.stderr.take().map(|stderr| {
-        tokio::spawn(async move {
-            let mut limited = stderr.take(MAX_OUTPUT_BYTES);
-            let mut buf = Vec::new();
-            let _ = tokio::io::AsyncReadExt::read_to_end(&mut limited, &mut buf).await;
-            buf
-        })
+        tokio::spawn(async move { capture_output_stream(stderr, MAX_OUTPUT_BYTES).await })
     });
 
     tokio::select! {
         status = child.wait() => {
             let status = status?;
             process_guard.disarm();
-            let stdout = match stdout_handle {
-                Some(h) => String::from_utf8_lossy(&h.await.unwrap_or_default()).to_string(),
-                None => String::new(),
+            let (stdout, stdout_truncated, stdout_original_bytes) = match stdout_handle {
+                Some(h) => {
+                    let output = h.await.unwrap_or_default();
+                    (
+                        String::from_utf8_lossy(&output.bytes).to_string(),
+                        output.truncated,
+                        output.original_bytes,
+                    )
+                }
+                None => (String::new(), false, 0),
             };
-            let stderr = match stderr_handle {
-                Some(h) => String::from_utf8_lossy(&h.await.unwrap_or_default()).to_string(),
-                None => String::new(),
+            let (stderr, stderr_truncated, stderr_original_bytes) = match stderr_handle {
+                Some(h) => {
+                    let output = h.await.unwrap_or_default();
+                    (
+                        String::from_utf8_lossy(&output.bytes).to_string(),
+                        output.truncated,
+                        output.original_bytes,
+                    )
+                }
+                None => (String::new(), false, 0),
             };
             Ok(CommandResult {
                 stdout,
@@ -146,6 +168,10 @@ pub async fn run_command_with_sandbox(
                 exit_code: status.code().unwrap_or(-1),
                 duration_ms: start.elapsed().as_millis() as u64,
                 timed_out: false,
+                stdout_truncated,
+                stderr_truncated,
+                stdout_original_bytes,
+                stderr_original_bytes,
             })
         }
         () = sleep(Duration::from_secs(timeout_seconds)) => {
@@ -153,17 +179,101 @@ pub async fn run_command_with_sandbox(
             let _ = child.kill().await;
             let _ = child.wait().await;
             process_guard.disarm();
-            if let Some(h) = stdout_handle { h.abort(); }
-            if let Some(h) = stderr_handle { h.abort(); }
+            let (stdout, stdout_truncated, stdout_original_bytes) = match stdout_handle {
+                Some(h) => {
+                    match await_output_with_timeout(h).await {
+                        Some(output) => (
+                            String::from_utf8_lossy(&output.bytes).to_string(),
+                            output.truncated,
+                            output.original_bytes,
+                        ),
+                        None => (String::new(), false, 0),
+                    }
+                }
+                None => (String::new(), false, 0),
+            };
+            let (mut stderr, stderr_truncated, stderr_original_bytes) = match stderr_handle {
+                Some(h) => {
+                    match await_output_with_timeout(h).await {
+                        Some(output) => (
+                            String::from_utf8_lossy(&output.bytes).to_string(),
+                            output.truncated,
+                            output.original_bytes,
+                        ),
+                        None => (String::new(), false, 0),
+                    }
+                }
+                None => (String::new(), false, 0),
+            };
+            append_timeout_marker(&mut stderr, timeout_seconds);
             Ok(CommandResult {
-                stdout: String::new(),
-                stderr: format!("command timed out after {timeout_seconds}s"),
+                stdout,
+                stderr,
                 exit_code: -1,
                 duration_ms: start.elapsed().as_millis() as u64,
                 timed_out: true,
+                stdout_truncated,
+                stderr_truncated,
+                stdout_original_bytes,
+                stderr_original_bytes,
             })
         }
     }
+}
+
+#[derive(Debug, Default)]
+struct OutputCapture {
+    bytes: Vec<u8>,
+    truncated: bool,
+    original_bytes: u64,
+}
+
+async fn capture_output_stream<R: tokio::io::AsyncRead + Unpin>(
+    mut stream: R,
+    max_output_bytes: u64,
+) -> OutputCapture {
+    let mut output = OutputCapture::default();
+    let mut buf = vec![0u8; 4096];
+
+    loop {
+        let bytes_read = match stream.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+
+        let bytes_read = bytes_read as u64;
+        output.original_bytes += bytes_read;
+        let collected = output.bytes.len() as u64;
+        if collected < max_output_bytes {
+            let remaining = max_output_bytes - collected;
+            let take = bytes_read.min(remaining);
+            output.bytes.extend_from_slice(&buf[..take as usize]);
+            if bytes_read > remaining {
+                output.truncated = true;
+            }
+        } else {
+            output.truncated = true;
+        }
+    }
+
+    output
+}
+
+async fn await_output_with_timeout(
+    handle: tokio::task::JoinHandle<OutputCapture>,
+) -> Option<OutputCapture> {
+    tokio::time::timeout(Duration::from_millis(100), handle)
+        .await
+        .ok()
+        .and_then(|result| result.ok())
+}
+
+fn append_timeout_marker(stderr: &mut String, timeout_seconds: u64) {
+    if !stderr.is_empty() {
+        stderr.push('\n');
+    }
+    stderr.push_str(&format!("[timed out after {timeout_seconds}s]"));
 }
 
 struct ProcessTreeGuard {
@@ -205,7 +315,15 @@ fn terminate_process_tree(pid: Option<u32>) {
 }
 
 #[cfg(not(unix))]
-fn terminate_process_tree(_pid: Option<u32>) {}
+fn terminate_process_tree(pid: Option<u32>) {
+    let Some(pid) = pid else {
+        return;
+    };
+
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/T", "/PID", &pid.to_string()])
+        .status();
+}
 
 fn sanitized_command_env() -> Vec<(String, String)> {
     sanitized_command_env_from(std::env::vars())
@@ -266,6 +384,10 @@ pub struct CommandResult {
     pub exit_code: i32,
     pub duration_ms: u64,
     pub timed_out: bool,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    pub stdout_original_bytes: u64,
+    pub stderr_original_bytes: u64,
 }
 
 impl CommandResult {
@@ -282,6 +404,18 @@ impl CommandResult {
         }
         if !self.stderr.is_empty() {
             out.push_str(&format!("stderr:\n{}\n", self.stderr));
+        }
+        if self.stdout_truncated {
+            out.push_str(&format!(
+                "truncated: stdout {}B -> 1MiB\n",
+                self.stdout_original_bytes
+            ));
+        }
+        if self.stderr_truncated {
+            out.push_str(&format!(
+                "truncated: stderr {}B -> 1MiB\n",
+                self.stderr_original_bytes
+            ));
         }
         out.push_str(&format!(
             "exit_code: {} | duration: {}ms",
@@ -347,6 +481,50 @@ mod tests {
             .status()
             .expect("kill -0");
         assert!(!status.success(), "child process {pid} should be gone");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn timeout_kills_shell_child_process_tree() {
+        use std::time::Duration;
+        use std::{process::Command, thread};
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let pid_file = root.path().join("child.pid");
+        // command under test should spawn a child process that runs for a while:
+        // `cmd /C ping -n 30 127.0.0.1 > nul`.
+        let command = format!(
+            "powershell -NoProfile -Command \"$p = Start-Process -FilePath cmd -ArgumentList '/C','ping -n 30 127.0.0.1 > nul' -PassThru; Set-Content '{}' $p.Id; $p.WaitForExit()\"",
+            pid_file.display()
+        );
+
+        let result = run_command(root.path(), &command, None, 1).await.unwrap();
+        assert!(result.timed_out);
+
+        let pid = std::fs::read_to_string(&pid_file)
+            .expect("pid file")
+            .trim()
+            .to_string();
+        for _ in 0..10 {
+            let exists = Command::new("tasklist")
+                .args(["/FO", "CSV", "/NH", "/FI", &format!("PID eq {pid}")])
+                .output()
+                .map(|output| {
+                    let text = String::from_utf8_lossy(&output.stdout);
+                    text.lines().any(|line| {
+                        let mut fields = line.split(',');
+                        fields.next();
+                        fields.next().is_some_and(|field| field.trim() == format!("\"{pid}\""))
+                    })
+                })
+                .unwrap_or(false);
+            if !exists {
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+
+        panic!("child process {pid} should be gone after timeout");
     }
 
     #[test]
