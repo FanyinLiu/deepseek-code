@@ -11,12 +11,20 @@ pub fn redact_bearer_tokens(text: &str) -> String {
     replace_regex(text, r"(?i)\bBearer\s+[A-Za-z0-9._\-]+", "Bearer ****")
 }
 
-/// Redact environment variable values.
+/// Redact environment variable values. Catches four wire formats:
+///   `FOO=value`            (Bourne / `.env`)
+///   `set FOO=value`        (cmd.exe — `set` is consumed by the regex prefix)
+///   `$env:FOO = "value"`   (PowerShell)
+///   `export FOO=value`     (Bourne explicit export)
+///
+/// The value side is captured to end-of-token so multi-arg cmdlines don't
+/// over-eat siblings.
 pub fn redact_env_vars(text: &str) -> String {
     let mut result = text.to_string();
     let patterns = [
         "DEEPSEEK_API_KEY",
         "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
         "OPENROUTER_API_KEY",
         "DASHSCOPE_API_KEY",
         "BAILIAN_API_KEY",
@@ -26,6 +34,10 @@ pub fn redact_env_vars(text: &str) -> String {
         "ZAI_API_KEY",
         "ZHIPUAI_API_KEY",
         "ZHIPU_API_KEY",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
         "API_KEY",
         "TOKEN",
         "SECRET",
@@ -34,6 +46,7 @@ pub fn redact_env_vars(text: &str) -> String {
     ];
 
     for pattern in &patterns {
+        // Posix / dotenv: `FOO=value`
         let regex = regex::Regex::new(&format!(
             r#"(?i)\b{}=(?:"[^"]*"|'[^']*'|[^\s"'=]+)"#,
             regex::escape(pattern)
@@ -41,6 +54,16 @@ pub fn redact_env_vars(text: &str) -> String {
         .expect("redaction regex compiles");
         result = regex
             .replace_all(&result, format!("{pattern}=****"))
+            .into_owned();
+
+        // PowerShell: `$env:FOO = "value"`
+        let ps_regex = regex::Regex::new(&format!(
+            r#"(?i)\$env:{}\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=]+)"#,
+            regex::escape(pattern)
+        ))
+        .expect("redaction regex compiles");
+        result = ps_regex
+            .replace_all(&result, format!("$env:{pattern}=****"))
             .into_owned();
     }
 
@@ -124,5 +147,20 @@ mod tests {
         let redacted = redact_bearer_tokens("Authorization: Bearer abc.def-123 next");
 
         assert_eq!(redacted, "Authorization: Bearer **** next");
+    }
+
+    #[test]
+    fn redacts_powershell_env_assignment() {
+        let redacted = redact_env_vars(r#"$env:DEEPSEEK_API_KEY = "sk-abc123""#);
+        assert!(!redacted.contains("sk-abc123"));
+        assert!(redacted.contains("****"));
+    }
+
+    #[test]
+    fn redacts_anthropic_and_github_tokens() {
+        let redacted = redact_env_vars("ANTHROPIC_API_KEY=sk-ant-xxx GITHUB_TOKEN=ghp_yyy");
+        assert!(!redacted.contains("sk-ant-xxx"));
+        assert!(!redacted.contains("ghp_yyy"));
+        assert!(redacted.matches("****").count() >= 2);
     }
 }

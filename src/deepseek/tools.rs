@@ -64,6 +64,7 @@ pub fn standard_tool_definitions() -> Vec<ToolDefinition> {
         run_command_def(),
         bash_output_def(),
         kill_shell_def(),
+        notebook_edit_def(),
         fetch_url_def(),
         web_search_def(),
         github_pr_def(),
@@ -115,6 +116,7 @@ fn tool_display_name(name: &str) -> &'static str {
         "edit_file" => "Edit file",
         "write_file" => "Write file",
         "apply_patch" => "Apply patch",
+        "notebook_edit" => "Notebook edit",
         "run_command" => "Run command",
         "bash_output" => "Bash output",
         "kill_shell" => "Kill shell",
@@ -136,7 +138,9 @@ fn tool_permission_profile(name: &str) -> ToolPermissionProfile {
         "todo_write" | "task_create" | "task_update" | "task_stop" => {
             ToolPermissionProfile::WorkspaceWrite
         }
-        "edit_file" | "write_file" | "apply_patch" => ToolPermissionProfile::WorkspaceWrite,
+        "edit_file" | "write_file" | "apply_patch" | "notebook_edit" => {
+            ToolPermissionProfile::WorkspaceWrite
+        }
         "git_add" | "git_commit" => ToolPermissionProfile::GitMutation,
         "run_command" | "kill_shell" => ToolPermissionProfile::Command,
         "bash_output" => ToolPermissionProfile::SafeRead,
@@ -635,6 +639,26 @@ fn kill_shell_def() -> ToolDefinition {
                     "shell_id": { "type": "string", "description": "The shell id to terminate." }
                 },
                 "required": ["shell_id"]
+            }),
+        },
+    }
+}
+
+fn notebook_edit_def() -> ToolDefinition {
+    ToolDefinition {
+        tool_type: "function".into(),
+        function: super::models::FunctionDef {
+            name: "notebook_edit".into(),
+            description: "Modify a single cell in a .ipynb notebook. Target the cell by 0-based index or by its `id` field. Modes: replace (rewrite source and clear outputs; default), insert (add a new code cell after target), delete (remove target cell).".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Workspace-relative path to the .ipynb file." },
+                    "cell": { "type": "string", "description": "Either a numeric index (\"0\", \"3\") or the cell's `id` field." },
+                    "new_source": { "type": "string", "description": "New cell source. Required for replace/insert." },
+                    "edit_mode": { "type": "string", "enum": ["replace", "insert", "delete"], "description": "Default: replace." }
+                },
+                "required": ["path", "cell"]
             }),
         },
     }

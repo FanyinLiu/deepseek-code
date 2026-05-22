@@ -9,10 +9,14 @@ use crate::tui::{motion, theme};
 pub enum ViewStatus {
     Queued,
     Running,
+    Waiting,
+    Retrying,
     Done,
     Failed,
+    Blocked,
     Denied,
     Cancelled,
+    Skipped,
 }
 
 impl ViewStatus {
@@ -21,10 +25,14 @@ impl ViewStatus {
         match self {
             Self::Queued => "queued",
             Self::Running => "running",
+            Self::Waiting => "waiting",
+            Self::Retrying => "retrying",
             Self::Done => "done",
             Self::Failed => "failed",
+            Self::Blocked => "blocked",
             Self::Denied => "denied",
             Self::Cancelled => "cancelled",
+            Self::Skipped => "skipped",
         }
     }
 
@@ -33,10 +41,14 @@ impl ViewStatus {
         match self {
             Self::Queued => "○",
             Self::Running => "◈",
+            Self::Waiting => "◇",
+            Self::Retrying => "↻",
             Self::Done => "◆",
             Self::Failed => "✗",
+            Self::Blocked => "!",
             Self::Denied => "!",
             Self::Cancelled => "×",
+            Self::Skipped => "–",
         }
     }
 
@@ -46,9 +58,10 @@ impl ViewStatus {
         match self {
             Self::Queued => p.muted,
             Self::Running => p.accent,
+            Self::Waiting | Self::Retrying => p.warning,
             Self::Done => p.success,
-            Self::Failed | Self::Denied => p.danger,
-            Self::Cancelled => p.dim,
+            Self::Failed | Self::Blocked | Self::Denied => p.danger,
+            Self::Cancelled | Self::Skipped => p.dim,
         }
     }
 }

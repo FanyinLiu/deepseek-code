@@ -177,6 +177,57 @@ impl SkillStore {
         fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))
     }
 
+    /// Find skills whose SKILL.md frontmatter declares a `keywords:` or
+    /// `trigger:` term that appears in the user's input. Returns up to
+    /// `limit` (skill_id, body) pairs; the body is the SKILL.md text minus
+    /// frontmatter, ready to drop into system prompt augmentation.
+    ///
+    /// Used by the orchestrator at turn start to auto-inject skill bodies
+    /// when the user's question matches a saved workflow.
+    pub fn triggered_for_input(
+        &self,
+        user_input: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let lower = user_input.to_lowercase();
+        let mut hits: Vec<(String, String)> = Vec::new();
+        let entries =
+            fs::read_dir(&self.root).with_context(|| format!("read {}", self.root.display()))?;
+        for entry in entries.flatten() {
+            let skill_dir = entry.path();
+            let md_path = skill_dir.join("SKILL.md");
+            if !md_path.is_file() {
+                continue;
+            }
+            let id = match skill_dir.file_name().and_then(|s| s.to_str()) {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
+            let raw = match fs::read_to_string(&md_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let triggers = parse_skill_triggers(&raw);
+            if triggers.is_empty() {
+                continue;
+            }
+            let matched = triggers
+                .iter()
+                .any(|kw| !kw.is_empty() && lower.contains(&kw.to_lowercase()));
+            if matched {
+                let body = strip_frontmatter(&raw);
+                hits.push((id, body));
+                if hits.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(hits)
+    }
+
     pub fn test(&self, skill_id: &str) -> Result<SkillTestReport> {
         let skill_dir = self.skill_dir(skill_id)?;
         let checks = vec![
@@ -452,4 +503,119 @@ fn append_trace(skill_dir: &Path, summary: &str) -> Result<()> {
     )
     .with_context(|| format!("append {}", skill_dir.join("traces.jsonl").display()))?;
     Ok(())
+}
+
+/// Pull `keywords:` / `trigger:` fields out of a SKILL.md YAML frontmatter.
+///
+/// Accepts either an inline list `keywords: [a, b]`, a JSON-style array,
+/// or comma/whitespace-separated tokens after the colon. Multiple keys are
+/// merged. Missing frontmatter returns empty.
+pub(crate) fn parse_skill_triggers(markdown: &str) -> Vec<String> {
+    let Some(frontmatter) = extract_frontmatter(markdown) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in frontmatter.lines() {
+        let line = line.trim();
+        let lower = line.to_lowercase();
+        if let Some(rest) = lower
+            .strip_prefix("keywords:")
+            .or_else(|| lower.strip_prefix("trigger:"))
+            .or_else(|| lower.strip_prefix("triggers:"))
+        {
+            let raw = &line[line.len() - rest.len()..];
+            for token in raw
+                .trim()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .split(|c: char| c == ',' || c.is_whitespace())
+            {
+                let token = token.trim().trim_matches(|c: char| c == '"' || c == '\'');
+                if !token.is_empty() {
+                    out.push(token.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+fn extract_frontmatter(markdown: &str) -> Option<&str> {
+    let text = markdown.trim_start();
+    let stripped = text.strip_prefix("---")?.trim_start_matches('\n');
+    let end = stripped.find("\n---")?;
+    Some(&stripped[..end])
+}
+
+/// Return SKILL.md content with the YAML frontmatter (if any) removed.
+pub(crate) fn strip_frontmatter(markdown: &str) -> String {
+    let text = markdown.trim_start();
+    if let Some(stripped) = text.strip_prefix("---") {
+        if let Some(end) = stripped.find("\n---") {
+            return stripped[end + 4..].trim_start_matches('\n').to_string();
+        }
+    }
+    markdown.to_string()
+}
+
+#[cfg(test)]
+mod skill_trigger_tests {
+    use super::*;
+
+    #[test]
+    fn parses_keywords_inline_list() {
+        let md = "---\nkeywords: [refactor, lint]\n---\nbody";
+        let kws = parse_skill_triggers(md);
+        assert!(kws.contains(&"refactor".to_string()));
+        assert!(kws.contains(&"lint".to_string()));
+    }
+
+    #[test]
+    fn parses_trigger_alias() {
+        let md = "---\ntrigger: review\n---\nbody";
+        let kws = parse_skill_triggers(md);
+        assert_eq!(kws, vec!["review".to_string()]);
+    }
+
+    #[test]
+    fn no_frontmatter_returns_empty() {
+        assert!(parse_skill_triggers("just body, no frontmatter").is_empty());
+    }
+
+    #[test]
+    fn strip_frontmatter_removes_yaml_block() {
+        let md = "---\nkeywords: [a]\n---\nThe body.\nMore.";
+        assert_eq!(strip_frontmatter(md), "The body.\nMore.");
+    }
+
+    #[test]
+    fn triggered_for_input_matches_keyword_in_input() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().to_path_buf();
+        let skills = project.join(".octocode").join("skills");
+        let skill_dir = skills.join("refactor-large-function");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nkeywords: [refactor, split]\n---\nUse careful diff splits.",
+        )
+        .unwrap();
+        std::fs::write(
+            skill_dir.join("metadata.json"),
+            r#"{"id":"refactor-large-function","version":1,"created_at":"2026-05-22T00:00:00Z","created_from_run":null,"status":"active","success_count":0,"failure_count":0,"last_used_at":null,"tags":[]}"#,
+        )
+        .unwrap();
+
+        let store = SkillStore::for_project(&project);
+        let hits = store
+            .triggered_for_input("please refactor src/foo.rs", 5)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].1.contains("Use careful diff splits"));
+
+        let miss = store
+            .triggered_for_input("unrelated question about cats", 5)
+            .unwrap();
+        assert!(miss.is_empty());
+    }
 }

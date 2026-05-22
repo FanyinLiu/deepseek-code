@@ -500,6 +500,17 @@ pub async fn execute_single_tool_with_config(
                 Err(e) => (e.to_string(), true),
             }
         }
+        "notebook_edit" => {
+            let parsed: Result<crate::tools::notebook_edit::NotebookEditArgs, _> =
+                serde_json::from_value(args);
+            match parsed {
+                Ok(args) => match crate::tools::notebook_edit::notebook_edit(project_root, args) {
+                    Ok(result) => (result, false),
+                    Err(e) => (e.to_string(), true),
+                },
+                Err(e) => (e.to_string(), true),
+            }
+        }
         "git_add" => {
             let paths: Vec<&str> = args["paths"]
                 .as_array()

@@ -1168,10 +1168,14 @@ fn command_status_line(output: &str, status: view_blocks::ViewStatus) -> Line<'s
     let mut parts = vec![match status {
         view_blocks::ViewStatus::Done => "done".to_string(),
         view_blocks::ViewStatus::Failed => "failed".to_string(),
+        view_blocks::ViewStatus::Blocked => "blocked".to_string(),
         view_blocks::ViewStatus::Denied => "denied".to_string(),
         view_blocks::ViewStatus::Cancelled => "cancelled".to_string(),
         view_blocks::ViewStatus::Queued => "queued".to_string(),
         view_blocks::ViewStatus::Running => "running".to_string(),
+        view_blocks::ViewStatus::Waiting => "waiting".to_string(),
+        view_blocks::ViewStatus::Retrying => "retrying".to_string(),
+        view_blocks::ViewStatus::Skipped => "skipped".to_string(),
     }];
     if let Some(exit_code) = command_exit_code(output) {
         parts.push(format!("exit {exit_code}"));
@@ -2069,9 +2073,26 @@ fn render_inline_subagents(
         .iter()
         .filter(|c| c.status == subagent_cards::SubagentCardStatus::Running)
         .count();
+    let waiting = cards
+        .iter()
+        .filter(|c| c.status == subagent_cards::SubagentCardStatus::WaitingApproval)
+        .count();
+    let retrying = cards
+        .iter()
+        .filter(|c| c.status == subagent_cards::SubagentCardStatus::Retrying)
+        .count();
+    let active = running + waiting + retrying;
     let failed = cards
         .iter()
         .filter(|c| c.status == subagent_cards::SubagentCardStatus::Failed)
+        .count();
+    let blocked = cards
+        .iter()
+        .filter(|c| c.status == subagent_cards::SubagentCardStatus::Blocked)
+        .count();
+    let cancelled = cards
+        .iter()
+        .filter(|c| c.status == subagent_cards::SubagentCardStatus::Cancelled)
         .count();
     let done = cards
         .iter()
@@ -2081,7 +2102,7 @@ fn render_inline_subagents(
     let files_read: usize = cards.iter().map(|c| c.files_read).sum();
     let files_written: usize = cards.iter().map(|c| c.files_written).sum();
     let token_usage: u64 = cards.iter().map(|c| c.token_usage).sum();
-    let header = if compact {
+    let mut header = if compact {
         format!("Agents {} · running {running} · done {done}", cards.len())
     } else {
         format!(
@@ -2089,6 +2110,18 @@ fn render_inline_subagents(
             cards.len()
         )
     };
+    if waiting > 0 {
+        header.push_str(&format!(" · waiting {waiting}"));
+    }
+    if retrying > 0 {
+        header.push_str(&format!(" · retry {retrying}"));
+    }
+    if blocked > 0 {
+        header.push_str(&format!(" · blocked {blocked}"));
+    }
+    if cancelled > 0 {
+        header.push_str(&format!(" · cancelled {cancelled}"));
+    }
     let artifacts = if token_usage > 0 {
         format!("{summaries} summaries · files R{files_read} W{files_written} · {token_usage} tok")
     } else {
@@ -2110,16 +2143,16 @@ fn render_inline_subagents(
         Span::styled("artifacts ", transcript_style(p.muted)),
         Span::styled(
             truncate_display_width(&artifacts, line_width.saturating_sub(12)),
-            transcript_style(if failed > 0 { p.warning } else { p.secondary }),
+            transcript_style(if failed > 0 || blocked > 0 {
+                p.warning
+            } else {
+                p.secondary
+            }),
         ),
     ]));
 
     for card in cards {
-        let status = match card.status {
-            subagent_cards::SubagentCardStatus::Running => view_blocks::ViewStatus::Running,
-            subagent_cards::SubagentCardStatus::Done => view_blocks::ViewStatus::Done,
-            subagent_cards::SubagentCardStatus::Failed => view_blocks::ViewStatus::Failed,
-        };
+        let status = card.status.view_status();
         let meta = format_duration(
             card.duration_ms
                 .unwrap_or_else(|| card.start_time.elapsed().as_millis() as u64),
@@ -2137,17 +2170,21 @@ fn render_inline_subagents(
             }
             view_blocks::ViewStatus::Done => transcript_style(p.muted),
             view_blocks::ViewStatus::Failed => transcript_style(p.danger),
+            view_blocks::ViewStatus::Blocked => transcript_style(p.danger),
+            view_blocks::ViewStatus::Waiting | view_blocks::ViewStatus::Retrying => {
+                transcript_style(p.warning).add_modifier(Modifier::BOLD)
+            }
             _ => transcript_style(p.text),
         };
         let role_width = if compact { 9 } else { 14 };
         let role = truncate_display_width(&role, role_width);
         let role = format!("{role:<role_width$}");
-        let status_label = if compact && status == view_blocks::ViewStatus::Running {
-            "run"
+        let status_label = if compact {
+            compact_status_label(status)
         } else {
             status.label()
         };
-        let status_width = if compact { 5 } else { 7 };
+        let status_width = if compact { 5 } else { 8 };
         let status_text = format!("{status_label:<status_width$}");
         let files = if !compact && (card.files_read > 0 || card.files_written > 0) {
             format!(" · R{} W{}", card.files_read, card.files_written)
@@ -2184,10 +2221,12 @@ fn render_inline_subagents(
             Span::styled(description, lane_style),
             Span::styled(meta, transcript_style(p.dim)),
         ]));
-        let detail_label = if card.status == subagent_cards::SubagentCardStatus::Running {
-            "now    "
-        } else {
-            "output "
+        let detail_label = match card.status {
+            subagent_cards::SubagentCardStatus::Running
+            | subagent_cards::SubagentCardStatus::Retrying => "now    ",
+            subagent_cards::SubagentCardStatus::WaitingApproval => "wait   ",
+            subagent_cards::SubagentCardStatus::Blocked => "blocked",
+            _ => "output ",
         };
         let detail_width = line_width
             .saturating_sub(2 + 2 + display_width(detail_label))
@@ -2202,11 +2241,11 @@ fn render_inline_subagents(
         ]));
     }
 
-    if running > 0 {
+    if active > 0 {
         lines.push(Line::from(vec![
             Span::styled("╰─ ", transcript_style(p.divider)),
             Span::styled(
-                "running agents stay visible here; raw logs stay hidden until needed",
+                "active agents stay visible here; raw logs stay hidden until needed",
                 transcript_style(p.dim),
             ),
         ]));
@@ -2226,6 +2265,21 @@ fn agent_role_label(agent_type: &str) -> String {
         "test-runner" => "test-runner".to_string(),
         "worker" => "worker".to_string(),
         other => other.replace('_', "-"),
+    }
+}
+
+fn compact_status_label(status: view_blocks::ViewStatus) -> &'static str {
+    match status {
+        view_blocks::ViewStatus::Queued => "queue",
+        view_blocks::ViewStatus::Running => "run",
+        view_blocks::ViewStatus::Waiting => "wait",
+        view_blocks::ViewStatus::Retrying => "retry",
+        view_blocks::ViewStatus::Done => "done",
+        view_blocks::ViewStatus::Failed => "fail",
+        view_blocks::ViewStatus::Blocked => "block",
+        view_blocks::ViewStatus::Denied => "deny",
+        view_blocks::ViewStatus::Cancelled => "cncl",
+        view_blocks::ViewStatus::Skipped => "skip",
     }
 }
 

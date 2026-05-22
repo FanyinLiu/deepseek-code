@@ -1420,8 +1420,24 @@ impl Orchestrator {
         let turn_input = ContextualTurnInput::from_session(&self.session, user_input);
         let routing_input = turn_input.routing_input();
 
-        // Load project rules once and reuse throughout the turn.
-        let project_rules = load_project_rules(&self.project_root);
+        // Load project rules once and reuse throughout the turn. We also
+        // pull any skill bodies whose `keywords:` frontmatter matches the
+        // user's input and append them to the rules — auto-injection of
+        // saved workflows. Misses are silent.
+        let mut project_rules = load_project_rules(&self.project_root);
+        let skill_store = crate::skill::SkillStore::for_project(&self.project_root);
+        if let Ok(hits) = skill_store.triggered_for_input(user_input, 3) {
+            if !hits.is_empty() {
+                let mut combined = project_rules.unwrap_or_default();
+                for (id, body) in hits {
+                    if !combined.is_empty() {
+                        combined.push_str("\n\n");
+                    }
+                    combined.push_str(&format!("### Triggered skill: {id}\n\n{body}"));
+                }
+                project_rules = Some(combined);
+            }
+        }
         let force_swarm = should_force_swarm(user_input) || should_force_swarm(routing_input);
 
         // 1. Legacy classify (for search / explicit triggers)

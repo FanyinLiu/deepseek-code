@@ -128,6 +128,12 @@ pub const ALL_TOOLS: &[ToolMetadata] = &[
         concurrency_safe: false,
     },
     ToolMetadata {
+        name: "notebook_edit",
+        read_only: false,
+        destructive: false,
+        concurrency_safe: false,
+    },
+    ToolMetadata {
         name: "apply_patch",
         read_only: false,
         destructive: false,

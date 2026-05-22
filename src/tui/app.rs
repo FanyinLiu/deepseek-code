@@ -80,6 +80,19 @@ struct RenderDirtyState {
     status: StatusState,
 }
 
+struct RuntimeRenderState<'a> {
+    visible_subagents: &'a [subagent_cards::SubagentCard],
+    elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RenderOptionState {
+    slash_suggestions: Vec<(String, String)>,
+    file_mention_suggestions: Vec<String>,
+    history_options: Vec<String>,
+    shell_hint_active: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RenderDirtyFlags {
     input: bool,
@@ -786,10 +799,7 @@ impl TuiApp {
     fn current_mode(&self) -> status_bar::AppMode {
         let has_running_plan =
             !self.plan_steps.is_empty() && self.plan_current_step < self.plan_total_steps;
-        let has_running_agents = self
-            .subagents
-            .iter()
-            .any(|c| c.status == subagent_cards::SubagentCardStatus::Running);
+        let has_running_agents = self.subagents.iter().any(|c| c.status.is_active());
 
         if self.interaction_mode == InteractionMode::Plan || has_running_plan {
             status_bar::AppMode::Plan
@@ -963,6 +973,75 @@ impl TuiApp {
             input: self.input_state(),
             transcript: self.transcript_state(),
             status: self.status_state(),
+        }
+    }
+
+    fn runtime_render_state(&self) -> RuntimeRenderState<'_> {
+        let visible_subagents: &[subagent_cards::SubagentCard] = if self
+            .active_swarm
+            .as_ref()
+            .is_some_and(|swarm| !swarm.detail_expanded)
+        {
+            &[]
+        } else {
+            &self.subagents
+        };
+        RuntimeRenderState {
+            visible_subagents,
+            elapsed_ms: self.stream_motion_frame().elapsed_ms,
+        }
+    }
+
+    fn render_option_state(&self) -> RenderOptionState {
+        let slash_suggestions = if self.history_search_active {
+            Vec::new()
+        } else {
+            self.slash_command_suggestions()
+        };
+        let file_mention_suggestions = if self.history_search_active {
+            Vec::new()
+        } else {
+            self.file_mention_suggestions()
+        };
+        RenderOptionState {
+            slash_suggestions,
+            file_mention_suggestions,
+            history_options: self.history_search_options(),
+            shell_hint_active: self.shell_hint_active(),
+        }
+    }
+
+    fn render_option_count(&self, state: &RenderOptionState) -> usize {
+        self.options_needed
+            .as_ref()
+            .map(|decision| decision.options.len())
+            .or_else(|| (!state.history_options.is_empty()).then_some(state.history_options.len()))
+            .or_else(|| self.pending_options.as_ref().map(|(_, opts)| opts.len()))
+            .or_else(|| state.shell_hint_active.then_some(3))
+            .or_else(|| {
+                (!state.slash_suggestions.is_empty()).then_some(state.slash_suggestions.len())
+            })
+            .or_else(|| {
+                (!state.file_mention_suggestions.is_empty())
+                    .then_some(state.file_mention_suggestions.len())
+            })
+            .unwrap_or(0)
+    }
+
+    fn render_option_height(&self, state: &RenderOptionState, chrome: usize, max: u16) -> u16 {
+        let count = self.render_option_count(state);
+        if count > 0 {
+            (count + chrome).min(max as usize) as u16
+        } else {
+            0
+        }
+    }
+
+    fn input_pending_options<'a>(&'a self, state: &'a RenderOptionState) -> Option<&'a [String]> {
+        if self.history_search_active {
+            Some(state.history_options.as_slice())
+        } else {
+            self.pending_options.as_ref().map(|(_, o)| o.as_slice())
         }
     }
 
@@ -3742,6 +3821,9 @@ impl TuiApp {
                 let short_id: String = agent_id.chars().take(8).collect();
                 self.push_activity(format!("subagent {short_id} needs approval: {tool_name}"));
                 if policy_decision.action == crate::policy::PolicyAction::Allow {
+                    if let Some(card) = self.subagents.iter_mut().find(|c| c.agent_id == agent_id) {
+                        card.apply_delta(format!("auto-approved safe tool: {tool_name}"));
+                    }
                     let _ = respond.send(true);
                     self.push_activity(format!(
                         "subagent {short_id} auto-approved safe tool: {tool_name}"
@@ -3749,12 +3831,18 @@ impl TuiApp {
                     return;
                 }
                 if policy_decision.action == crate::policy::PolicyAction::Deny {
+                    if let Some(card) = self.subagents.iter_mut().find(|c| c.agent_id == agent_id) {
+                        card.mark_blocked(&policy_decision.reason);
+                    }
                     let _ = respond.send(false);
                     self.status_message = format!(
                         "Subagent tool blocked: {}",
                         truncate_for_activity(&policy_decision.reason, 80)
                     );
                     return;
+                }
+                if let Some(card) = self.subagents.iter_mut().find(|c| c.agent_id == agent_id) {
+                    card.mark_waiting_approval(&tool_name);
                 }
                 self.enqueue_approval(
                     subagent_tool_approval_display(
@@ -3825,37 +3913,9 @@ impl TuiApp {
 
         let (status_area, body_area, model_hint_area, divider_area, input_area, footer_area) =
             layout::app_layout(main_area, input_h);
-        let slash_suggestions = if self.history_search_active {
-            Vec::new()
-        } else {
-            self.slash_command_suggestions()
-        };
-        let file_mention_suggestions = if self.history_search_active {
-            Vec::new()
-        } else {
-            self.file_mention_suggestions()
-        };
-        let history_options = self.history_search_options();
-        let shell_hint_active = self.shell_hint_active();
-
+        let render_options = self.render_option_state();
         // Reserve space for options panel when orchestrator presents choices.
-        let options_count = self
-            .options_needed
-            .as_ref()
-            .map(|decision| decision.options.len())
-            .or_else(|| (!history_options.is_empty()).then_some(history_options.len()))
-            .or_else(|| self.pending_options.as_ref().map(|(_, opts)| opts.len()))
-            .or_else(|| shell_hint_active.then_some(3))
-            .or_else(|| (!slash_suggestions.is_empty()).then_some(slash_suggestions.len()))
-            .or_else(|| {
-                (!file_mention_suggestions.is_empty()).then_some(file_mention_suggestions.len())
-            })
-            .unwrap_or(0);
-        let options_h: u16 = if options_count > 0 {
-            (options_count + 5).min(12) as u16
-        } else {
-            0
-        };
+        let options_h = self.render_option_height(&render_options, 5, 12);
 
         let body_chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -3960,22 +4020,8 @@ impl TuiApp {
             welcome::render_welcome(f, full_body_area, &self.welcome);
         } else {
             // Quiet terminal style: everything scrolls together in one stream.
-            let elapsed = self.stream_motion_frame().elapsed_ms;
-            let empty_subagents: &[subagent_cards::SubagentCard] = &[];
-            let visible_subagents = if self.active_swarm.is_some() {
-                if self
-                    .active_swarm
-                    .as_ref()
-                    .is_some_and(|swarm| swarm.detail_expanded)
-                {
-                    &self.subagents
-                } else {
-                    empty_subagents
-                }
-            } else {
-                &self.subagents
-            };
-            self.render_transcript_surface(f, content_area, visible_subagents, elapsed);
+            let runtime = self.runtime_render_state();
+            self.render_transcript_surface(f, content_area, &runtime);
         }
 
         if self.scroll_offset > 0 {
@@ -3984,64 +4030,7 @@ impl TuiApp {
 
         // Options panel (between content and activity)
         if options_h > 0 {
-            let mut render_select_popup = false;
-            let (kind, title, options) = if let Some(decision) = &self.options_needed {
-                render_select_popup = true;
-                (
-                    decision.kind,
-                    decision.title.as_str(),
-                    decision.options.as_slice(),
-                )
-            } else if self.history_search_active {
-                (
-                    DecisionKind::Clarification,
-                    "History search",
-                    history_options.as_slice(),
-                )
-            } else if let Some((t, opts)) = &self.pending_options {
-                render_select_popup = true;
-                (DecisionKind::Clarification, t.as_str(), opts.as_slice())
-            } else {
-                (DecisionKind::Clarification, "", &[][..])
-            };
-            if !options.is_empty() {
-                if render_select_popup {
-                    select_popup::render_select_popup(
-                        f,
-                        options_area,
-                        title,
-                        options,
-                        self.selected_option_index,
-                    );
-                } else {
-                    plan_tracker::render_options_panel(
-                        f,
-                        options_area,
-                        kind,
-                        title,
-                        options,
-                        self.selected_option_index,
-                    );
-                }
-            } else if shell_hint_active {
-                plan_tracker::render_shell_hint_panel(f, options_area, self.is_chinese_ui());
-            } else if !slash_suggestions.is_empty() {
-                plan_tracker::render_slash_command_panel(
-                    f,
-                    options_area,
-                    &slash_suggestions,
-                    self.selected_slash_index,
-                    self.is_chinese_ui(),
-                );
-            } else if !file_mention_suggestions.is_empty() {
-                plan_tracker::render_file_mention_panel(
-                    f,
-                    options_area,
-                    &file_mention_suggestions,
-                    self.selected_file_mention_index,
-                    self.is_chinese_ui(),
-                );
-            }
+            self.render_command_options(f, options_area, &render_options);
         }
 
         model_hint::render_composer_hint_with_motion(
@@ -4085,11 +4074,7 @@ impl TuiApp {
         }
 
         // Input
-        let opts_for_input = if self.history_search_active {
-            Some(history_options.as_slice())
-        } else {
-            self.pending_options.as_ref().map(|(_, o)| o.as_slice())
-        };
+        let opts_for_input = self.input_pending_options(&render_options);
         if self.api_key_entry.is_some() {
             input::render_api_key_input_with_motion_and_placeholder(
                 f,
@@ -4130,8 +4115,7 @@ impl TuiApp {
         &self,
         f: &mut Frame,
         area: Rect,
-        visible_subagents: &[subagent_cards::SubagentCard],
-        elapsed: u64,
+        runtime: &RuntimeRenderState<'_>,
     ) {
         if area.width == 0 || area.height == 0 {
             return;
@@ -4143,20 +4127,14 @@ impl TuiApp {
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(3), Constraint::Length(diff_height)])
                 .split(area);
-            self.render_transcript_only(f, chunks[0], visible_subagents, elapsed);
+            self.render_transcript_only(f, chunks[0], runtime);
             self.render_diff_focus_panel(f, chunks[1]);
         } else {
-            self.render_transcript_only(f, area, visible_subagents, elapsed);
+            self.render_transcript_only(f, area, runtime);
         }
     }
 
-    fn render_transcript_only(
-        &self,
-        f: &mut Frame,
-        area: Rect,
-        visible_subagents: &[subagent_cards::SubagentCard],
-        elapsed: u64,
-    ) {
+    fn render_transcript_only(&self, f: &mut Frame, area: Rect, runtime: &RuntimeRenderState<'_>) {
         let queued_user_messages = self.queued_user_message_refs();
         transcript_view::render_transcript(
             f,
@@ -4173,8 +4151,8 @@ impl TuiApp {
                 plan_warnings: &self.plan_warnings,
                 todo_summary: &self.todo_summary,
                 todo_items: &self.todo_items,
-                subagents: visible_subagents,
-                global_elapsed_ms: elapsed,
+                subagents: runtime.visible_subagents,
+                global_elapsed_ms: runtime.elapsed_ms,
                 diffs: &self.file_diffs,
                 selected_diff: self.selected_diff,
                 is_streaming: self.is_streaming,
@@ -4248,35 +4226,8 @@ impl TuiApp {
             horizontal: u16::from(area.width >= 70) * 3,
             vertical: u16::from(area.height >= 10),
         });
-        let slash_suggestions = if self.history_search_active {
-            Vec::new()
-        } else {
-            self.slash_command_suggestions()
-        };
-        let file_mention_suggestions = if self.history_search_active {
-            Vec::new()
-        } else {
-            self.file_mention_suggestions()
-        };
-        let history_options = self.history_search_options();
-        let shell_hint_active = self.shell_hint_active();
-        let options_count = self
-            .options_needed
-            .as_ref()
-            .map(|decision| decision.options.len())
-            .or_else(|| (!history_options.is_empty()).then_some(history_options.len()))
-            .or_else(|| self.pending_options.as_ref().map(|(_, opts)| opts.len()))
-            .or_else(|| shell_hint_active.then_some(3))
-            .or_else(|| (!slash_suggestions.is_empty()).then_some(slash_suggestions.len()))
-            .or_else(|| {
-                (!file_mention_suggestions.is_empty()).then_some(file_mention_suggestions.len())
-            })
-            .unwrap_or(0);
-        let options_h: u16 = if options_count > 0 {
-            (options_count + 5).min(12) as u16
-        } else {
-            0
-        };
+        let render_options = self.render_option_state();
+        let options_h = self.render_option_height(&render_options, 5, 12);
         let prompt_h = self.minimal_runtime_prompt_height();
         let activity_h = u16::from(self.should_show_minimal_runtime_activity());
         let rows = Layout::default()
@@ -4291,16 +4242,17 @@ impl TuiApp {
             ])
             .split(root);
 
-        self.render_minimal_runtime_content(f, rows[0]);
+        let runtime = self.runtime_render_state();
+        self.render_minimal_runtime_content(f, rows[0], &runtime);
         if self.scroll_offset > 0 {
             render_jump_to_bottom_hint(f, rows[0]);
         }
         if options_h > 0 {
-            self.render_command_options(f, rows[1], &slash_suggestions, &file_mention_suggestions);
+            self.render_command_options(f, rows[1], &render_options);
         }
         self.render_minimal_runtime_activity(f, rows[2]);
         if prompt_h > 0 {
-            self.render_minimal_runtime_prompt(f, rows[4]);
+            self.render_minimal_runtime_prompt(f, rows[4], &render_options);
         }
         self.render_powerline_footer(f, rows[5]);
         if let Some((ref approval, _)) = self.approval {
@@ -4377,7 +4329,12 @@ impl TuiApp {
         );
     }
 
-    fn render_minimal_runtime_content(&self, f: &mut Frame, area: Rect) {
+    fn render_minimal_runtime_content(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        runtime: &RuntimeRenderState<'_>,
+    ) {
         if area.height == 0 {
             return;
         }
@@ -4386,35 +4343,20 @@ impl TuiApp {
             welcome::render_welcome(f, area, &self.welcome);
             return;
         }
-        let elapsed = self.stream_motion_frame().elapsed_ms;
-        let empty_subagents: &[subagent_cards::SubagentCard] = &[];
-        let visible_subagents = if self.active_swarm.is_some() {
-            if self
-                .active_swarm
-                .as_ref()
-                .is_some_and(|swarm| swarm.detail_expanded)
-            {
-                &self.subagents
-            } else {
-                empty_subagents
-            }
-        } else {
-            &self.subagents
-        };
-        self.render_transcript_surface(f, area, visible_subagents, elapsed);
+        self.render_transcript_surface(f, area, runtime);
     }
 
-    fn render_minimal_runtime_prompt(&self, f: &mut Frame, area: Rect) {
+    fn render_minimal_runtime_prompt(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        render_options: &RenderOptionState,
+    ) {
         if area.height == 0 {
             return;
         }
 
-        let history_options = self.history_search_options();
-        let opts_for_input = if self.history_search_active {
-            Some(history_options.as_slice())
-        } else {
-            self.pending_options.as_ref().map(|(_, o)| o.as_slice())
-        };
+        let opts_for_input = self.input_pending_options(render_options);
         input::render_input_with_options(
             f,
             area,
@@ -4433,11 +4375,8 @@ impl TuiApp {
         &self,
         f: &mut Frame,
         area: Rect,
-        slash_suggestions: &[(String, String)],
-        file_mention_suggestions: &[String],
+        render_options: &RenderOptionState,
     ) {
-        let history_options = self.history_search_options();
-        let shell_hint_active = self.shell_hint_active();
         let mut render_select_popup = false;
         let (kind, title, options) = if let Some(decision) = &self.options_needed {
             render_select_popup = true;
@@ -4450,7 +4389,7 @@ impl TuiApp {
             (
                 DecisionKind::Clarification,
                 "History search",
-                history_options.as_slice(),
+                render_options.history_options.as_slice(),
             )
         } else if let Some((t, opts)) = &self.pending_options {
             render_select_popup = true;
@@ -4477,21 +4416,21 @@ impl TuiApp {
                     self.selected_option_index,
                 );
             }
-        } else if shell_hint_active {
+        } else if render_options.shell_hint_active {
             plan_tracker::render_shell_hint_panel(f, area, self.is_chinese_ui());
-        } else if !slash_suggestions.is_empty() {
+        } else if !render_options.slash_suggestions.is_empty() {
             plan_tracker::render_slash_command_panel(
                 f,
                 area,
-                slash_suggestions,
+                &render_options.slash_suggestions,
                 self.selected_slash_index,
                 self.is_chinese_ui(),
             );
-        } else if !file_mention_suggestions.is_empty() {
+        } else if !render_options.file_mention_suggestions.is_empty() {
             plan_tracker::render_file_mention_panel(
                 f,
                 area,
-                file_mention_suggestions,
+                &render_options.file_mention_suggestions,
                 self.selected_file_mention_index,
                 self.is_chinese_ui(),
             );
@@ -4506,35 +4445,8 @@ impl TuiApp {
         }
 
         let input_h = self.input_height();
-        let slash_suggestions = if self.history_search_active {
-            Vec::new()
-        } else {
-            self.slash_command_suggestions()
-        };
-        let file_mention_suggestions = if self.history_search_active {
-            Vec::new()
-        } else {
-            self.file_mention_suggestions()
-        };
-        let history_options = self.history_search_options();
-        let shell_hint_active = self.shell_hint_active();
-        let options_count = self
-            .options_needed
-            .as_ref()
-            .map(|decision| decision.options.len())
-            .or_else(|| (!history_options.is_empty()).then_some(history_options.len()))
-            .or_else(|| self.pending_options.as_ref().map(|(_, opts)| opts.len()))
-            .or_else(|| shell_hint_active.then_some(3))
-            .or_else(|| (!slash_suggestions.is_empty()).then_some(slash_suggestions.len()))
-            .or_else(|| {
-                (!file_mention_suggestions.is_empty()).then_some(file_mention_suggestions.len())
-            })
-            .unwrap_or(0);
-        let options_h: u16 = if options_count > 0 {
-            (options_count + 4).min(10) as u16
-        } else {
-            0
-        };
+        let render_options = self.render_option_state();
+        let options_h = self.render_option_height(&render_options, 4, 10);
         let activity_h = u16::from(self.should_show_minimal_runtime_activity());
         let inner = area.inner(Margin {
             horizontal: u16::from(area.width >= 60),
@@ -4576,86 +4488,15 @@ impl TuiApp {
         } else if showing_welcome {
             welcome::render_welcome(f, content_area, &self.welcome);
         } else {
-            let elapsed = self.stream_motion_frame().elapsed_ms;
-            let empty_subagents: &[subagent_cards::SubagentCard] = &[];
-            let visible_subagents = if self.active_swarm.is_some() {
-                if self
-                    .active_swarm
-                    .as_ref()
-                    .is_some_and(|swarm| swarm.detail_expanded)
-                {
-                    &self.subagents
-                } else {
-                    empty_subagents
-                }
-            } else {
-                &self.subagents
-            };
-            self.render_transcript_surface(f, content_area, visible_subagents, elapsed);
+            let runtime = self.runtime_render_state();
+            self.render_transcript_surface(f, content_area, &runtime);
         }
         if self.scroll_offset > 0 {
             render_jump_to_bottom_hint(f, content_area);
         }
 
         if options_h > 0 {
-            let mut render_select_popup = false;
-            let (kind, title, options) = if let Some(decision) = &self.options_needed {
-                render_select_popup = true;
-                (
-                    decision.kind,
-                    decision.title.as_str(),
-                    decision.options.as_slice(),
-                )
-            } else if self.history_search_active {
-                (
-                    DecisionKind::Clarification,
-                    "History search",
-                    history_options.as_slice(),
-                )
-            } else if let Some((t, opts)) = &self.pending_options {
-                render_select_popup = true;
-                (DecisionKind::Clarification, t.as_str(), opts.as_slice())
-            } else {
-                (DecisionKind::Clarification, "", &[][..])
-            };
-            if !options.is_empty() {
-                if render_select_popup {
-                    select_popup::render_select_popup(
-                        f,
-                        options_area,
-                        title,
-                        options,
-                        self.selected_option_index,
-                    );
-                } else {
-                    plan_tracker::render_options_panel(
-                        f,
-                        options_area,
-                        kind,
-                        title,
-                        options,
-                        self.selected_option_index,
-                    );
-                }
-            } else if shell_hint_active {
-                plan_tracker::render_shell_hint_panel(f, options_area, self.is_chinese_ui());
-            } else if !slash_suggestions.is_empty() {
-                plan_tracker::render_slash_command_panel(
-                    f,
-                    options_area,
-                    &slash_suggestions,
-                    self.selected_slash_index,
-                    self.is_chinese_ui(),
-                );
-            } else if !file_mention_suggestions.is_empty() {
-                plan_tracker::render_file_mention_panel(
-                    f,
-                    options_area,
-                    &file_mention_suggestions,
-                    self.selected_file_mention_index,
-                    self.is_chinese_ui(),
-                );
-            }
+            self.render_command_options(f, options_area, &render_options);
         }
 
         if self.is_streaming {
@@ -4705,11 +4546,7 @@ impl TuiApp {
             );
         }
 
-        let opts_for_input = if self.history_search_active {
-            Some(history_options.as_slice())
-        } else {
-            self.pending_options.as_ref().map(|(_, o)| o.as_slice())
-        };
+        let opts_for_input = self.input_pending_options(&render_options);
         if self.api_key_entry.is_some() {
             input::render_api_key_input_with_motion_and_placeholder(
                 f,
@@ -4986,8 +4823,13 @@ fn subagents_hash(cards: &[subagent_cards::SubagentCard]) -> u64 {
 fn subagent_status_tag(status: &subagent_cards::SubagentCardStatus) -> u8 {
     match status {
         subagent_cards::SubagentCardStatus::Running => 0,
-        subagent_cards::SubagentCardStatus::Done => 1,
-        subagent_cards::SubagentCardStatus::Failed => 2,
+        subagent_cards::SubagentCardStatus::WaitingApproval => 1,
+        subagent_cards::SubagentCardStatus::Retrying => 2,
+        subagent_cards::SubagentCardStatus::Done => 3,
+        subagent_cards::SubagentCardStatus::Failed => 4,
+        subagent_cards::SubagentCardStatus::Blocked => 5,
+        subagent_cards::SubagentCardStatus::Cancelled => 6,
+        subagent_cards::SubagentCardStatus::Skipped => 7,
     }
 }
 
@@ -7891,6 +7733,90 @@ mod tests {
     }
 
     #[test]
+    fn subagent_approval_updates_card_to_waiting() {
+        let root = tempfile::tempdir().expect("workspace");
+        let outside = tempfile::NamedTempFile::new().expect("outside file");
+        let mut app = test_app_with_root(root.path().to_path_buf());
+        app.begin_running_turn("审查敏感文件读取");
+        app.apply_agent_event(AgentEvent::SubagentStarted {
+            agent_id: "subagent-waiting".to_string(),
+            agent_type: "reviewer".to_string(),
+            description: "检查配置".to_string(),
+            is_background: false,
+        });
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let arguments = serde_json::json!({ "path": outside.path().to_string_lossy() }).to_string();
+
+        app.apply_agent_event(AgentEvent::SubagentToolApprovalNeeded {
+            agent_id: "subagent-waiting".to_string(),
+            tool_name: "read_file".to_string(),
+            arguments: arguments.clone(),
+            policy_decision: subagent_policy_decision("read_file", &arguments, root.path()),
+            respond: tx,
+        });
+
+        let card = app
+            .subagents
+            .iter()
+            .find(|card| card.agent_id == "subagent-waiting")
+            .expect("subagent card");
+        assert_eq!(
+            card.status,
+            subagent_cards::SubagentCardStatus::WaitingApproval
+        );
+        assert_eq!(
+            card.last_update.as_deref(),
+            Some("waiting approval for read_file")
+        );
+
+        let mut terminal =
+            Terminal::new(ratatui::backend::TestBackend::new(100, 24)).expect("terminal");
+        terminal.draw(|f| app.render(f)).expect("draw");
+        let rendered = buffer_to_text(terminal.backend());
+        assert!(rendered.contains("waiting"));
+        assert!(rendered.contains("waiting approval for read_file"));
+    }
+
+    #[test]
+    fn subagent_denied_tool_updates_card_to_blocked() {
+        let mut app = test_app();
+        app.begin_running_turn("执行子 agent");
+        app.apply_agent_event(AgentEvent::SubagentStarted {
+            agent_id: "subagent-blocked".to_string(),
+            agent_type: "worker".to_string(),
+            description: "写入受保护路径".to_string(),
+            is_background: false,
+        });
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let policy_decision = crate::policy::PolicyDecision::deny(
+            "protected path",
+            "blocked",
+            "blocked",
+            crate::policy::RiskLevel::Blocked,
+            "path: .git/config",
+        )
+        .with_source(crate::policy::ToolCallSource::Subagent);
+
+        app.apply_agent_event(AgentEvent::SubagentToolApprovalNeeded {
+            agent_id: "subagent-blocked".to_string(),
+            tool_name: "write_file".to_string(),
+            arguments: r#"{"path":".git/config"}"#.to_string(),
+            policy_decision,
+            respond: tx,
+        });
+
+        assert!(matches!(rx.try_recv(), Ok(false)));
+        let card = app
+            .subagents
+            .iter()
+            .find(|card| card.agent_id == "subagent-blocked")
+            .expect("subagent card");
+        assert_eq!(card.status, subagent_cards::SubagentCardStatus::Blocked);
+        assert_eq!(card.last_update.as_deref(), Some("blocked: protected path"));
+        assert!(app.approval.is_none());
+    }
+
+    #[test]
     fn concurrent_subagent_approvals_are_queued() {
         let root = tempfile::tempdir().expect("workspace");
         let outside_one = tempfile::NamedTempFile::new().expect("outside file one");
@@ -9039,6 +8965,58 @@ mod tests {
         assert_eq!(swarm.running, 1);
         assert_eq!(swarm.done, 1);
         assert_eq!(swarm.failed, 0);
+    }
+
+    #[test]
+    fn runtime_render_state_controls_swarm_agent_visibility() {
+        let mut app = test_app();
+        app.subagents.push(subagent_cards::SubagentCard::new(
+            "agent-1",
+            "reviewer",
+            "审查风险",
+        ));
+        app.apply_agent_event(AgentEvent::SwarmStarted {
+            run_id: "swarm-1".to_string(),
+            summary: "蜂群任务".to_string(),
+            total: 1,
+        });
+
+        let collapsed = app.runtime_render_state();
+        assert!(collapsed.visible_subagents.is_empty());
+
+        app.active_swarm
+            .as_mut()
+            .expect("active swarm")
+            .detail_expanded = true;
+        let expanded = app.runtime_render_state();
+        assert_eq!(expanded.visible_subagents.len(), 1);
+
+        app.active_swarm = None;
+        let standalone = app.runtime_render_state();
+        assert_eq!(standalone.visible_subagents.len(), 1);
+    }
+
+    #[test]
+    fn render_option_state_is_shared_by_history_and_command_panels() {
+        let mut app = test_app();
+        app.input_text = "/doc".to_string();
+        app.cursor_pos = app.input_text.chars().count();
+
+        let command_state = app.render_option_state();
+        assert!(!command_state.slash_suggestions.is_empty());
+        assert!(app.render_option_height(&command_state, 5, 12) > 0);
+
+        app.history_search_active = true;
+        app.input_history = vec!["cargo test".to_string(), "/doctor".to_string()];
+        app.input_text = "cargo".to_string();
+
+        let history_state = app.render_option_state();
+        assert!(history_state.slash_suggestions.is_empty());
+        assert_eq!(history_state.history_options, vec!["cargo test"]);
+        assert_eq!(
+            app.input_pending_options(&history_state),
+            Some(history_state.history_options.as_slice())
+        );
     }
 
     #[test]

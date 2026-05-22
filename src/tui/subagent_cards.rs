@@ -17,8 +17,34 @@ const RECENT_LINES_MAX: usize = 3;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubagentCardStatus {
     Running,
+    WaitingApproval,
+    Retrying,
     Done,
     Failed,
+    Blocked,
+    Cancelled,
+    Skipped,
+}
+
+impl SubagentCardStatus {
+    #[must_use]
+    pub fn view_status(&self) -> view_blocks::ViewStatus {
+        match self {
+            Self::Running => view_blocks::ViewStatus::Running,
+            Self::WaitingApproval => view_blocks::ViewStatus::Waiting,
+            Self::Retrying => view_blocks::ViewStatus::Retrying,
+            Self::Done => view_blocks::ViewStatus::Done,
+            Self::Failed => view_blocks::ViewStatus::Failed,
+            Self::Blocked => view_blocks::ViewStatus::Blocked,
+            Self::Cancelled => view_blocks::ViewStatus::Cancelled,
+            Self::Skipped => view_blocks::ViewStatus::Skipped,
+        }
+    }
+
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        matches!(self, Self::Running | Self::WaitingApproval | Self::Retrying)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +89,12 @@ impl SubagentCard {
     }
 
     pub fn apply_delta(&mut self, content: impl Into<String>) {
+        if matches!(
+            self.status,
+            SubagentCardStatus::WaitingApproval | SubagentCardStatus::Retrying
+        ) {
+            self.status = SubagentCardStatus::Running;
+        }
         let content = content.into();
         for line in content.lines() {
             let trimmed = line.trim();
@@ -88,6 +120,16 @@ impl SubagentCard {
         self.files_written = result.files_written.len();
         self.token_usage = result.token_usage;
     }
+
+    pub fn mark_waiting_approval(&mut self, tool_name: &str) {
+        self.status = SubagentCardStatus::WaitingApproval;
+        self.last_update = Some(format!("waiting approval for {tool_name}"));
+    }
+
+    pub fn mark_blocked(&mut self, reason: &str) {
+        self.status = SubagentCardStatus::Blocked;
+        self.last_update = Some(format!("blocked: {}", truncate(reason, 96)));
+    }
 }
 
 /// Render a quiet Droid-style worker report list.
@@ -101,16 +143,13 @@ pub fn render_subagent_cards(
         return;
     }
 
-    let running = cards
-        .iter()
-        .filter(|card| card.status == SubagentCardStatus::Running)
-        .count();
+    let active = cards.iter().filter(|card| card.status.is_active()).count();
 
     let mut lines = Vec::new();
     let p = theme::palette();
 
-    let title = if running > 0 {
-        format!("agents {running}/{}", cards.len())
+    let title = if active > 0 {
+        format!("agents {active}/{}", cards.len())
     } else {
         format!("agents {}", cards.len())
     };
@@ -133,11 +172,7 @@ pub fn render_subagent_cards(
                 card.agent_type,
                 short_id(&card.agent_id)
             ),
-            status: match card.status {
-                SubagentCardStatus::Running => view_blocks::ViewStatus::Running,
-                SubagentCardStatus::Done => view_blocks::ViewStatus::Done,
-                SubagentCardStatus::Failed => view_blocks::ViewStatus::Failed,
-            },
+            status: card.status.view_status(),
             task: card.description.clone(),
             metadata: vec![
                 ("time".to_string(), card_duration(card)),

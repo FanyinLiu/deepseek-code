@@ -25,6 +25,22 @@ pub fn read_file(
         );
     }
 
+    // Non-text formats get format-specific extractors BEFORE the usual
+    // read_to_string path (which would otherwise return garbled bytes).
+    let ext = resolved
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("ipynb") => {
+            return crate::tools::notebook_render::render(&resolved, &display_path, offset, limit);
+        }
+        Some("pdf") => {
+            return crate::tools::pdf_render::render(&resolved, &display_path, offset, limit);
+        }
+        _ => {}
+    }
+
     let content = std::fs::read_to_string(&resolved)?;
 
     // Extract code structure for supported languages
