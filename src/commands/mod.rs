@@ -1572,12 +1572,13 @@ fn cmd_keybindings(args: &str, ctx: &mut CommandContext) -> CommandResult {
         std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create .octocode: {e}"))?;
         let content = r#"[keybindings]
 submit = "enter"
-exit = "ctrl+d ctrl+d"
-interrupt = "esc"
+exit = "ctrl+d"
+interrupt = "ctrl+c"
 history_up = "up"
 history_down = "down"
 complete = "tab"
 open_settings = "ctrl+,"
+open_history_search = "ctrl+r"
 
 [labels.zh-CN]
 submit = "发送"
@@ -1587,6 +1588,7 @@ history_up = "上一条"
 history_down = "下一条"
 complete = "补全"
 open_settings = "设置"
+open_history_search = "搜索历史"
 "#;
         std::fs::write(&path, content).map_err(|e| format!("Failed to write keybindings: {e}"))?;
     }

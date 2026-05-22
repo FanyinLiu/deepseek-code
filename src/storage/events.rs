@@ -64,6 +64,12 @@ pub enum SessionEventKind {
         title: String,
         options: Vec<String>,
         summary: String,
+        #[serde(default)]
+        descriptions: Vec<String>,
+        #[serde(default)]
+        previews: Vec<Option<String>>,
+        #[serde(default)]
+        multi_select: bool,
     },
     ContextCompacted {
         before_tokens: u64,

@@ -318,11 +318,17 @@ pub(crate) fn event_to_json(event: &AgentEvent) -> serde_json::Value {
             title,
             options,
             summary,
+            descriptions,
+            previews,
+            multi_select,
         } => json!({
             "type": "user_question_requested",
             "title": title,
             "options": options,
             "summary": summary,
+            "descriptions": descriptions,
+            "previews": previews,
+            "multi_select": multi_select,
         }),
         AgentEvent::ContextCompacted {
             summary,

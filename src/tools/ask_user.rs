@@ -51,6 +51,12 @@ pub struct PendingUserQuestion {
     pub title: String,
     pub options: Vec<String>,
     pub summary: String,
+    /// Per-option description (same length as `options`, may be empty strings).
+    pub descriptions: Vec<String>,
+    /// Per-option preview text. `None` means no preview for that option.
+    pub previews: Vec<Option<String>>,
+    /// True when the question allows multiple selections.
+    pub multi_select: bool,
 }
 
 /// Parse the raw tool-call arguments into the orchestrator's lightweight
@@ -69,6 +75,16 @@ pub fn pending_question_from_value(value: &serde_json::Value) -> Result<PendingU
         .iter()
         .map(|o| o.label.clone())
         .collect::<Vec<_>>();
+    let descriptions = first
+        .options
+        .iter()
+        .map(|o| o.description.clone())
+        .collect::<Vec<_>>();
+    let previews = first
+        .options
+        .iter()
+        .map(|o| o.preview.clone())
+        .collect::<Vec<_>>();
     let summary = if args.questions.len() == 1 {
         first.question.clone()
     } else {
@@ -83,6 +99,9 @@ pub fn pending_question_from_value(value: &serde_json::Value) -> Result<PendingU
         title: first.header.clone(),
         options,
         summary,
+        descriptions,
+        previews,
+        multi_select: first.multi_select,
     })
 }
 

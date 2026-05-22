@@ -71,6 +71,9 @@ pub enum AgentEvent {
         title: String,
         options: Vec<String>,
         summary: String,
+        descriptions: Vec<String>,
+        previews: Vec<Option<String>>,
+        multi_select: bool,
     },
     ContextCompacted {
         summary: String,
@@ -2742,6 +2745,9 @@ impl Orchestrator {
                         title: question.title.clone(),
                         options: question.options.clone(),
                         summary: question.summary.clone(),
+                        descriptions: question.descriptions.clone(),
+                        previews: question.previews.clone(),
+                        multi_select: question.multi_select,
                     },
                 );
             }
@@ -2769,6 +2775,9 @@ impl Orchestrator {
                         title: question.title,
                         options: question.options,
                         summary: question.summary,
+                        descriptions: question.descriptions,
+                        previews: question.previews,
+                        multi_select: question.multi_select,
                     },
                 );
             }

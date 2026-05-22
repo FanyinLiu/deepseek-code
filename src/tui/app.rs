@@ -146,9 +146,9 @@ use crate::provider::{build_provider, context_budget_for, Provider, ProviderKind
 use crate::storage;
 
 use super::{
-    approval_popup, diff_viewer, file_tree, input, layout, model_hint, motion, plan_tracker,
-    render_core, select_popup, settings_panel, status_bar, statusline, subagent_cards, theme,
-    transcript_view, welcome,
+    approval_popup, diff_viewer, file_tree, input, keybindings, layout, model_hint, motion,
+    plan_tracker, render_core, screens, select_popup, settings_panel, status_bar, statusline,
+    subagent_cards, theme, transcript_view, welcome,
 };
 use render_core::{render_canvas, render_jump_to_bottom_hint};
 
@@ -200,6 +200,11 @@ pub struct TuiApp {
     pub file_diffs: Vec<diff_viewer::FileDiffItem>,
     pub options_needed: Option<DecisionPrompt>,
     pub pending_options: Option<(String, Vec<String>)>,
+    /// Rich payload paralleling `pending_options` when the ask_user tool
+    /// supplied per-option descriptions, previews, or asked for multi-select.
+    /// Present alongside `pending_options`; absent when the legacy text-only
+    /// fallback applies.
+    pub pending_question_rich: Option<PendingQuestionRich>,
     pub todo_summary: crate::tools::todo_state::TodoSummary,
     pub todo_items: Vec<crate::tools::todo_state::TodoBoardItem>,
     pub recent_tool_summaries: VecDeque<String>,
@@ -237,6 +242,7 @@ pub struct TuiApp {
     pub settings_tab: settings_panel::SettingsTab,
     pub settings_selected: usize,
     slash_suggestion_cache: RefCell<SlashSuggestionCache>,
+    keymap: keybindings::Keymap,
 }
 
 #[derive(Default)]
@@ -259,6 +265,21 @@ pub struct DecisionPrompt {
     pub title: String,
     pub options: Vec<String>,
     pub respond: tokio::sync::oneshot::Sender<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingQuestionRich {
+    pub title: String,
+    pub question: String,
+    pub options: Vec<PendingQuestionOption>,
+    pub multi_select: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingQuestionOption {
+    pub label: String,
+    pub description: String,
+    pub preview: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -701,6 +722,7 @@ impl TuiApp {
             Vec::new()
         };
         let todo_board = crate::tools::todo_state::load_todo_board(&project_root);
+        let keymap = keybindings::Keymap::load_project(&project_root);
 
         Self {
             input_text: String::new(),
@@ -757,6 +779,7 @@ impl TuiApp {
             file_diffs: Vec::new(),
             options_needed: None,
             pending_options: None,
+            pending_question_rich: None,
             todo_summary: todo_board.summary,
             todo_items: todo_board.items,
             recent_tool_summaries: VecDeque::new(),
@@ -792,6 +815,7 @@ impl TuiApp {
             settings_tab: settings_panel::SettingsTab::Model,
             settings_selected: 0,
             slash_suggestion_cache: RefCell::default(),
+            keymap,
         }
     }
 
@@ -1200,6 +1224,38 @@ impl TuiApp {
         welcome::is_chinese_display_language(&self.config.ui.language)
     }
 
+    fn screen_flags(&self) -> screens::ScreenFlags {
+        screens::ScreenFlags {
+            decision_open: self.options_needed.is_some(),
+            approval_open: self.approval.is_some(),
+            settings_open: self.settings_open,
+            api_key_entry_open: self.api_key_entry.is_some()
+                && !self.input_text.trim_start().starts_with('/'),
+            history_search_open: self.history_search_active,
+            diff_focused: self.diff_focused,
+            file_tree_focused: self.file_tree_focused,
+            showing_welcome: self.messages.is_empty()
+                && self.stream_buffer.is_empty()
+                && !self.is_streaming,
+        }
+    }
+
+    pub fn active_screen(&self) -> screens::ActiveScreen {
+        screens::active_screen(self.screen_flags())
+    }
+
+    fn key_action(&self, key: KeyEvent) -> Option<keybindings::KeyAction> {
+        self.keymap.action_for(key)
+    }
+
+    fn key_is_exit(&self, key: KeyEvent) -> bool {
+        self.key_action(key) == Some(keybindings::KeyAction::Exit)
+    }
+
+    fn key_is_interrupt(&self, key: KeyEvent) -> bool {
+        self.key_action(key) == Some(keybindings::KeyAction::Interrupt)
+    }
+
     pub fn open_settings_panel(&mut self) {
         self.settings_open = true;
         self.settings_selected = self
@@ -1553,7 +1609,7 @@ impl TuiApp {
         if !is_actionable_key_event(key) {
             return;
         }
-        if is_exit_key(key) {
+        if self.key_is_exit(key) {
             self.handle_exit_key();
             return;
         }
@@ -1659,6 +1715,11 @@ impl TuiApp {
             return;
         }
 
+        if self.key_action(key) == Some(keybindings::KeyAction::OpenSettings) {
+            self.open_settings_panel();
+            return;
+        }
+
         if self.handle_pending_option_key(key, tx) {
             return;
         }
@@ -1709,6 +1770,27 @@ impl TuiApp {
 
                         // If options are pending, try to match selection
                         if let Some((_, options)) = self.pending_options.take() {
+                            let is_multi = self
+                                .pending_question_rich
+                                .as_ref()
+                                .map(|r| r.multi_select)
+                                .unwrap_or(false);
+                            self.pending_question_rich = None;
+                            if is_multi {
+                                if let Some(picks) = try_match_multi_options(&input, &options) {
+                                    let labels =
+                                        picks.iter().map(|(_, l)| l.clone()).collect::<Vec<_>>();
+                                    let _ = tx.send(TuiAction::Submit(format_pending_multi_reply(
+                                        &picks,
+                                    )));
+                                    self.status_message = format!(
+                                        "Selected {} options: {}",
+                                        picks.len(),
+                                        labels.join(", ")
+                                    );
+                                    return;
+                                }
+                            }
                             let choice = try_match_option(&input, &options);
                             if let Some((idx, text)) = choice {
                                 let _ = tx.send(TuiAction::Submit(format_pending_option_reply(
@@ -1863,7 +1945,7 @@ impl TuiApp {
                 self.cycle_interaction_mode();
             }
             KeyCode::Char(c) => match c {
-                'r' if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                _ if self.key_action(key) == Some(keybindings::KeyAction::OpenHistorySearch) => {
                     self.open_history_search();
                 }
                 'j' if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1893,6 +1975,7 @@ impl TuiApp {
                     self.diff_scroll = 0;
                     self.diff_focused = false;
                     self.pending_options = None;
+                    self.pending_question_rich = None;
                     self.activity_log.clear();
                     crate::workspace::apply::clear_history();
                     self.status_message = "Screen cleared".into();
@@ -2045,6 +2128,7 @@ impl TuiApp {
             }
             KeyCode::Esc => {
                 self.pending_options = None;
+                self.pending_question_rich = None;
                 self.selected_option_index = 0;
                 self.status_message = "Option picker dismissed".into();
                 true
@@ -3032,6 +3116,9 @@ impl TuiApp {
                     title,
                     options,
                     summary: summary.clone(),
+                    descriptions: Vec::new(),
+                    previews: Vec::new(),
+                    multi_select: false,
                 },
             ));
         }
@@ -3159,6 +3246,7 @@ impl TuiApp {
         self.pending_user_message = Some(input.to_string());
         self.stream_buffer.clear();
         self.pending_options = None;
+        self.pending_question_rich = None;
         self.compact_notice = None;
         self.selected_option_index = 0;
         self.push_activity(format!("turn started: {}", self.current_task_title));
@@ -3202,6 +3290,7 @@ impl TuiApp {
             let _ = decision.respond.send(usize::MAX);
         }
         self.pending_options = None;
+        self.pending_question_rich = None;
         self.selected_option_index = 0;
         self.is_streaming = false;
         self.stream_start = None;
@@ -3250,7 +3339,7 @@ impl TuiApp {
             true
         } else {
             self.exit_confirm_pending = true;
-            self.status_message = self.exit_confirm_message().into();
+            self.status_message = self.exit_confirm_message();
             false
         }
     }
@@ -3259,11 +3348,19 @@ impl TuiApp {
         self.exit_confirm_pending = false;
     }
 
-    fn exit_confirm_message(&self) -> &'static str {
+    fn exit_key_label(&self) -> String {
+        self.keymap
+            .binding_label(keybindings::KeyAction::Exit)
+            .map(|label| format_keybinding_label(&label))
+            .unwrap_or_else(|| "Ctrl+D".to_string())
+    }
+
+    fn exit_confirm_message(&self) -> String {
+        let label = self.exit_key_label();
         if self.is_chinese_ui() {
-            "再次按 Ctrl+D 退出"
+            format!("再次按 {label} 退出")
         } else {
-            "Press Ctrl+D again to exit"
+            format!("Press {label} again to exit")
         }
     }
 
@@ -3448,8 +3545,33 @@ impl TuiApp {
                 title,
                 options,
                 summary,
+                descriptions,
+                previews,
+                multi_select,
             } => {
-                self.last_user_question_summary = Some(summary);
+                self.last_user_question_summary = Some(summary.clone());
+                let rich_opts: Vec<PendingQuestionOption> = options
+                    .iter()
+                    .enumerate()
+                    .map(|(i, label)| PendingQuestionOption {
+                        label: label.clone(),
+                        description: descriptions.get(i).cloned().unwrap_or_default(),
+                        preview: previews.get(i).cloned().flatten(),
+                    })
+                    .collect();
+                let has_extras = multi_select
+                    || rich_opts.iter().any(|o| o.preview.is_some())
+                    || rich_opts.iter().any(|o| !o.description.is_empty());
+                self.pending_question_rich = if has_extras {
+                    Some(PendingQuestionRich {
+                        title: title.clone(),
+                        question: summary,
+                        options: rich_opts,
+                        multi_select,
+                    })
+                } else {
+                    None
+                };
                 self.pending_options = Some((title.clone(), options));
                 self.selected_option_index = 0;
                 self.is_streaming = false;
@@ -4399,13 +4521,34 @@ impl TuiApp {
         };
         if !options.is_empty() {
             if render_select_popup {
-                select_popup::render_select_popup(
-                    f,
-                    area,
-                    title,
-                    options,
-                    self.selected_option_index,
-                );
+                if let Some(rich) = self.pending_question_rich.as_ref() {
+                    let rich_opts: Vec<select_popup::RichOption> = rich
+                        .options
+                        .iter()
+                        .map(|o| select_popup::RichOption {
+                            label: o.label.as_str(),
+                            description: o.description.as_str(),
+                            preview: o.preview.as_deref(),
+                        })
+                        .collect();
+                    let state = select_popup::RichSelectState {
+                        title: rich.title.as_str(),
+                        question: rich.question.as_str(),
+                        options: &rich_opts,
+                        selected_index: self.selected_option_index,
+                        multi_select: rich.multi_select,
+                        checked: &[],
+                    };
+                    select_popup::render_select_popup_rich(f, area, &state);
+                } else {
+                    select_popup::render_select_popup(
+                        f,
+                        area,
+                        title,
+                        options,
+                        self.selected_option_index,
+                    );
+                }
             } else {
                 plan_tracker::render_options_panel(
                     f,
@@ -6230,17 +6373,33 @@ fn settings_on_required(value: bool) -> &'static str {
     }
 }
 
-fn is_ctrl_char(key: KeyEvent, expected: char) -> bool {
-    matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&expected))
-        && key.modifiers.contains(KeyModifiers::CONTROL)
+fn format_keybinding_label(value: &str) -> String {
+    value
+        .split_whitespace()
+        .map(|stroke| {
+            stroke
+                .split('+')
+                .map(|part| match part {
+                    "ctrl" => "Ctrl".to_string(),
+                    "alt" => "Alt".to_string(),
+                    "shift" => "Shift".to_string(),
+                    other => other.to_ascii_uppercase(),
+                })
+                .collect::<Vec<_>>()
+                .join("+")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
+#[cfg(test)]
 fn is_exit_key(key: KeyEvent) -> bool {
-    is_ctrl_char(key, 'd')
+    keybindings::Keymap::default().action_for(key) == Some(keybindings::KeyAction::Exit)
 }
 
+#[cfg(test)]
 fn is_interrupt_key(key: KeyEvent) -> bool {
-    is_ctrl_char(key, 'c')
+    keybindings::Keymap::default().action_for(key) == Some(keybindings::KeyAction::Interrupt)
 }
 
 /// Try to match user input against a list of options.
@@ -6289,6 +6448,42 @@ fn try_match_option(input: &str, options: &[String]) -> Option<(usize, String)> 
 
 fn format_pending_option_reply(index: usize, option: &str) -> String {
     format!("Selected option {index}: {option}")
+}
+
+/// Parse a multi-select reply like "1,3" or "alpha, beta" against the
+/// available option labels. Returns the matched labels in input order, or
+/// `None` if any token failed to match — caller falls back to single-match.
+fn try_match_multi_options(input: &str, options: &[String]) -> Option<Vec<(usize, String)>> {
+    let trimmed = input.trim();
+    if !trimmed.contains(',') {
+        return None;
+    }
+    let mut picks = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for token in trimmed.split(',') {
+        let tok = token.trim();
+        if tok.is_empty() {
+            continue;
+        }
+        let matched = try_match_option(tok, options)?;
+        if seen.insert(matched.0) {
+            picks.push(matched);
+        }
+    }
+    if picks.is_empty() {
+        None
+    } else {
+        Some(picks)
+    }
+}
+
+fn format_pending_multi_reply(picks: &[(usize, String)]) -> String {
+    let joined = picks
+        .iter()
+        .map(|(_, label)| label.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Selected options: {joined}")
 }
 
 fn apply_session_model_selection(
@@ -6528,21 +6723,22 @@ pub async fn run_tui(
                     if !is_actionable_key_event(key) {
                         continue;
                     }
-                    if is_exit_key(key) {
+                    if app.key_is_exit(key) {
                         if app.handle_exit_key() {
                             break Ok(());
                         }
                         continue;
                     }
-                    if is_interrupt_key(key) {
+                    if app.key_is_interrupt(key) {
                         app.clear_exit_confirmation();
                         if running_turn.is_some() || local_task.is_some() || app.is_streaming {
                             let _ = action_tx.send(TuiAction::Interrupt);
                         } else {
+                            let exit_label = app.exit_key_label();
                             app.status_message = if app.is_chinese_ui() {
-                                "按 Ctrl+D 退出".into()
+                                format!("按 {exit_label} 退出")
                             } else {
-                                "Press Ctrl+D to exit".into()
+                                format!("Press {exit_label} to exit")
                             };
                         }
                         continue;
@@ -9168,6 +9364,98 @@ mod tests {
     }
 
     #[test]
+    fn active_screen_tracks_welcome_focus_and_modal_precedence() {
+        let mut app = test_app();
+
+        assert_eq!(app.active_screen(), screens::ActiveScreen::Welcome);
+
+        app.stream_buffer = "previous answer".to_string();
+        assert_eq!(app.active_screen(), screens::ActiveScreen::Workbench);
+
+        app.diff_focused = true;
+        assert_eq!(app.active_screen(), screens::ActiveScreen::DiffFocus);
+
+        app.diff_focused = false;
+        app.file_tree_focused = true;
+        assert_eq!(app.active_screen(), screens::ActiveScreen::FileTree);
+
+        app.settings_open = true;
+        assert_eq!(app.active_screen(), screens::ActiveScreen::Settings);
+    }
+
+    #[test]
+    fn project_keybindings_open_settings_at_runtime() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config_dir = root.path().join(".octocode");
+        std::fs::create_dir_all(&config_dir).expect("create .octocode");
+        std::fs::write(
+            config_dir.join("keybindings.toml"),
+            r#"[keybindings]
+open_settings = "ctrl+o"
+exit = "ctrl+q"
+"#,
+        )
+        .expect("write keybindings");
+
+        let mut app = test_app_with_root(root.path().to_path_buf());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let open_settings = modified_key(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        );
+
+        assert_eq!(
+            app.key_action(open_settings),
+            Some(keybindings::KeyAction::OpenSettings)
+        );
+
+        app.handle_key(open_settings, &tx);
+
+        assert!(app.settings_open);
+        assert_eq!(app.active_screen(), screens::ActiveScreen::Settings);
+    }
+
+    #[test]
+    fn custom_exit_key_keeps_double_press_confirmation() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config_dir = root.path().join(".octocode");
+        std::fs::create_dir_all(&config_dir).expect("create .octocode");
+        std::fs::write(
+            config_dir.join("keybindings.toml"),
+            r#"[keybindings]
+exit = "ctrl+q"
+"#,
+        )
+        .expect("write keybindings");
+        let mut app = test_app_with_root(root.path().to_path_buf());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let ctrl_q = modified_key(
+            KeyCode::Char('q'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        );
+        let ctrl_d = modified_key(
+            KeyCode::Char('d'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        );
+
+        assert!(app.key_is_exit(ctrl_q));
+        assert!(!app.key_is_exit(ctrl_d));
+
+        app.handle_key(ctrl_q, &tx);
+
+        assert!(app.running);
+        assert_eq!(app.status_message, "再次按 Ctrl+Q 退出");
+
+        app.handle_key(ctrl_q, &tx);
+
+        assert!(!app.running);
+        assert_eq!(app.status_message, "正在退出");
+    }
+
+    #[test]
     fn ctrl_d_routed_to_handle_key_requires_second_press() {
         let mut app = test_app();
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -9502,6 +9790,37 @@ mod tests {
     }
 
     #[test]
+    fn multi_option_reply_parses_comma_separated_numbers() {
+        let opts = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
+        let picks = try_match_multi_options("1, 3", &opts).expect("matched");
+        assert_eq!(picks.len(), 2);
+        assert_eq!(picks[0].1, "alpha");
+        assert_eq!(picks[1].1, "gamma");
+        let reply = format_pending_multi_reply(&picks);
+        assert!(reply.contains("alpha"));
+        assert!(reply.contains("gamma"));
+    }
+
+    #[test]
+    fn multi_option_reply_dedupes_repeats() {
+        let opts = vec!["alpha".to_string(), "beta".to_string()];
+        let picks = try_match_multi_options("1, alpha, A", &opts).expect("matched");
+        assert_eq!(picks.len(), 1);
+    }
+
+    #[test]
+    fn multi_option_reply_returns_none_without_comma() {
+        let opts = vec!["alpha".to_string(), "beta".to_string()];
+        assert!(try_match_multi_options("1", &opts).is_none());
+    }
+
+    #[test]
+    fn multi_option_reply_returns_none_on_bad_token() {
+        let opts = vec!["alpha".to_string(), "beta".to_string()];
+        assert!(try_match_multi_options("1, zzz", &opts).is_none());
+    }
+
+    #[test]
     fn preview_snapshot_text_skips_wide_char_continuation_cells() {
         let symbols = ["4", " ", "项", " ", "任", " ", "务", " "];
 
@@ -9618,6 +9937,9 @@ mod tests {
             title: "Library · Which one?".into(),
             options: vec!["serde - standard".into(), "miniserde - small".into()],
             summary: "2 options for Library".into(),
+            descriptions: Vec::new(),
+            previews: Vec::new(),
+            multi_select: false,
         });
 
         assert_eq!(

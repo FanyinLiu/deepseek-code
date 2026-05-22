@@ -104,6 +104,9 @@ impl<'a> EventSink<'a> {
                 title,
                 options,
                 summary,
+                descriptions,
+                previews,
+                multi_select,
             } => {
                 self.record(SessionEventKind::UserQuestionRequested {
                     tool_call_id: String::new(),
@@ -111,6 +114,9 @@ impl<'a> EventSink<'a> {
                     title: title.clone(),
                     options: options.clone(),
                     summary: summary.clone(),
+                    descriptions: descriptions.clone(),
+                    previews: previews.clone(),
+                    multi_select: *multi_select,
                 });
             }
             AgentEvent::ContextCompacted {
