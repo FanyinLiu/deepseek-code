@@ -19,6 +19,7 @@ pub mod notebook_edit;
 pub mod notebook_render;
 pub mod pdf_render;
 pub mod read_file;
+pub mod registry;
 pub mod run_command;
 pub mod task_todo;
 pub mod todo_state;

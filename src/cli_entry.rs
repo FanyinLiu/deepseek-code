@@ -226,6 +226,12 @@ enum Commands {
         command: McpCommands,
     },
 
+    /// Inspect and resolve pending tool approval bridge requests
+    Approval {
+        #[command(subcommand)]
+        command: ApprovalCommands,
+    },
+
     /// List built-in and custom slash commands
     #[command(name = "commands")]
     Catalog {
@@ -317,6 +323,12 @@ enum PreviewApiState {
 enum PreviewScenario {
     Welcome,
     Workbench,
+    Slash,
+    Approval,
+    Settings,
+    Diff,
+    History,
+    FileMention,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -393,6 +405,32 @@ impl From<McpTransportArg> for crate::mcp::client::McpTransport {
             McpTransportArg::Sse => Self::Sse,
         }
     }
+}
+
+#[derive(Subcommand)]
+enum ApprovalCommands {
+    /// List pending approval bridge requests
+    List {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one pending approval request as JSON
+    Show { id: String },
+    /// Approve a pending request
+    Approve {
+        id: String,
+        /// Optional decision reason
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Deny a pending request
+    Deny {
+        id: String,
+        /// Optional decision reason
+        #[arg(long)]
+        reason: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1340,6 +1378,12 @@ pub async fn run() -> Result<(), anyhow::Error> {
             let scenario = match scenario {
                 PreviewScenario::Welcome => tui::app::PreviewSnapshotScenario::Welcome,
                 PreviewScenario::Workbench => tui::app::PreviewSnapshotScenario::Workbench,
+                PreviewScenario::Slash => tui::app::PreviewSnapshotScenario::Slash,
+                PreviewScenario::Approval => tui::app::PreviewSnapshotScenario::Approval,
+                PreviewScenario::Settings => tui::app::PreviewSnapshotScenario::Settings,
+                PreviewScenario::Diff => tui::app::PreviewSnapshotScenario::Diff,
+                PreviewScenario::History => tui::app::PreviewSnapshotScenario::History,
+                PreviewScenario::FileMention => tui::app::PreviewSnapshotScenario::FileMention,
             };
             let theme = match theme {
                 PreviewTheme::Auto => tui::theme::ThemeMode::Auto,
@@ -1690,6 +1734,19 @@ pub async fn run() -> Result<(), anyhow::Error> {
                 McpCommands::Serve { .. } => unreachable!("serve handled above"),
             };
             cli::mcp(command, cli.project_root).await
+        }
+        Some(Commands::Approval { command }) => {
+            let command = match command {
+                ApprovalCommands::List { json } => cli::approval::ApprovalCommand::List { json },
+                ApprovalCommands::Show { id } => cli::approval::ApprovalCommand::Show { id },
+                ApprovalCommands::Approve { id, reason } => {
+                    cli::approval::ApprovalCommand::Approve { id, reason }
+                }
+                ApprovalCommands::Deny { id, reason } => {
+                    cli::approval::ApprovalCommand::Deny { id, reason }
+                }
+            };
+            cli::approval(command, cli.project_root).await
         }
         Some(Commands::Catalog { command }) => {
             let command = match command {

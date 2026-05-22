@@ -17,40 +17,15 @@ pub async fn doctor(
     project_root: Option<PathBuf>,
     options: DoctorOptions,
 ) -> Result<(), anyhow::Error> {
-    println!("Octocode Doctor\n");
+    for line in doctor_no_network_lines(project_root.clone())? {
+        println!("{line}");
+    }
     let root = project_root.or_else(storage::find_project_root);
     let config = storage::Config::load(root.as_deref())?;
     let provider = build_provider(&config.provider, String::new());
     let kind = provider.kind();
-    let capabilities = kind.capabilities();
     let test_model = config.model.default.canonical();
     let provider_model = provider.request_model_name(&test_model);
-
-    println!("Provider: {} ({})", kind.as_str(), kind.display_name());
-    println!(
-        "Base URL: {}",
-        provider.base_url().unwrap_or("native provider default")
-    );
-    println!("Model: {provider_model}");
-    println!("API key env: {}", storage::api_key_env_hint(kind));
-    println!("Profile verified: {}", capabilities.last_verified);
-    println!(
-        "Capabilities: tools={} thinking={} cache={} context={}",
-        yes_no(capabilities.supports_tool_calls),
-        yes_no(capabilities.thinking.supports_thinking),
-        yes_no(capabilities.supports_prompt_cache),
-        capabilities
-            .context_window_tokens
-            .map(|tokens| tokens.to_string())
-            .unwrap_or_else(|| "local-budget".to_string())
-    );
-    if capabilities.requires_endpoint_override || capabilities.requires_model_override {
-        println!(
-            "⚠️  Provider requires explicit override: endpoint={} model={}",
-            yes_no(capabilities.requires_endpoint_override),
-            yes_no(capabilities.requires_model_override)
-        );
-    }
     if options.no_network {
         println!("ℹ️  Network checks skipped by --no-network.");
         println!("\nDoctor check complete.");
@@ -108,6 +83,48 @@ pub async fn doctor(
 
     println!("\nDoctor check complete.");
     Ok(())
+}
+
+pub fn doctor_no_network_lines(
+    project_root: Option<PathBuf>,
+) -> Result<Vec<String>, anyhow::Error> {
+    let root = project_root.or_else(storage::find_project_root);
+    let config = storage::Config::load(root.as_deref())?;
+    let provider = build_provider(&config.provider, String::new());
+    let kind = provider.kind();
+    let capabilities = kind.capabilities();
+    let test_model = config.model.default.canonical();
+    let provider_model = provider.request_model_name(&test_model);
+    let mut lines = vec![
+        "Octocode Doctor".to_string(),
+        String::new(),
+        format!("Provider: {} ({})", kind.as_str(), kind.display_name()),
+        format!(
+            "Base URL: {}",
+            provider.base_url().unwrap_or("native provider default")
+        ),
+        format!("Model: {provider_model}"),
+        format!("API key env: {}", storage::api_key_env_hint(kind)),
+        format!("Profile verified: {}", capabilities.last_verified),
+        format!(
+            "Capabilities: tools={} thinking={} cache={} context={}",
+            yes_no(capabilities.supports_tool_calls),
+            yes_no(capabilities.thinking.supports_thinking),
+            yes_no(capabilities.supports_prompt_cache),
+            capabilities
+                .context_window_tokens
+                .map(|tokens| tokens.to_string())
+                .unwrap_or_else(|| "local-budget".to_string())
+        ),
+    ];
+    if capabilities.requires_endpoint_override || capabilities.requires_model_override {
+        lines.push(format!(
+            "⚠️  Provider requires explicit override: endpoint={} model={}",
+            yes_no(capabilities.requires_endpoint_override),
+            yes_no(capabilities.requires_model_override)
+        ));
+    }
+    Ok(lines)
 }
 
 async fn run_chat_basic(client: &crate::deepseek::client::DeepSeekClient, model: &str) {

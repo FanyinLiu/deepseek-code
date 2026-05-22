@@ -28,8 +28,8 @@ cargo fmt --all --check
 cargo check --all-targets --all-features
 cargo test --all-features
 cargo clippy --all-targets --all-features -- -D warnings
-cargo run --bin octocode -- --help
-cargo run --bin octocode -- --help
+cargo run --bin octo -- --help
+cargo run --bin octo -- preview-tui --api ready --scenario workbench --width 80 --height 24
 ```
 
 Add or keep focused tests for:
@@ -38,8 +38,8 @@ Add or keep focused tests for:
   and command-forwarding behavior.
 - TUI input: empty prompt, command/shell/memory hints, pending options, cursor
   on Unicode boundaries, and multiline input.
-- TUI render smoke: welcome, status bar, approval popup, plan tracker,
-  subagent list, transcript, and narrow 80x24 layouts.
+- TUI render smoke: welcome, workbench, slash command panel, approval popup,
+  settings, diff focus, history search, file mentions, and narrow 80x24 layouts.
 - Plan mode: read-only planning contract, risk-based options, preview path,
   execute path, cancelled path, and failed step cleanup.
 - Subagents: custom agent parsing, allowed tool enforcement, read-only blocks,
@@ -53,7 +53,7 @@ Add or keep focused tests for:
 
 Use the real TUI, not a browser mock:
 
-1. Open `octocode tui` in 80x24 and a wide terminal.
+1. Open `octo` in 80x24 and a wide terminal.
 2. Check the welcome mascot, project context, starter prompts, and input hints.
 3. Type `/`, `/help`, `/status`, `/permissions`, `/agents`, `/compact`.
 4. Type multiline input with Shift+Enter and verify the cursor stays readable.

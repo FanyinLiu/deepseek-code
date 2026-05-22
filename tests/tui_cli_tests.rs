@@ -9,7 +9,7 @@ fn command_with_dumb_stdio(bin: &str) -> Command {
 
 #[test]
 fn preview_tui_works_with_dumb_non_tty_stdio() {
-    let output = command_with_dumb_stdio(env!("CARGO_BIN_EXE_octocode"))
+    let output = command_with_dumb_stdio(env!("CARGO_BIN_EXE_octo"))
         .args([
             "preview-tui",
             "--width",
@@ -34,6 +34,73 @@ fn preview_tui_works_with_dumb_non_tty_stdio() {
     assert!(stdout.contains("Context") || stdout.contains("上下文"));
     assert!(stdout.contains("ready"));
     assert!(stdout.contains("confirm"));
+}
+
+#[test]
+fn preview_tui_exposes_core_product_surfaces_from_octo() {
+    let scenarios: &[(&str, &[&[&str]])] = &[
+        (
+            "slash",
+            &[&["Commands", "命令"], &["/agents"], &["/commands"]],
+        ),
+        (
+            "approval",
+            &[
+                &["approve tool call", "审批工具调用"],
+                &["run_command"],
+                &["cargo test --all-features"],
+            ],
+        ),
+        (
+            "settings",
+            &[
+                &["Settings", "设置"],
+                &["Safety", "安全"],
+                &["Command approval", "命令审批"],
+            ],
+        ),
+        (
+            "diff",
+            &[&["Diff focus", "Diff 焦点"], &["src/tui/app.rs"], &["@@"]],
+        ),
+        (
+            "history",
+            &[&["History search"], &["cargo test --all-features"]],
+        ),
+        ("file-mention", &[&["Files", "文件"], &["src/tui/app.rs"]]),
+    ];
+
+    for (scenario, marker_groups) in scenarios {
+        let output = command_with_dumb_stdio(env!("CARGO_BIN_EXE_octo"))
+            .args([
+                "preview-tui",
+                "--width",
+                "100",
+                "--height",
+                "28",
+                "--api",
+                "ready",
+                "--scenario",
+                scenario,
+                "--theme",
+                "high-contrast",
+            ])
+            .output()
+            .expect("run preview-tui scenario");
+
+        assert!(
+            output.status.success(),
+            "scenario={scenario} stderr={}",
+            stderr(&output)
+        );
+        let stdout = stdout(&output);
+        for markers in *marker_groups {
+            assert!(
+                markers.iter().any(|marker| stdout.contains(marker)),
+                "scenario={scenario} missing one of {markers:?}\n{stdout}"
+            );
+        }
+    }
 }
 
 #[test]

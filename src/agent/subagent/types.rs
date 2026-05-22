@@ -126,13 +126,13 @@ pub enum PermissionMode {
     #[default]
     Default,
     /// Auto-approve safe reads and file edits; commands still require approval.
-    #[serde(rename = "accept_edits")]
+    #[serde(rename = "accept_edits", alias = "accept-edits")]
     AcceptEdits,
     /// Read-only — only safe read tools are allowed.
-    #[serde(rename = "read_only")]
+    #[serde(rename = "read_only", alias = "read-only", alias = "plan")]
     ReadOnly,
     /// Auto-approve everything (use with caution).
-    #[serde(rename = "bypass")]
+    #[serde(rename = "bypass", alias = "yolo")]
     Bypass,
 }
 

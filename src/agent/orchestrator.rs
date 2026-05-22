@@ -16,6 +16,10 @@ use crate::hooks::{HookEvent, HookPayload, HookRunSummary};
 use crate::plan;
 use crate::plan::schema::{Plan, RiskLevel};
 use crate::policy;
+use crate::runtime::tool_runtime::{
+    ApprovalFuture, ApprovalOutcome, ApprovalResolver, McpRegistryRuntimeBackend, ToolRuntime,
+    ToolRuntimeContext,
+};
 use crate::search::{self, SearchMatch};
 use crate::storage::{EventLogStore, SessionEvent, SessionEventKind};
 
@@ -2485,227 +2489,61 @@ impl Orchestrator {
             let event_log_store = self.event_log_store.clone();
             let project_root = self.project_root.clone();
             let session_id = self.session.id;
+            let runtime = ToolRuntime::new(project_root.clone(), policy_config.clone());
+            let dispatch_config =
+                crate::tools::dispatch::ToolDispatchConfig::from_policy(&policy_config);
             if let Some(ref mut registry) = self.mcp_registry {
                 for tc in mcp_calls {
-                    // Policy check
-                    let decision = if let Some(metadata) =
-                        registry.tool_approval_metadata(&tc.function.name)
-                    {
-                        policy::evaluate_mcp_tool(&metadata, &tc.function.arguments, &policy_config)
-                    } else {
-                        policy::PolicyDecision::deny(
-                            format!("unknown MCP tool: {}", tc.function.name),
-                            format!("Blocked MCP: {}", tc.function.name),
-                            "MCP tool is not registered",
-                            policy::RiskLevel::Blocked,
-                            format!("Source: mcp:{}", tc.function.name),
+                    let metadata = registry.tool_approval_metadata(&tc.function.name);
+                    let mut context =
+                        ToolRuntimeContext::new(session_id.to_string(), dispatch_config.clone());
+                    context.session_id = Some(session_id);
+                    context.turn_id = Some(turn_id);
+                    context.hooks_config = Some(&hooks_config);
+                    context.mcp_metadata = metadata.as_ref();
+                    let mut resolver = OrchestratorApprovalResolver {
+                        event_tx,
+                        yolo_mode: self.yolo_mode,
+                    };
+                    let mut backend = McpRegistryRuntimeBackend { registry };
+                    let outcome = runtime
+                        .execute(
+                            &tc,
+                            policy::ToolCallSource::Mcp,
+                            context,
+                            &mut resolver,
+                            &mut backend,
                         )
-                    };
-                    let approved = match decision.action {
-                        policy::PolicyAction::Allow => true,
-                        policy::PolicyAction::Deny => {
-                            send_event(
-                                event_tx,
-                                AgentEvent::ToolExecuted {
-                                    tool_name: tc.function.name.clone(),
-                                    success: false,
-                                    summary: format!("Blocked: {}", decision.reason),
-                                },
-                            );
-                            let record = ToolResultRecord {
-                                tool_call_id: tc.id.clone(),
-                                name: tc.function.name.clone(),
-                                result: format!("Blocked: {}", decision.reason),
-                                is_error: true,
-                            };
-                            results.push((tc.clone(), record));
-                            continue;
-                        }
-                        policy::PolicyAction::AskOnce | policy::PolicyAction::AskSession => {
-                            if self.yolo_mode {
-                                true
-                            } else {
-                                let (tx, rx) = tokio::sync::oneshot::channel();
-                                send_event(
-                                    event_tx,
-                                    AgentEvent::ToolApprovalNeeded {
-                                        tool_name: tc.function.name.clone(),
-                                        display: decision.display.clone(),
-                                        respond: tx,
-                                    },
-                                );
-                                if let Ok(Ok(true)) =
-                                    tokio::time::timeout(std::time::Duration::from_mins(1), rx)
-                                        .await
-                                {
-                                    true
-                                } else {
-                                    send_event(
-                                        event_tx,
-                                        AgentEvent::ToolExecuted {
-                                            tool_name: tc.function.name.clone(),
-                                            success: false,
-                                            summary: "Denied by user or timeout".into(),
-                                        },
-                                    );
-                                    let record = ToolResultRecord {
-                                        tool_call_id: tc.id.clone(),
-                                        name: tc.function.name.clone(),
-                                        result: "Denied by user or timeout".into(),
-                                        is_error: true,
-                                    };
-                                    results.push((tc.clone(), record));
-                                    continue;
-                                }
-                            }
-                        }
-                    };
-                    let mut hook_payload = HookPayload::new(
-                        HookEvent::PreToolUse,
-                        session_id.to_string(),
-                        project_root.clone(),
-                    );
-                    hook_payload.turn_id = Some(turn_id.to_string());
-                    hook_payload.tool_call_id = Some(tc.id.clone());
-                    hook_payload.tool_name = Some(tc.function.name.clone());
-                    hook_payload.arguments = Some(tc.function.arguments.clone());
-                    if let Some(pre_hooks) = crate::hooks::run_configured_hooks(
-                        HookEvent::PreToolUse,
-                        &hooks_config,
-                        &hook_payload,
-                        &project_root,
-                        policy_config.command_timeout_seconds,
-                    )
-                    .await
-                    {
+                        .await;
+                    for hook_summary in &outcome.hook_summaries {
                         emit_hook_summary_event(
                             event_tx,
                             &event_log_store,
                             &project_root,
                             session_id,
                             Some(turn_id),
-                            &pre_hooks,
+                            hook_summary,
                         );
-                        if !pre_hooks.success() {
-                            let summary =
-                                format!("Blocked by pre_tool hook: {}", pre_hooks.brief());
-                            send_event(
-                                event_tx,
-                                AgentEvent::ToolExecuted {
-                                    tool_name: tc.function.name.clone(),
-                                    success: false,
-                                    summary: summary.clone(),
-                                },
-                            );
-                            let record = ToolResultRecord {
-                                tool_call_id: tc.id.clone(),
-                                name: tc.function.name.clone(),
-                                result: summary,
-                                is_error: true,
-                            };
-                            results.push((tc.clone(), record));
-                            continue;
-                        }
                     }
 
-                    // Execute MCP tool
-                    let args = match crate::mcp::registry::parse_mcp_tool_arguments(
-                        &tc.function.arguments,
-                    ) {
-                        Ok(args) => args,
-                        Err(e) => {
-                            let result_text = e.to_string();
-                            send_event(
-                                event_tx,
-                                AgentEvent::ToolExecuted {
-                                    tool_name: tc.function.name.clone(),
-                                    success: false,
-                                    summary: result_text.clone(),
-                                },
-                            );
-                            let result_record = ToolResultRecord {
-                                tool_call_id: tc.id.clone(),
-                                name: tc.function.name.clone(),
-                                result: result_text,
-                                is_error: true,
-                            };
-                            results.push((tc.clone(), result_record));
-                            continue;
-                        }
-                    };
-                    let start = std::time::Instant::now();
-                    let (result_text, is_error) =
-                        match registry.call_tool(&tc.function.name, args).await {
-                            Ok(text) => (text, false),
-                            Err(e) => (e.to_string(), true),
-                        };
-                    let duration_ms = start.elapsed().as_millis() as u64;
-                    let mut post_payload = HookPayload::new(
-                        HookEvent::PostToolUse,
-                        session_id.to_string(),
-                        project_root.clone(),
-                    );
-                    post_payload.turn_id = Some(turn_id.to_string());
-                    post_payload.tool_call_id = Some(tc.id.clone());
-                    post_payload.tool_name = Some(tc.function.name.clone());
-                    post_payload.arguments = Some(tc.function.arguments.clone());
-                    post_payload.success = Some(!is_error);
-                    post_payload.summary =
-                        Some(crate::agent::utils::truncate_for_summary(&result_text, 200));
-                    post_payload.duration_ms = Some(duration_ms);
-                    if let Some(post_hooks) = crate::hooks::run_configured_hooks(
-                        HookEvent::PostToolUse,
-                        &hooks_config,
-                        &post_payload,
-                        &project_root,
-                        policy_config.command_timeout_seconds,
-                    )
-                    .await
-                    {
-                        emit_hook_summary_event(
-                            event_tx,
-                            &event_log_store,
-                            &project_root,
-                            session_id,
-                            Some(turn_id),
-                            &post_hooks,
-                        );
-                        if !post_hooks.success() {
-                            send_event(
-                                event_tx,
-                                AgentEvent::ToolExecuted {
-                                    tool_name: "hook.post_tool".to_string(),
-                                    success: false,
-                                    summary: post_hooks.brief(),
-                                },
-                            );
-                        }
-                    }
-
-                    // Record in session history
                     let record = crate::deepseek::ToolCallRecord {
                         id: tc.id.clone(),
                         name: tc.function.name.clone(),
                         arguments: tc.function.arguments.clone(),
-                        result_summary: crate::agent::utils::truncate_for_summary(
-                            &result_text,
-                            200,
-                        ),
-                        exit_code: if is_error { Some(1) } else { Some(0) },
-                        duration_ms,
-                        risk_level: decision.display.risk_level.to_string(),
-                        approved,
+                        result_summary: outcome.backend_result.summary.clone(),
+                        exit_code: if outcome.result_record.is_error {
+                            Some(1)
+                        } else {
+                            Some(0)
+                        },
+                        duration_ms: outcome.backend_result.duration_ms,
+                        risk_level: outcome.decision.display.risk_level.to_string(),
+                        approved: outcome.approval.approved(),
                         at: Utc::now(),
                     };
                     self.session.tool_call_history.push(record);
 
-                    let result_record = ToolResultRecord {
-                        tool_call_id: tc.id.clone(),
-                        name: tc.function.name.clone(),
-                        result: result_text,
-                        is_error,
-                    };
-                    results.push((tc.clone(), result_record));
+                    results.push((tc.clone(), outcome.result_record));
                 }
             } else {
                 for tc in mcp_calls {
@@ -3061,6 +2899,40 @@ fn generate_clarification_questions(
 fn send_event(tx: &mpsc::UnboundedSender<AgentEvent>, event: AgentEvent) {
     if tx.send(event).is_err() {
         tracing::warn!("Agent event channel closed; event dropped");
+    }
+}
+
+struct OrchestratorApprovalResolver<'a> {
+    event_tx: &'a mpsc::UnboundedSender<AgentEvent>,
+    yolo_mode: bool,
+}
+
+impl ApprovalResolver for OrchestratorApprovalResolver<'_> {
+    fn resolve<'a>(
+        &'a mut self,
+        call: &'a crate::runtime::tool_runtime::ToolCall,
+        decision: &'a policy::PolicyDecision,
+    ) -> ApprovalFuture<'a> {
+        Box::pin(async move {
+            if self.yolo_mode || matches!(decision.action, policy::PolicyAction::Allow) {
+                return ApprovalOutcome::Approved;
+            }
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            send_event(
+                self.event_tx,
+                AgentEvent::ToolApprovalNeeded {
+                    tool_name: call.tool.clone(),
+                    display: decision.display.clone(),
+                    respond: tx,
+                },
+            );
+            match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
+                Ok(Ok(true)) => ApprovalOutcome::Approved,
+                Ok(Ok(false)) => ApprovalOutcome::denied("Denied by user"),
+                Ok(Err(_)) => ApprovalOutcome::denied("Approval channel closed"),
+                Err(_) => ApprovalOutcome::denied("Denied by user or timeout"),
+            }
+        })
     }
 }
 

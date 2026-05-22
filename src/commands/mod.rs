@@ -1,4 +1,5 @@
 //! Slash command system for the TUI.
+use serde::Serialize;
 use std::collections::HashMap;
 use std::io::Write;
 use unicode_width::UnicodeWidthStr;
@@ -50,7 +51,9 @@ pub fn localized_command_description(
         "/readiness-report" => "评估仓库的智能体工作流就绪度",
         "/run" => "让智能体执行任务",
         "/ask" => "提只读问题",
+        "/btw" => "独立只读侧问，不写入主会话",
         "/plan" => "先规划再执行",
+        "/recap" => "生成本地会话摘要",
         "/todo" => "查看和维护本次工作待办",
         "/task" => "管理本地可恢复任务",
         "/glob" => "按模式查找文件",
@@ -273,8 +276,18 @@ impl CommandRegistry {
                     && seen.insert(cmd.name)
             })
             .collect();
-        list.sort_by_key(|cmd| cmd.name);
+        list.sort_by_key(|cmd| (slash_priority(cmd.name), cmd.name));
         list
+    }
+}
+
+fn slash_priority(name: &str) -> u8 {
+    match name {
+        "/agents" | "/commands" | "/help" | "/doctor" | "/model" | "/status" | "/permissions"
+        | "/settings" | "/run" | "/ask" | "/btw" | "/plan" | "/recap" | "/grep" | "/glob"
+        | "/test" => 0,
+        "/clear" | "/context" | "/mcp" | "/tasks" => 1,
+        _ => 2,
     }
 }
 
@@ -337,9 +350,9 @@ fn parse_prompt_command(content: &str) -> (String, String) {
 fn cmd_yolo(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     *ctx.yolo_mode = !*ctx.yolo_mode;
     let msg = if *ctx.yolo_mode {
-        "YOLO mode ON — all approvals auto-granted"
+        "Session approval bypass ON (mode: yolo) — tool approvals are auto-granted for this TUI session"
     } else {
-        "YOLO mode OFF — manual approvals required"
+        "Session approval bypass OFF (mode: ask) — approvals follow project policy"
     };
     Ok(Some(msg.to_string()))
 }
@@ -576,6 +589,21 @@ fn cmd_ask(args: &str, ctx: &mut CommandContext) -> CommandResult {
     Ok(None)
 }
 
+fn cmd_btw(args: &str, ctx: &mut CommandContext) -> CommandResult {
+    let question = args.trim();
+    if question.is_empty() {
+        return Err("Usage: /btw <question>".to_string());
+    }
+    let chinese = crate::tui::welcome::is_chinese_display_language(&ctx.app.config.ui.language);
+    ctx.app
+        .push_activity(format!("btw: {}", truncate_display_width(question, 96)));
+    Ok(Some(render_btw_side_question(
+        question,
+        ctx.app.messages.len(),
+        chinese,
+    )))
+}
+
 fn cmd_plan(args: &str, ctx: &mut CommandContext) -> CommandResult {
     let target = if args.trim().is_empty() {
         "the requested task"
@@ -584,6 +612,135 @@ fn cmd_plan(args: &str, ctx: &mut CommandContext) -> CommandResult {
     };
     ctx.app.status_message = format!("Planning: {target}");
     Ok(None)
+}
+
+fn cmd_recap(_args: &str, ctx: &mut CommandContext) -> CommandResult {
+    let chinese = crate::tui::welcome::is_chinese_display_language(&ctx.app.config.ui.language);
+    let output = render_local_recap(ctx, chinese);
+    ctx.app.push_activity("recap requested");
+    Ok(Some(output))
+}
+
+fn render_btw_side_question(question: &str, message_count: usize, chinese: bool) -> String {
+    if chinese {
+        return [
+            localized_manager_header("btw", "local", "zh-CN"),
+            format!("问题     {}", truncate_display_width(question, 96)),
+            "模式     只读侧问；工具禁用；不写入主会话历史".to_string(),
+            format!("上下文   当前主会话有 {message_count} 条消息；TUI 会用 Flash 旁路回答"),
+            "失败处理 API 不可用时只显示本地说明，不阻塞正在运行的 turn".to_string(),
+        ]
+        .join("\n");
+    }
+    [
+        manager_header("btw", "local"),
+        format!("question  {}", truncate_display_width(question, 96)),
+        "mode      side question; read-only; tools disabled; not written to session history"
+            .to_string(),
+        format!("context   {message_count} messages in the main session; TUI answers via Flash"),
+        "fallback  if the API is unavailable, the main turn keeps running".to_string(),
+    ]
+    .join("\n")
+}
+
+fn render_local_recap(ctx: &CommandContext, chinese: bool) -> String {
+    let recent = visible_message_rows(&ctx.app.messages, 6);
+    let compact_summary = ctx
+        .app
+        .latest_compact_summary
+        .as_deref()
+        .map(|summary| truncate_display_width(summary, 96))
+        .unwrap_or_else(|| if chinese { "无".into() } else { "none".into() });
+    let tools = if ctx.app.recent_tool_summaries.is_empty() {
+        if chinese {
+            "无".into()
+        } else {
+            "none".into()
+        }
+    } else {
+        ctx.app
+            .recent_tool_summaries
+            .iter()
+            .map(|line| truncate_display_width(line, 96))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    let mut lines = vec![
+        if chinese {
+            localized_manager_header("recap", "ready", "zh-CN")
+        } else {
+            manager_header("recap", "ready")
+        },
+        if chinese {
+            "模式     本地确定性摘要；TUI 可用时会优先用 Flash 刷新".to_string()
+        } else {
+            "mode      local deterministic recap; TUI refreshes with Flash when available"
+                .to_string()
+        },
+        format!(
+            "{}  {}",
+            if chinese { "消息数  " } else { "messages " },
+            ctx.app.messages.len()
+        ),
+        format!(
+            "{}  {}",
+            if chinese {
+                "最近摘要"
+            } else {
+                "last summary"
+            },
+            compact_summary
+        ),
+        format!(
+            "{}  {}",
+            if chinese { "工具摘要" } else { "tools    " },
+            tools
+        ),
+        ctx.app.todo_summary.context_line(chinese),
+    ];
+    lines.push(if chinese {
+        "最近对话".to_string()
+    } else {
+        "recent conversation".to_string()
+    });
+    if recent.is_empty() {
+        lines.push(if chinese {
+            "- 无可见会话内容".to_string()
+        } else {
+            "- no visible conversation yet".to_string()
+        });
+    } else {
+        for (role, text) in recent {
+            lines.push(format!("- {role}: {text}"));
+        }
+    }
+    lines.join("\n")
+}
+
+fn visible_message_rows(
+    messages: &[crate::deepseek::ProtocolMessage],
+    limit: usize,
+) -> Vec<(String, String)> {
+    let mut rows = messages
+        .iter()
+        .rev()
+        .filter(|message| {
+            message.visibility == crate::deepseek::MessageVisibility::UserVisible
+                && matches!(
+                    message.role,
+                    crate::deepseek::Role::User | crate::deepseek::Role::Assistant
+                )
+        })
+        .filter_map(|message| {
+            let text = message.content.to_string_lossy();
+            let text = text.trim();
+            (!text.is_empty())
+                .then(|| (message.role.to_string(), truncate_display_width(text, 120)))
+        })
+        .take(limit)
+        .collect::<Vec<_>>();
+    rows.reverse();
+    rows
 }
 
 fn cmd_search(args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -1279,29 +1436,21 @@ fn cmd_usage_all_time(ctx: &mut CommandContext) -> CommandResult {
 
 fn cmd_doctor(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     let config = crate::storage::Config::load(Some(ctx.project_root));
-    let provider = config
-        .as_ref()
-        .map(|config| config.provider.default)
-        .unwrap_or_default();
-    let api_key = crate::storage::get_effective_api_key(Some(ctx.project_root));
     let git_available = command_available("git");
     let cargo_available = command_available("cargo");
     let session_store = dirs::home_dir()
         .map(|home| home.join(".octocode").join("sessions"))
         .filter(|path| path.exists());
-    let api_key_detail = if api_key.is_some() {
-        "configured".to_string()
-    } else {
-        format!(
-            "missing; run `octo login --api-key <key>` or set {}",
-            crate::storage::api_key_env_hint(provider)
-        )
-    };
-
-    let mut lines = vec![
-        "Octocode Doctor".to_string(),
-        String::new(),
-        doctor_line(api_key.is_some(), "API key", &api_key_detail),
+    let mut lines =
+        crate::cli::doctor::doctor_no_network_lines(Some(ctx.project_root.to_path_buf()))
+            .unwrap_or_else(|error| {
+                vec![
+                    "Octocode Doctor".to_string(),
+                    String::new(),
+                    format!("Provider summary unavailable: {error}"),
+                ]
+            });
+    lines.extend([
         doctor_line(
             config.is_ok(),
             "Config",
@@ -1318,7 +1467,7 @@ fn cmd_doctor(_args: &str, ctx: &mut CommandContext) -> CommandResult {
         ),
         doctor_line(git_available, "git", tool_status(git_available)),
         doctor_line(cargo_available, "cargo", tool_status(cargo_available)),
-    ];
+    ]);
 
     if let Ok(config) = config {
         lines.push(format!(
@@ -1437,9 +1586,9 @@ fn cmd_auto(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     let config = crate::storage::Config::load(Some(ctx.project_root)).unwrap_or_default();
     let enabled = config.policy.auto_mode;
     let msg = if enabled {
-        "Auto mode ON — safe operations auto-approved"
+        "Configured policy auto mode ON — legacy safe-operation automation is enabled"
     } else {
-        "Auto mode OFF — all operations require manual approval"
+        "Configured policy auto mode OFF — effective mode normally stays ask"
     };
     Ok(Some(msg.to_string()))
 }
@@ -1694,8 +1843,12 @@ fn cmd_mode(args: &str, ctx: &mut CommandContext) -> CommandResult {
 fn cmd_permissions(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     let config = crate::storage::Config::load(Some(ctx.project_root)).unwrap_or_default();
     let policy = config.policy;
+    let visible_mode = visible_permission_mode(&policy, *ctx.yolo_mode, ctx.app.interaction_mode);
     let lines = [
         manager_header("permissions", "ready"),
+        format!("mode: {visible_mode}"),
+        "modes: ask | accept-edits | plan | yolo".to_string(),
+        "scope: config policy plus current TUI session bypass".to_string(),
         format!("auto mode: {}", on_off(policy.auto_mode)),
         format!(
             "safe reads auto-approved: {}",
@@ -1717,6 +1870,29 @@ fn cmd_permissions(_args: &str, ctx: &mut CommandContext) -> CommandResult {
         format!("command timeout: {}s", policy.command_timeout_seconds),
     ];
     Ok(Some(lines.join("\n")))
+}
+
+fn visible_permission_mode(
+    policy: &crate::storage::config::PolicyConfig,
+    yolo_mode: bool,
+    interaction_mode: crate::tui::app::InteractionMode,
+) -> &'static str {
+    if yolo_mode
+        || matches!(
+            interaction_mode,
+            crate::tui::app::InteractionMode::FullAccess
+        )
+    {
+        return "yolo";
+    }
+    if matches!(interaction_mode, crate::tui::app::InteractionMode::Plan) {
+        return "plan";
+    }
+    if policy.autonomy_level.auto_workspace_writes() && !policy.autonomy_level.auto_local_commands()
+    {
+        return "accept-edits";
+    }
+    "ask"
 }
 
 fn cmd_model(args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -2112,21 +2288,167 @@ fn cmd_agents(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     Ok(Some(lines.join("\n")))
 }
 
-fn cmd_tasks(_args: &str, ctx: &mut CommandContext) -> CommandResult {
-    if ctx.background_tasks.is_empty() {
+#[derive(Debug, Clone, Serialize)]
+struct UnifiedBackgroundTaskView {
+    kind: &'static str,
+    id: String,
+    status: String,
+    started: String,
+    duration: String,
+    summary: String,
+    latest_output: String,
+}
+
+impl UnifiedBackgroundTaskView {
+    fn from_subagent(
+        task: &crate::agent::BackgroundTaskSnapshot,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        let duration_ms = task
+            .duration_ms
+            .unwrap_or_else(|| duration_between_ms(task.started_at, task.completed_at, now));
+        Self {
+            kind: "subagent",
+            id: task.task_id.clone(),
+            status: task.status.to_string(),
+            started: format_started_at(task.started_at),
+            duration: format_duration_ms(duration_ms),
+            summary: truncate_display_width(&task.description, 120),
+            latest_output: task
+                .summary
+                .as_deref()
+                .map(|summary| truncate_display_width(summary, 160))
+                .unwrap_or_default(),
+        }
+    }
+
+    fn from_shell(
+        shell: &crate::tools::background_shells::ShellSnapshot,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        let status = if shell.is_running() {
+            "running"
+        } else if shell.exit_code == Some(0) {
+            "completed"
+        } else {
+            "failed"
+        };
+        let latest_output = latest_shell_output(shell);
+        Self {
+            kind: "shell",
+            id: shell.shell_id.clone(),
+            status: status.to_string(),
+            started: format_started_at(shell.started_at),
+            duration: format_duration_ms(duration_between_ms(
+                shell.started_at,
+                shell.finished_at,
+                now,
+            )),
+            summary: truncate_display_width(&shell.command, 120),
+            latest_output,
+        }
+    }
+}
+
+fn unified_background_task_views(
+    subagents: &[crate::agent::BackgroundTaskSnapshot],
+    shells: &[crate::tools::background_shells::ShellSnapshot],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<UnifiedBackgroundTaskView> {
+    let mut views = subagents
+        .iter()
+        .map(|task| UnifiedBackgroundTaskView::from_subagent(task, now))
+        .collect::<Vec<_>>();
+    views.extend(
+        shells
+            .iter()
+            .map(|shell| UnifiedBackgroundTaskView::from_shell(shell, now)),
+    );
+    views
+}
+
+fn format_started_at(started_at: chrono::DateTime<chrono::Utc>) -> String {
+    started_at.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+}
+
+fn duration_between_ms(
+    started_at: chrono::DateTime<chrono::Utc>,
+    completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> u64 {
+    completed_at
+        .unwrap_or(now)
+        .signed_duration_since(started_at)
+        .num_milliseconds()
+        .max(0) as u64
+}
+
+fn format_duration_ms(ms: u64) -> String {
+    if ms >= 60_000 {
+        format!("{}m {}s", ms / 60_000, (ms % 60_000) / 1_000)
+    } else if ms >= 1_000 {
+        format!("{:.1}s", ms as f64 / 1_000.0)
+    } else {
+        format!("{ms}ms")
+    }
+}
+
+fn latest_shell_output(shell: &crate::tools::background_shells::ShellSnapshot) -> String {
+    let output = if shell.stderr.trim().is_empty() {
+        shell.stdout.as_str()
+    } else {
+        shell.stderr.as_str()
+    };
+    let line = output
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+        .trim();
+    let mut latest = truncate_display_width(line, 160);
+    if !latest.is_empty() && (shell.stdout_truncated || shell.stderr_truncated) {
+        latest = format!("[truncated] {latest}");
+    }
+    latest
+}
+
+fn cmd_tasks(args: &str, ctx: &mut CommandContext) -> CommandResult {
+    let shells = crate::tools::background_shells::registry().list();
+    let views = unified_background_task_views(ctx.background_tasks, &shells, chrono::Utc::now());
+    let json = matches!(args.trim(), "--json" | "json");
+    if json {
+        return serde_json::to_string_pretty(&serde_json::json!({
+            "count": views.len(),
+            "tasks": views,
+        }))
+        .map(Some)
+        .map_err(|error| format!("Failed to render tasks JSON: {error}"));
+    }
+    if views.is_empty() {
         return Ok(Some(format!(
             "{}\nstatus    no background tasks",
             manager_header("tasks", "empty")
         )));
     }
 
+    let status = if views.iter().any(|task| task.status == "running") {
+        "running"
+    } else {
+        "ready"
+    };
     let mut lines = vec![
-        manager_header("tasks", "running"),
-        format!("count     {}", ctx.background_tasks.len()),
+        manager_header("tasks", status),
+        format!("count     {}", views.len()),
     ];
-    for task in ctx.background_tasks {
-        lines.push(task.format_for_display());
+    for task in views {
         lines.push(String::new());
+        lines.push(format!("kind      {}", task.kind));
+        lines.push(format!("id        {}", task.id));
+        lines.push(format!("status    {}", task.status));
+        lines.push(format!("started   {}", task.started));
+        lines.push(format!("duration  {}", task.duration));
+        lines.push(format!("summary   {}", task.summary));
+        lines.push(format!("latest_output {}", task.latest_output));
     }
     Ok(Some(lines.join("\n").trim_end().to_string()))
 }
@@ -2621,11 +2943,25 @@ impl CommandRegistry {
             handler: cmd_ask,
         });
         self.register(&SlashCommand {
+            name: "/btw",
+            aliases: &[],
+            description: "Ask an independent read-only side question",
+            usage: "/btw <question>",
+            handler: cmd_btw,
+        });
+        self.register(&SlashCommand {
             name: "/plan",
             aliases: &[],
             description: "Plan before executing",
             usage: "/plan <task>",
             handler: cmd_plan,
+        });
+        self.register(&SlashCommand {
+            name: "/recap",
+            aliases: &[],
+            description: "Summarize the current session without changing history",
+            usage: "/recap",
+            handler: cmd_recap,
         });
         self.register(&SlashCommand {
             name: "/todo",
@@ -3008,6 +3344,77 @@ mod tests {
     }
 
     #[test]
+    fn btw_command_is_local_and_does_not_pollute_history() {
+        let reg = CommandRegistry::new();
+        let mut app = crate::tui::app::TuiApp::new(
+            crate::deepseek::DeepSeekModel::Flash,
+            crate::deepseek::ThinkingMode::Auto,
+            None,
+            std::path::PathBuf::from("."),
+        );
+        app.messages.push(test_user_message("main question"));
+        let before_messages = app.messages.len();
+        let before_queue = app.queued_inputs.len();
+        let mut yolo = false;
+        let mut ctx = CommandContext {
+            app: &mut app,
+            project_root: std::path::Path::new("."),
+            yolo_mode: &mut yolo,
+            mcp_status: "MCP: not initialized",
+            background_tasks: &[],
+        };
+
+        let output = reg
+            .execute("/btw what is the current goal?", &mut ctx)
+            .expect("command should be handled")
+            .expect("btw should run")
+            .expect("btw should show output");
+
+        assert!(output.contains("read-only") || output.contains("只读"));
+        assert!(
+            output.contains("not written to session history") || output.contains("不写入主会话")
+        );
+        assert_eq!(ctx.app.messages.len(), before_messages);
+        assert_eq!(ctx.app.queued_inputs.len(), before_queue);
+    }
+
+    #[test]
+    fn recap_command_summarizes_without_compacting_messages() {
+        let reg = CommandRegistry::new();
+        let mut app = crate::tui::app::TuiApp::new(
+            crate::deepseek::DeepSeekModel::Flash,
+            crate::deepseek::ThinkingMode::Auto,
+            None,
+            std::path::PathBuf::from("."),
+        );
+        app.config.ui.language = "en-US".to_string();
+        app.messages.push(test_user_message("ship the task view"));
+        app.messages.push(test_assistant_message(
+            "tasks now show shell and subagent rows",
+        ));
+        let before_messages = app.messages.len();
+        let mut yolo = false;
+        let mut ctx = CommandContext {
+            app: &mut app,
+            project_root: std::path::Path::new("."),
+            yolo_mode: &mut yolo,
+            mcp_status: "MCP: not initialized",
+            background_tasks: &[],
+        };
+
+        let output = reg
+            .execute("/recap", &mut ctx)
+            .expect("command should be handled")
+            .expect("recap should run")
+            .expect("recap should show output");
+
+        assert!(output.contains("manager recap"));
+        assert!(output.contains("ship the task view"));
+        assert!(output.contains("tasks now show shell and subagent rows"));
+        assert_eq!(ctx.app.messages.len(), before_messages);
+    }
+
+    #[test]
     fn mode_command_reports_current_mode() {
         let reg = CommandRegistry::new();
         let mut app = crate::tui::app::TuiApp::new(
@@ -3136,6 +3543,7 @@ mod tests {
             reg.list_commands().iter().map(|cmd| cmd.name).collect();
 
         for expected in [
+            "/btw",
             "/commands",
             "/context",
             "/copy",
@@ -3146,6 +3554,7 @@ mod tests {
             "/language",
             "/plugins",
             "/readiness-report",
+            "/recap",
             "/security-review",
             "/sessions",
             "/simplify",
@@ -3326,6 +3735,51 @@ mod tests {
         assert!(output.contains("bg-test"));
         assert!(output.contains("Review plan UI"));
         assert!(output.contains("checking panels"));
+    }
+
+    #[test]
+    fn unified_tasks_schema_includes_subagents_and_shells() {
+        let now = chrono::Utc::now();
+        let subagents = vec![crate::agent::BackgroundTaskSnapshot {
+            task_id: "bg-test".to_string(),
+            description: "Review plan UI".to_string(),
+            status: crate::agent::TaskStatus::Completed,
+            success: Some(true),
+            summary: Some("checked panels".to_string()),
+            started_at: now - chrono::Duration::seconds(2),
+            completed_at: Some(now),
+            duration_ms: Some(2_000),
+        }];
+        let shells = vec![crate::tools::background_shells::ShellSnapshot {
+            shell_id: "sh-test".to_string(),
+            command: "cargo test --all-features".to_string(),
+            cwd: std::path::PathBuf::from("."),
+            started_at: now - chrono::Duration::seconds(3),
+            finished_at: Some(now),
+            exit_code: Some(1),
+            stdout: "running\nlast stdout".to_string(),
+            stderr: "compile error".to_string(),
+            next_stdout_cursor: 2,
+            next_stderr_cursor: 1,
+            stdout_truncated: false,
+            stderr_truncated: false,
+        }];
+
+        let views = unified_background_task_views(&subagents, &shells, now);
+        let json = serde_json::to_value(&views).expect("tasks schema should serialize");
+
+        assert_eq!(json[0]["kind"], "subagent");
+        assert_eq!(json[0]["id"], "bg-test");
+        assert_eq!(json[0]["status"], "completed");
+        assert!(json[0]["duration"]
+            .as_str()
+            .expect("duration")
+            .contains('s'));
+        assert_eq!(json[1]["kind"], "shell");
+        assert_eq!(json[1]["id"], "sh-test");
+        assert_eq!(json[1]["status"], "failed");
+        assert_eq!(json[1]["summary"], "cargo test --all-features");
+        assert_eq!(json[1]["latest_output"], "compile error");
     }
 
     #[test]
@@ -3617,6 +4071,20 @@ mod tests {
         crate::deepseek::ProtocolMessage {
             id: crate::deepseek::MessageId::new_v4(),
             role: crate::deepseek::Role::User,
+            content: crate::deepseek::MessageContent::from(content),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            tool_results: Vec::new(),
+            turn_id: crate::deepseek::TurnId::new_v4(),
+            sub_turn_id: None,
+            visibility: crate::deepseek::MessageVisibility::UserVisible,
+        }
+    }
+
+    fn test_assistant_message(content: &str) -> crate::deepseek::ProtocolMessage {
+        crate::deepseek::ProtocolMessage {
+            id: crate::deepseek::MessageId::new_v4(),
+            role: crate::deepseek::Role::Assistant,
             content: crate::deepseek::MessageContent::from(content),
             reasoning_content: None,
             tool_calls: Vec::new(),

@@ -1,37 +1,46 @@
 //! MCP server: expose octocode's tools to external agents over JSON-RPC.
 //!
-//! Run via `octo mcp serve --stdio`. Reads JSON-RPC messages from stdin,
-//! writes responses to stdout. Each message is a single line of JSON.
+//! Run via `octo mcp serve --stdio`. Reads standard MCP `Content-Length`
+//! JSON-RPC frames from stdin and writes framed responses to stdout.
 //!
 //! ## Security
 //!
 //! Only **read-only** tools are exposed by default. Destructive operations
 //! (run_command, write_file, edit_file, …) require an explicit
 //! `mcp.server.allow_destructive = true` flag in the project config, and even
-//! then go through `policy::approvals::evaluate_tool` first. There is no
-//! human-in-the-loop in serve mode — denied calls return a CallToolResult
-//! with `is_error: true` so the client sees the refusal.
+//! then go through the shared `ToolRuntime` policy, hook, approval, and
+//! dispatch path. Approval prompts use the file-backed approval bridge under
+//! `.octocode/approvals` so stdio remains clean JSON-RPC.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 use crate::deepseek::{
     models::ToolDefinition, tools::standard_tool_definitions, ToolCall, ToolCallFunction,
 };
+use crate::mcp::approval_bridge::FileApprovalBridge;
 use crate::mcp::protocol::{
     CallToolResult, Implementation, InitializeResult, ListToolsResult, McpTool, ServerCapabilities,
     ToolContent, ToolsCapability, PROTOCOL_VERSION,
 };
-use crate::tools::metadata;
+use crate::policy::ToolCallSource;
+use crate::runtime::tool_runtime::{LocalDispatchRuntimeBackend, ToolRuntime, ToolRuntimeContext};
+use crate::storage::config::PolicyConfig;
+use crate::tools::{metadata, registry};
+
+const MAX_MCP_CONTENT_LENGTH: usize = 8 * 1024 * 1024;
+const MAX_MCP_HEADER_LINE_LENGTH: usize = 8 * 1024;
 
 /// Run the MCP server on stdio until EOF.
 pub async fn serve_stdio(project_root: PathBuf, allow_destructive: bool) -> Result<()> {
     let stdin = tokio::io::stdin();
     let mut writer = tokio::io::stdout();
-    let mut reader = BufReader::new(stdin).lines();
+    let mut reader = BufReader::new(stdin);
+    let config = crate::storage::Config::load(Some(&project_root)).unwrap_or_default();
+    let policy = config.policy;
 
     tracing::info!(
         "MCP server starting on stdio (project={}, allow_destructive={})",
@@ -39,13 +48,13 @@ pub async fn serve_stdio(project_root: PathBuf, allow_destructive: bool) -> Resu
         allow_destructive
     );
 
-    while let Some(line) = reader.next_line().await? {
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Some(response) = handle_message(&line, &project_root, allow_destructive).await {
-            writer.write_all(response.as_bytes()).await?;
-            writer.write_all(b"\n").await?;
+    while let Some(message) = read_stdio_message(&mut reader).await? {
+        if let Some(response) =
+            handle_message(&message, &project_root, allow_destructive, &policy).await
+        {
+            writer
+                .write_all(encode_stdio_frame(&response).as_bytes())
+                .await?;
             writer.flush().await?;
         }
     }
@@ -58,6 +67,7 @@ async fn handle_message(
     line: &str,
     project_root: &Path,
     allow_destructive: bool,
+    policy: &PolicyConfig,
 ) -> Option<String> {
     let parsed: Value = match serde_json::from_str(line.trim()) {
         Ok(v) => v,
@@ -78,7 +88,7 @@ async fn handle_message(
         "initialize" => Ok(serde_json::to_value(initialize_result()).ok()?),
         "initialized" | "notifications/initialized" => return None,
         "tools/list" => Ok(serde_json::to_value(list_tools(allow_destructive)).ok()?),
-        "tools/call" => call_tool(params, project_root, allow_destructive).await,
+        "tools/call" => call_tool(params, project_root, allow_destructive, policy).await,
         "ping" => Ok(json!({})),
         other => Err(format!("method not found: {other}")),
     };
@@ -138,7 +148,8 @@ fn list_tools(allow_destructive: bool) -> ListToolsResult {
 fn tool_is_exposed(name: &str, allow_destructive: bool) -> bool {
     // Always expose read-only tools. Mutating/destructive tools only when
     // explicitly opted-in via config.
-    metadata::is_read_only(name) || allow_destructive
+    metadata::metadata(name).is_some_and(|meta| meta.read_only || allow_destructive)
+        && registry::get(name).is_some()
 }
 
 fn definition_to_mcp_tool(def: ToolDefinition) -> McpTool {
@@ -153,6 +164,7 @@ async fn call_tool(
     params: Value,
     project_root: &Path,
     allow_destructive: bool,
+    policy: &PolicyConfig,
 ) -> Result<Value, String> {
     let name = params
         .get("name")
@@ -185,18 +197,102 @@ async fn call_tool(
         },
     };
 
-    let (content, is_error) = crate::tools::dispatch::execute_single_tool_with_config(
-        &call,
-        project_root,
-        crate::tools::dispatch::ToolDispatchConfig::default(),
-    )
-    .await;
+    let runtime = ToolRuntime::new(project_root, policy.clone());
+    let dispatch_config = crate::tools::dispatch::ToolDispatchConfig::from_policy(policy);
+    let context = ToolRuntimeContext::new("mcp-stdio", dispatch_config);
+    let mut resolver = FileApprovalBridge::new(project_root);
+    let mut backend = LocalDispatchRuntimeBackend;
+    let outcome = runtime
+        .execute(
+            &call,
+            ToolCallSource::Mcp,
+            context,
+            &mut resolver,
+            &mut backend,
+        )
+        .await;
 
     let result = CallToolResult {
-        content: vec![ToolContent::Text { text: content }],
-        is_error,
+        content: vec![ToolContent::Text {
+            text: outcome.result_record.result,
+        }],
+        is_error: outcome.result_record.is_error,
     };
     serde_json::to_value(result).map_err(|e| e.to_string())
+}
+
+fn encode_stdio_frame(body: &str) -> String {
+    format!("Content-Length: {}\r\n\r\n{}", body.len(), body)
+}
+
+async fn read_stdio_message<R>(reader: &mut R) -> Result<Option<String>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut first_line = String::new();
+    loop {
+        first_line.clear();
+        let n = reader.read_line(&mut first_line).await?;
+        if n == 0 {
+            return Ok(None);
+        }
+        if !first_line.trim().is_empty() {
+            break;
+        }
+    }
+
+    let trimmed = first_line.trim_start();
+    if trimmed.starts_with('{') {
+        return Ok(Some(first_line.trim().to_string()));
+    }
+
+    let mut content_length = parse_content_length_header(&first_line)?;
+    loop {
+        let mut line = String::new();
+        let n = reader.read_line(&mut line).await?;
+        if n == 0 {
+            anyhow::bail!("EOF while reading MCP headers");
+        }
+        if line.len() > MAX_MCP_HEADER_LINE_LENGTH {
+            anyhow::bail!("MCP header line too long");
+        }
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() {
+            break;
+        }
+        if let Some(len) = parse_content_length_header(line)? {
+            if content_length.is_some() {
+                anyhow::bail!("duplicate Content-Length header");
+            }
+            content_length = Some(len);
+        }
+    }
+
+    let len = content_length.ok_or_else(|| anyhow::anyhow!("missing Content-Length header"))?;
+    if len > MAX_MCP_CONTENT_LENGTH {
+        anyhow::bail!("MCP frame too large: Content-Length {len} exceeds {MAX_MCP_CONTENT_LENGTH}");
+    }
+    let mut buf = vec![0; len];
+    reader.read_exact(&mut buf).await?;
+    Ok(Some(String::from_utf8(buf)?))
+}
+
+fn parse_content_length_header(line: &str) -> Result<Option<usize>> {
+    let (name, value) = line
+        .trim_end_matches(['\r', '\n'])
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("invalid MCP header line: {line}"))?;
+    if !name.eq_ignore_ascii_case("Content-Length") {
+        return Ok(None);
+    }
+    let len: usize = value
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid Content-Length header: {}", value.trim()))?;
+    if len == 0 {
+        anyhow::bail!("invalid Content-Length header: zero-length frame");
+    }
+    Ok(Some(len))
 }
 
 #[cfg(test)]
@@ -231,6 +327,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
             &PathBuf::from("."),
             false,
+            &PolicyConfig::default(),
         )
         .await
         .expect("initialize should respond");
@@ -244,6 +341,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
             &PathBuf::from("."),
             false,
+            &PolicyConfig::default(),
         )
         .await
         .expect("tools/list should respond");
@@ -258,6 +356,7 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":3,"method":"unknown/foo","params":{}}"#,
             &PathBuf::from("."),
             false,
+            &PolicyConfig::default(),
         )
         .await
         .expect("should respond with error");
@@ -271,8 +370,37 @@ mod tests {
             r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
             &PathBuf::from("."),
             false,
+            &PolicyConfig::default(),
         )
         .await;
         assert!(response.is_none());
+    }
+
+    #[tokio::test]
+    async fn stdio_reader_accepts_content_length_frame() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let frame = encode_stdio_frame(body);
+        let mut reader = BufReader::new(frame.as_bytes());
+
+        let message = read_stdio_message(&mut reader)
+            .await
+            .expect("read frame")
+            .expect("message");
+
+        assert_eq!(message, body);
+    }
+
+    #[tokio::test]
+    async fn stdio_reader_accepts_legacy_line_json() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let bytes = format!("{body}\n").into_bytes();
+        let mut reader = BufReader::new(bytes.as_slice());
+
+        let message = read_stdio_message(&mut reader)
+            .await
+            .expect("read line")
+            .expect("message");
+
+        assert_eq!(message, body);
     }
 }

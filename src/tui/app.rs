@@ -137,9 +137,9 @@ fn animated_token_count(target: u64, elapsed_ms: u64) -> u64 {
 
 use crate::agent::orchestrator::{AgentEvent, DecisionKind, Orchestrator};
 use crate::deepseek::{
-    CacheUsage, DeepSeekModel, MessageContent, MessageVisibility, ProtocolMessage, ReasoningEffort,
-    ReasoningState, Role, Session, SessionId, SessionMetadata, ThinkingMode, ToolCall,
-    ToolCallFunction,
+    CacheUsage, ChatMessage, ChatMessageContent, ChatRequest, DeepSeekModel, MessageContent,
+    MessageVisibility, ProtocolMessage, ReasoningEffort, ReasoningState, Role, Session, SessionId,
+    SessionMetadata, ThinkingConfig, ThinkingMode, ToolCall, ToolCallFunction,
 };
 use crate::policy::ApprovalDisplay;
 use crate::provider::{build_provider, context_budget_for, Provider, ProviderKind};
@@ -180,6 +180,7 @@ pub struct TuiApp {
     pub current_task_title: String,
     pub pending_user_message: Option<String>,
     pub queued_inputs: VecDeque<String>,
+    pending_side_outputs: VecDeque<String>,
     pub stream_buffer: String,
     pub is_streaming: bool,
     pub stream_start: Option<std::time::Instant>,
@@ -759,6 +760,7 @@ impl TuiApp {
             current_task_title: String::new(),
             pending_user_message: None,
             queued_inputs: VecDeque::new(),
+            pending_side_outputs: VecDeque::new(),
             stream_buffer: String::new(),
             is_streaming: false,
             stream_start: None,
@@ -935,6 +937,7 @@ impl TuiApp {
         self.stream_buffer.len().hash(&mut hasher);
         self.reasoning_buffer.len().hash(&mut hasher);
         self.pending_user_message.is_some().hash(&mut hasher);
+        self.pending_side_outputs.len().hash(&mut hasher);
         self.scroll_offset.hash(&mut hasher);
         self.status_message.len().hash(&mut hasher);
         self.current_task_title.hash(&mut hasher);
@@ -4744,13 +4747,17 @@ impl TuiApp {
         } else {
             "permissions ask"
         };
+        let provider = crate::provider::build_provider(&self.config.provider, String::new());
+        let provider_label = self.config.provider.default.as_str();
+        let model_label = provider.request_model_name(&self.model.canonical());
 
         statusline::render_statusline(
             f,
             area,
             statusline::StatuslineProps {
                 mode: self.current_mode(),
-                model: &self.model,
+                provider: provider_label,
+                model: &model_label,
                 status: &status_label,
                 tokens: if self.ui_started_at.elapsed().as_millis() < 3_000 {
                     0
@@ -5005,6 +5012,11 @@ pub enum TuiAction {
         output: String,
         is_error: bool,
     },
+    SideOutput {
+        label: String,
+        output: String,
+        is_error: bool,
+    },
     ApproveOnce,
     ApproveSession,
     Deny,
@@ -5025,6 +5037,12 @@ fn approval_overlay_area(area: Rect, lower_boundary_y: u16) -> Rect {
 pub enum PreviewSnapshotScenario {
     Welcome,
     Workbench,
+    Slash,
+    Approval,
+    Settings,
+    Diff,
+    History,
+    FileMention,
 }
 
 /// Render the TUI into plain text for local visual inspection without opening
@@ -5060,111 +5078,231 @@ pub fn render_preview_snapshot(
         app.status_message = "Ready".into();
     }
 
-    if scenario == PreviewSnapshotScenario::Workbench {
-        app.api_key_entry = None;
-        app.set_api_key_state(ApiKeyState::Ready);
-        app.is_streaming = true;
-        app.show_reasoning = true;
-        app.stream_start = Some(
-            std::time::Instant::now()
-                .checked_sub(std::time::Duration::from_millis(elapsed_ms))
-                .unwrap_or_else(std::time::Instant::now),
-        );
-        let turn_id = uuid::Uuid::new_v4();
-        app.messages = vec![
-            ProtocolMessage {
-                id: uuid::Uuid::new_v4(),
-                role: Role::User,
-                content: MessageContent::from("整理系统运行流畅度"),
-                reasoning_content: None,
-                tool_calls: Vec::new(),
-                tool_results: Vec::new(),
-                turn_id,
-                sub_turn_id: None,
-                visibility: MessageVisibility::UserVisible,
-            },
-            ProtocolMessage {
-                id: uuid::Uuid::new_v4(),
-                role: Role::Assistant,
-                content: MessageContent::from("先查一下当前的开机自启项目。"),
-                reasoning_content: None,
-                tool_calls: vec![ToolCall {
-                    id: "preview_run_command".to_string(),
-                    call_type: "function".to_string(),
-                    function: ToolCallFunction {
-                        name: "run_command".to_string(),
-                        arguments: serde_json::json!({
-                            "command": "Get-ItemProperty HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
-                        })
-                        .to_string(),
-                    },
-                }],
-                tool_results: Vec::new(),
-                turn_id,
-                sub_turn_id: None,
-                visibility: MessageVisibility::UserVisible,
-            },
-        ];
-        app.stream_buffer = String::new();
-        app.reasoning_buffer =
-            "Map runtime state -> fan out agents -> synthesize UI changes".into();
-        app.status_message = "Working across plan, agents, and tools".into();
-        app.current_task_title = "优化多智能体任务控制台".into();
-        app.total_tokens = 578;
-        app.current_turn_tokens = 578;
-        app.current_turn_input_tokens = 41;
-        app.current_turn_output_tokens = 131;
-        app.plan_summary = Some("优化多智能体任务控制台".into());
-        app.plan_current_step = 1;
-        app.plan_total_steps = 4;
-        app.plan_steps = vec![
-            plan_tracker::PlanStepItem::new(
-                "检查当前 plan / agent 渲染路径",
-                plan_tracker::PlanStepStatus::Done,
-            )
-            .with_duration_ms(1_200),
-            plan_tracker::PlanStepItem::new(
-                "重排 Mission Control 和 Agent Team",
-                plan_tracker::PlanStepStatus::Running,
-            ),
-            plan_tracker::PlanStepItem::new(
-                "对标主流智能体工作台（含 OpenCode / Manus）",
-                plan_tracker::PlanStepStatus::Pending,
-            ),
-            plan_tracker::PlanStepItem::new(
-                "预览截图并验证输入区",
-                plan_tracker::PlanStepStatus::Pending,
-            ),
-        ];
-        let mut explorer = subagent_cards::SubagentCard::new(
-            "019e0c78-8006",
-            "code-explorer",
-            "Trace plan and agent render paths",
-        );
-        explorer.status = subagent_cards::SubagentCardStatus::Done;
-        explorer.summary = Some("Located transcript, plan tracker, and subagent card paths".into());
-        explorer.duration_ms = Some(1_250);
-        explorer.files_read = 3;
-        let mut reviewer = subagent_cards::SubagentCard::new(
-            "019e0c78-7fe3",
-            "code-reviewer",
-            "Review multi-agent UI against 8 competitors",
-        );
-        reviewer.apply_delta("checking Mission Control density and task visibility");
-        let mut planner = subagent_cards::SubagentCard::new(
-            "019e0c78-81a4",
-            "planner",
-            "Plan next UI pass for real swarm runs",
-        );
-        planner.apply_delta("mapping agent lanes to plan steps");
-        app.subagents = vec![explorer, reviewer, planner];
-        app.push_activity("dynamic preview: workbench state");
+    match scenario {
+        PreviewSnapshotScenario::Welcome => {}
+        PreviewSnapshotScenario::Workbench => populate_workbench_preview(&mut app, elapsed_ms),
+        PreviewSnapshotScenario::Slash => {
+            seed_preview_transcript(
+                &mut app,
+                "打开命令面板",
+                "输入 / 后展示可用命令和补全提示。",
+            );
+            app.input_text = "/".into();
+            app.cursor_pos = app.input_text.chars().count();
+            app.selected_slash_index = 1;
+            app.status_message = "Slash command suggestions".into();
+        }
+        PreviewSnapshotScenario::Approval => {
+            seed_preview_transcript(&mut app, "运行测试", "run_command 需要用户确认后才会执行。");
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            app.approval = Some((
+                ApprovalDisplay {
+                    title: "run_command".into(),
+                    description: "Execute cargo test --all-features in the workspace".into(),
+                    risk_level: crate::policy::RiskLevel::CommandExecution,
+                    details:
+                        "Command: cargo test --all-features\nScope: project workspace\nSource: main"
+                            .into(),
+                },
+                tx,
+            ));
+            app.approval_selected_index = 0;
+            app.status_message = "Approval requested".into();
+        }
+        PreviewSnapshotScenario::Settings => {
+            set_preview_ready(&mut app);
+            app.settings_open = true;
+            app.settings_tab = settings_panel::SettingsTab::Safety;
+            app.settings_selected = 3;
+            app.status_message = "Settings preview".into();
+        }
+        PreviewSnapshotScenario::Diff => {
+            seed_preview_transcript(
+                &mut app,
+                "查看 diff",
+                "Diff focus 展开当前文件，仅标记接受或拒绝状态。",
+            );
+            app.file_diffs = vec![
+                diff_viewer::FileDiffItem::new(
+                    "src/tui/app.rs",
+                    "--- a/src/tui/app.rs\n+++ b/src/tui/app.rs\n@@ -1,3 +1,4 @@\n fn render() {\n-    old_summary();\n+    render_diff_focus();\n+    render_key_hints();\n }",
+                    "+2 -1",
+                ),
+                diff_viewer::FileDiffItem::new(
+                    "tests/tui_cli_tests.rs",
+                    "--- a/tests/tui_cli_tests.rs\n+++ b/tests/tui_cli_tests.rs\n@@ -10,2 +10,3 @@\n+assert!(stdout.contains(\"Diff focus\"));",
+                    "+1 -0",
+                ),
+            ];
+            app.selected_diff = Some(0);
+            app.diff_focused = true;
+            app.status_message = "Diff focus preview".into();
+        }
+        PreviewSnapshotScenario::History => {
+            seed_preview_transcript(
+                &mut app,
+                "复用历史输入",
+                "Ctrl-R 打开历史搜索并筛选最近命令。",
+            );
+            app.history_search_active = true;
+            app.history_search_draft = "cargo".into();
+            app.input_text = "cargo".into();
+            app.cursor_pos = app.input_text.chars().count();
+            app.input_history = vec![
+                "octo doctor --no-network".into(),
+                "cargo check --all-targets --all-features".into(),
+                "cargo test --all-features".into(),
+            ];
+            app.status_message = "History search".into();
+        }
+        PreviewSnapshotScenario::FileMention => {
+            seed_preview_transcript(&mut app, "引用文件", "@path 面板展示当前工作区文件补全。");
+            app.input_text = "检查 @src/tui/".into();
+            app.cursor_pos = app.input_text.chars().count();
+            app.selected_file_mention_index = 1;
+            app.status_message = "File mention suggestions".into();
+        }
     }
 
     let backend = ratatui::backend::TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend)?;
     terminal.draw(|f| app.render(f))?;
     Ok(buffer_to_text(terminal.backend()))
+}
+
+fn set_preview_ready(app: &mut TuiApp) {
+    app.api_key_entry = None;
+    app.set_api_key_state(ApiKeyState::Ready);
+}
+
+fn preview_instant(elapsed_ms: u64) -> std::time::Instant {
+    std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_millis(elapsed_ms))
+        .unwrap_or_else(std::time::Instant::now)
+}
+
+fn seed_preview_transcript(app: &mut TuiApp, user: &str, assistant: &str) {
+    set_preview_ready(app);
+    let turn_id = uuid::Uuid::new_v4();
+    app.messages = vec![
+        ProtocolMessage {
+            id: uuid::Uuid::new_v4(),
+            role: Role::User,
+            content: MessageContent::from(user),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            tool_results: Vec::new(),
+            turn_id,
+            sub_turn_id: None,
+            visibility: MessageVisibility::UserVisible,
+        },
+        ProtocolMessage {
+            id: uuid::Uuid::new_v4(),
+            role: Role::Assistant,
+            content: MessageContent::from(assistant),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            tool_results: Vec::new(),
+            turn_id,
+            sub_turn_id: None,
+            visibility: MessageVisibility::UserVisible,
+        },
+    ];
+}
+
+fn populate_workbench_preview(app: &mut TuiApp, elapsed_ms: u64) {
+    set_preview_ready(app);
+    app.is_streaming = true;
+    app.show_reasoning = true;
+    app.stream_start = Some(preview_instant(elapsed_ms));
+    let turn_id = uuid::Uuid::new_v4();
+    app.messages = vec![
+        ProtocolMessage {
+            id: uuid::Uuid::new_v4(),
+            role: Role::User,
+            content: MessageContent::from("整理系统运行流畅度"),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            tool_results: Vec::new(),
+            turn_id,
+            sub_turn_id: None,
+            visibility: MessageVisibility::UserVisible,
+        },
+        ProtocolMessage {
+            id: uuid::Uuid::new_v4(),
+            role: Role::Assistant,
+            content: MessageContent::from("先查一下当前的开机自启项目。"),
+            reasoning_content: None,
+            tool_calls: vec![ToolCall {
+                id: "preview_run_command".to_string(),
+                call_type: "function".to_string(),
+                function: ToolCallFunction {
+                    name: "run_command".to_string(),
+                    arguments: serde_json::json!({
+                        "command": "Get-ItemProperty HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+                    })
+                    .to_string(),
+                },
+            }],
+            tool_results: Vec::new(),
+            turn_id,
+            sub_turn_id: None,
+            visibility: MessageVisibility::UserVisible,
+        },
+    ];
+    app.stream_buffer = String::new();
+    app.reasoning_buffer = "Map runtime state -> fan out agents -> synthesize UI changes".into();
+    app.status_message = "Working across plan, agents, and tools".into();
+    app.current_task_title = "优化多智能体任务控制台".into();
+    app.total_tokens = 578;
+    app.current_turn_tokens = 578;
+    app.current_turn_input_tokens = 41;
+    app.current_turn_output_tokens = 131;
+    app.plan_summary = Some("优化多智能体任务控制台".into());
+    app.plan_current_step = 1;
+    app.plan_total_steps = 4;
+    app.plan_steps = vec![
+        plan_tracker::PlanStepItem::new(
+            "检查当前 plan / agent 渲染路径",
+            plan_tracker::PlanStepStatus::Done,
+        )
+        .with_duration_ms(1_200),
+        plan_tracker::PlanStepItem::new(
+            "重排 Mission Control 和 Agent Team",
+            plan_tracker::PlanStepStatus::Running,
+        ),
+        plan_tracker::PlanStepItem::new(
+            "对标主流智能体工作台（含 OpenCode / Manus）",
+            plan_tracker::PlanStepStatus::Pending,
+        ),
+        plan_tracker::PlanStepItem::new(
+            "预览截图并验证输入区",
+            plan_tracker::PlanStepStatus::Pending,
+        ),
+    ];
+    let mut explorer = subagent_cards::SubagentCard::new(
+        "019e0c78-8006",
+        "code-explorer",
+        "Trace plan and agent render paths",
+    );
+    explorer.status = subagent_cards::SubagentCardStatus::Done;
+    explorer.summary = Some("Located transcript, plan tracker, and subagent card paths".into());
+    explorer.duration_ms = Some(1_250);
+    explorer.files_read = 3;
+    let mut reviewer = subagent_cards::SubagentCard::new(
+        "019e0c78-7fe3",
+        "code-reviewer",
+        "Review multi-agent UI against 8 competitors",
+    );
+    reviewer.apply_delta("checking Mission Control density and task visibility");
+    let mut planner = subagent_cards::SubagentCard::new(
+        "019e0c78-81a4",
+        "planner",
+        "Plan next UI pass for real swarm runs",
+    );
+    planner.apply_delta("mapping agent lanes to plan steps");
+    app.subagents = vec![explorer, reviewer, planner];
+    app.push_activity("dynamic preview: workbench state");
 }
 
 fn buffer_to_text(backend: &ratatui::backend::TestBackend) -> String {
@@ -5616,6 +5754,258 @@ fn start_local_shell_command(
             is_error,
         });
     }))
+}
+
+fn maybe_start_side_slash_task(
+    input: &str,
+    app: &TuiApp,
+    client: &crate::deepseek::client::DeepSeekClient,
+    action_tx: &mpsc::UnboundedSender<TuiAction>,
+) {
+    let mut parts = input.trim().splitn(2, ' ');
+    let Some(command) = parts.next() else {
+        return;
+    };
+    match command {
+        "/btw" => {
+            let question = parts.next().unwrap_or_default().trim();
+            if question.is_empty() {
+                return;
+            }
+            let client = client.clone();
+            let language = app.config.ui.language.clone();
+            let messages = app.messages.clone();
+            let question = question.to_string();
+            let action_tx = action_tx.clone();
+            tokio::spawn(async move {
+                let (output, is_error) =
+                    run_side_question(client, language, messages, question.clone()).await;
+                let _ = action_tx.send(TuiAction::SideOutput {
+                    label: "/btw".to_string(),
+                    output,
+                    is_error,
+                });
+            });
+        }
+        "/recap" => {
+            let client = client.clone();
+            let language = app.config.ui.language.clone();
+            let messages = app.messages.clone();
+            let action_tx = action_tx.clone();
+            tokio::spawn(async move {
+                let (output, is_error) = run_flash_recap(client, language, messages).await;
+                let _ = action_tx.send(TuiAction::SideOutput {
+                    label: "/recap".to_string(),
+                    output,
+                    is_error,
+                });
+            });
+        }
+        _ => {}
+    }
+}
+
+async fn run_side_question(
+    client: crate::deepseek::client::DeepSeekClient,
+    language: String,
+    messages: Vec<ProtocolMessage>,
+    question: String,
+) -> (String, bool) {
+    let chinese = welcome::is_chinese_display_language(&language);
+    let transcript = side_job_transcript(&messages, 12);
+    let system = if chinese {
+        "你是 Octocode 的只读旁路助手。只回答用户的侧问，不调用工具，不要求改文件，不把回答写入主会话。回答要简洁、可执行。"
+    } else {
+        "You are Octocode's read-only side assistant. Answer the side question without tools, without editing files, and without writing to the main session. Be concise and actionable."
+    };
+    let user = if chinese {
+        format!(
+            "侧问:\n{question}\n\n最近可见主会话:\n{transcript}\n\n请基于这些可见信息回答；信息不足就明确说明。"
+        )
+    } else {
+        format!(
+            "Side question:\n{question}\n\nRecent visible main session:\n{transcript}\n\nAnswer from this visible context; say what is unknown when context is insufficient."
+        )
+    };
+    let request = side_chat_request(system, &user, 700);
+    match client.chat_with_retry(&request).await {
+        Ok(response) => {
+            let answer = response_text(response).unwrap_or_else(|| {
+                if chinese {
+                    "模型没有返回可见答案。".to_string()
+                } else {
+                    "The model returned no visible answer.".to_string()
+                }
+            });
+            (
+                format_side_job_output("btw", &question, &answer, chinese, false),
+                false,
+            )
+        }
+        Err(error) => {
+            let fallback = if chinese {
+                format!(
+                    "Flash 旁路请求失败：{error}\n\n本地状态：不会写入主会话历史；工具未启用；主 turn 不受影响。"
+                )
+            } else {
+                format!(
+                    "Flash side request failed: {error}\n\nLocal state: main session history was not changed; tools were disabled; the main turn was not interrupted."
+                )
+            };
+            (
+                format_side_job_output("btw", &question, &fallback, chinese, true),
+                true,
+            )
+        }
+    }
+}
+
+async fn run_flash_recap(
+    client: crate::deepseek::client::DeepSeekClient,
+    language: String,
+    messages: Vec<ProtocolMessage>,
+) -> (String, bool) {
+    let chinese = welcome::is_chinese_display_language(&language);
+    let transcript = side_job_transcript(&messages, 18);
+    let system = if chinese {
+        "你是 Octocode 的会话摘要器。只总结可见会话，不调用工具，不改写主会话历史。输出短摘要、当前目标、已知进展、风险和下一步。"
+    } else {
+        "You summarize Octocode sessions. Summarize only visible messages, use no tools, and do not write to main history. Include current goal, progress, risks, and next step."
+    };
+    let user = if chinese {
+        format!("最近可见主会话:\n{transcript}\n\n请生成手动会话摘要。")
+    } else {
+        format!("Recent visible main session:\n{transcript}\n\nCreate a manual session recap.")
+    };
+    let request = side_chat_request(system, &user, 900);
+    match client.chat_with_retry(&request).await {
+        Ok(response) => {
+            let answer =
+                response_text(response).unwrap_or_else(|| local_side_recap(&messages, chinese));
+            (
+                format_side_job_output("recap", "session", &answer, chinese, false),
+                false,
+            )
+        }
+        Err(error) => {
+            let fallback = if chinese {
+                format!(
+                    "Flash 摘要失败：{error}\n\n{}",
+                    local_side_recap(&messages, true)
+                )
+            } else {
+                format!(
+                    "Flash recap failed: {error}\n\n{}",
+                    local_side_recap(&messages, false)
+                )
+            };
+            (
+                format_side_job_output("recap", "session", &fallback, chinese, true),
+                true,
+            )
+        }
+    }
+}
+
+fn side_chat_request(system: &str, user: &str, max_tokens: u32) -> ChatRequest {
+    ChatRequest {
+        model: DeepSeekModel::Flash.to_string(),
+        messages: vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: Some(ChatMessageContent::from(system)),
+                reasoning_content: None,
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: Some(ChatMessageContent::from(user)),
+                reasoning_content: None,
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+        ],
+        tools: None,
+        thinking: Some(ThinkingConfig::disabled()),
+        response_format: None,
+        stream: false,
+        max_tokens: Some(max_tokens),
+    }
+}
+
+fn response_text(response: crate::deepseek::ChatResponse) -> Option<String> {
+    response.choices.into_iter().find_map(|choice| {
+        choice
+            .message
+            .content
+            .map(|content| content.to_string_lossy())
+            .filter(|text| !text.trim().is_empty())
+    })
+}
+
+fn side_job_transcript(messages: &[ProtocolMessage], limit: usize) -> String {
+    let mut lines = messages
+        .iter()
+        .rev()
+        .filter(|message| message.visibility == MessageVisibility::UserVisible)
+        .filter(|message| matches!(message.role, Role::User | Role::Assistant))
+        .filter_map(|message| {
+            let text = message.content.to_string_lossy();
+            let text = text.trim();
+            (!text.is_empty())
+                .then(|| format!("{}: {}", message.role, truncate_for_activity(text, 500)))
+        })
+        .take(limit)
+        .collect::<Vec<_>>();
+    lines.reverse();
+    if lines.is_empty() {
+        "(no visible messages)".to_string()
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn local_side_recap(messages: &[ProtocolMessage], chinese: bool) -> String {
+    let transcript = side_job_transcript(messages, 8);
+    if chinese {
+        format!(
+            "本地摘要：当前有 {} 条主会话消息。\n最近可见内容：\n{transcript}",
+            messages.len()
+        )
+    } else {
+        format!(
+            "Local recap: the main session has {} messages.\nRecent visible content:\n{transcript}",
+            messages.len()
+        )
+    }
+}
+
+fn format_side_job_output(
+    kind: &str,
+    title: &str,
+    body: &str,
+    chinese: bool,
+    is_error: bool,
+) -> String {
+    let status = if is_error { "error" } else { "ready" };
+    let header = if chinese {
+        format!("◆ 管理器 {kind}  状态:{status}")
+    } else {
+        manager_side_header(kind, status)
+    };
+    let label = if chinese { "主题" } else { "topic" };
+    format!(
+        "{header}\n{label}     {}\nmode      read-only, tools disabled, no session-history write\n\n{}",
+        truncate_for_activity(title, 160),
+        body.trim()
+    )
+}
+
+fn manager_side_header(name: &str, status: &str) -> String {
+    format!("◆ manager {name}  status:{status}")
 }
 
 fn char_to_byte_idx(text: &str, char_idx: usize) -> usize {
@@ -6678,7 +7068,9 @@ pub async fn run_tui(
         }
 
         if running_turn.is_none() && !app.is_streaming {
-            if let Some(queued) = app.queued_inputs.pop_front() {
+            if let Some(output) = app.pending_side_outputs.pop_front() {
+                app.show_local_output(output);
+            } else if let Some(queued) = app.queued_inputs.pop_front() {
                 let remaining = app.queued_inputs.len();
                 app.status_message = if remaining == 0 {
                     "发送已排队的消息".into()
@@ -6807,6 +7199,7 @@ pub async fn run_tui(
                     if let Some(result) = registry.execute(&input, &mut ctx) {
                         match result {
                             Ok(Some(msg)) => {
+                                let command_name = input.split_whitespace().next();
                                 if input.split_whitespace().next() == Some("/model") {
                                     if let Some(orchestrator) = orchestrator.as_mut() {
                                         orchestrator.set_active_model(app.model.clone());
@@ -6834,6 +7227,14 @@ pub async fn run_tui(
                                         running.cancel_token.store(true, Ordering::SeqCst);
                                     }
                                     app.request_swarm_cancel();
+                                }
+                                if matches!(command_name, Some("/btw" | "/recap")) {
+                                    maybe_start_side_slash_task(
+                                        &input,
+                                        &app,
+                                        &active_client,
+                                        &action_tx,
+                                    );
                                 }
                                 if running_turn.is_some() || app.is_streaming {
                                     let status = msg
@@ -6993,6 +7394,20 @@ pub async fn run_tui(
                         "shell {status}: {}",
                         truncate_for_activity(&command, 120)
                     ));
+                }
+                TuiAction::SideOutput {
+                    label,
+                    output,
+                    is_error,
+                } => {
+                    let status = if is_error { "error" } else { "ok" };
+                    if running_turn.is_some() || app.is_streaming {
+                        app.pending_side_outputs.push_back(output);
+                        app.status_message = format!("{label} answer ready after current turn");
+                    } else {
+                        app.show_local_output(output);
+                    }
+                    app.push_activity(format!("{label} [{status}] side output ready"));
                 }
                 TuiAction::Interrupt => {
                     if let Some(running) = running_turn.take() {
@@ -9693,7 +10108,7 @@ exit = "ctrl+q"
         assert!(!snapshot.contains("按 1-3"));
         assert!(snapshot.contains(">"));
         assert!(snapshot.contains("上下文") || snapshot.contains("Context"));
-        assert!(snapshot.contains("V4 Flash"));
+        assert!(snapshot.contains("deepseek"));
         assert!(snapshot.contains("octo"));
         assert!(!snapshot.contains("octocode ·"));
     }
@@ -9786,7 +10201,7 @@ exit = "ctrl+q"
         let thinking_idx = thinking_lines[0];
         assert!(thinking_idx < input_idx);
         assert!(input_idx.saturating_sub(thinking_idx) <= 2);
-        assert!(snapshot.contains("V4 Flash"));
+        assert!(snapshot.contains("deepseek"));
     }
 
     #[test]

@@ -357,12 +357,47 @@ fn evaluate_tool_inner(
             )
         }
 
-        "git_add" => PolicyDecision::allow(
-            "staging operation",
-            tool_name.to_string(),
-            "Staging files for commit",
-            RiskLevel::GitMutation,
-        ),
+        "git_add" => {
+            let paths: Vec<String> = args
+                .get("paths")
+                .and_then(serde_json::Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if paths.is_empty() {
+                return PolicyDecision::deny(
+                    "missing paths for git_add",
+                    "Blocked: git_add",
+                    "Staging requires at least one explicit path",
+                    RiskLevel::Blocked,
+                    "No paths were supplied.".to_string(),
+                );
+            }
+            let details = format_path_details(&paths);
+            if policy.auto_mode
+                || policy.autonomy_level.auto_workspace_writes()
+                || !policy.require_approval_for_write
+            {
+                return PolicyDecision::allow(
+                    format!("git_add allowed by policy: {}", summarize_paths(&paths)),
+                    "Git add",
+                    "Staging files for commit",
+                    RiskLevel::GitMutation,
+                );
+            }
+            PolicyDecision::ask_once(
+                format!("git_add requires approval: {}", summarize_paths(&paths)),
+                "Git add",
+                "Staging files for commit",
+                RiskLevel::GitMutation,
+                details,
+            )
+        }
 
         "fetch_url" | "web_search" => {
             if !policy.network_access {
@@ -528,7 +563,7 @@ fn evaluate_tool_inner(
             "Use only trusted task inputs and allowlist agent policies.".to_string(),
         ),
 
-        _ => PolicyDecision::ask_once(
+        _ => PolicyDecision::deny(
             format!("unknown tool: {tool_name}"),
             format!("Unknown tool: {tool_name}"),
             "This tool is not recognized",
@@ -1051,6 +1086,39 @@ mod tests {
         );
 
         assert_eq!(decision.action, PolicyAction::Allow);
+    }
+
+    #[test]
+    fn unknown_tools_are_denied_without_approval_prompt() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let policy = PolicyConfig::default();
+
+        let decision = evaluate_tool(
+            "does_not_exist",
+            &args(serde_json::json!({})),
+            temp.path(),
+            &policy,
+        );
+
+        assert_eq!(decision.action, PolicyAction::Deny);
+        assert_eq!(decision.display.risk_level, RiskLevel::Blocked);
+    }
+
+    #[test]
+    fn git_add_requires_approval_by_default() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let policy = PolicyConfig::default();
+
+        let decision = evaluate_tool(
+            "git_add",
+            &args(serde_json::json!({ "paths": ["src/lib.rs"] })),
+            temp.path(),
+            &policy,
+        );
+
+        assert_eq!(decision.action, PolicyAction::AskOnce);
+        assert_eq!(decision.display.risk_level, RiskLevel::GitMutation);
+        assert!(decision.display.details.contains("src/lib.rs"));
     }
 
     #[test]

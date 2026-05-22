@@ -19,7 +19,11 @@ use crate::deepseek::{
     ReasoningState, Role, Session, SessionId, SessionMetadata, SubTurnId, ThinkingConfig, ToolCall,
     ToolCallRecord, ToolResultRecord, TurnId,
 };
-use crate::hooks::{HookEvent, HookPayload};
+use crate::runtime::tool_runtime::{
+    ApprovalFuture, ApprovalOutcome, ApprovalResolver, ToolRuntime, ToolRuntimeBackend,
+    ToolRuntimeBackendFuture, ToolRuntimeContext,
+};
+use crate::tools::backend::{ToolExecutionContext, ToolExecutionResult};
 
 use super::types::{
     PermissionMode, SubagentConfig, SubagentResult, SubagentTask, SubagentToolArgs,
@@ -414,6 +418,8 @@ impl SubagentExecutor {
         let hooks_config = runtime_config.hooks.clone();
         let dispatch_config =
             crate::tools::dispatch::ToolDispatchConfig::from_policy(&policy_config);
+        let runtime = ToolRuntime::new(self.project_root.clone(), policy_config.clone());
+        let shared_permission_mode = shared_permission_mode(self.config.permission_mode.clone());
 
         for tc in tool_calls {
             // Filter by allowed_tools
@@ -467,265 +473,52 @@ impl SubagentExecutor {
                 }
             }
 
-            // Determine approval based on permission mode.
-            // Bypass and AcceptEdits (for non-command tools) skip the popup entirely.
-            // Only Default mode routes to the TUI approval popup and waits.
-            let is_command = tc.function.name == "run_command";
-            let is_subagent = tc.function.name == "run_subagent";
-            let policy_decision = crate::policy::evaluate_tool(
-                &tc.function.name,
-                &tc.function.arguments,
-                &self.project_root,
-                &policy_config,
-            )
-            .with_source(crate::policy::ToolCallSource::Subagent);
-            if policy_decision.action == crate::policy::PolicyAction::Deny {
-                push_subagent_tool_result(
-                    &mut results,
-                    &mut audit_meta,
-                    tc,
-                    format!(
-                        "Tool '{}' was blocked by policy: {}",
-                        tc.function.name, policy_decision.reason
-                    ),
-                    true,
-                    false,
-                    policy_decision.display.risk_level.to_string(),
-                );
-                continue;
-            }
-            let approved = match self.config.permission_mode {
-                PermissionMode::Bypass => true,
-                // Safety net — destructive tools already filtered above.
-                PermissionMode::ReadOnly
-                    if policy_decision.action == crate::policy::PolicyAction::Allow =>
-                {
-                    true
-                }
-                PermissionMode::AcceptEdits
-                    if !is_command
-                        && !is_subagent
-                        && policy_decision.display.risk_level
-                            != crate::policy::RiskLevel::SensitiveRead =>
-                {
-                    true
-                }
-                _ if policy_decision.action == crate::policy::PolicyAction::Allow => true,
-                _ => {
-                    let (tx, rx) = tokio::sync::oneshot::channel();
-                    send_event(
-                        event_tx,
-                        AgentEvent::SubagentToolApprovalNeeded {
-                            agent_id: self.agent_id.clone(),
-                            tool_name: tc.function.name.clone(),
-                            arguments: tc.function.arguments.clone(),
-                            policy_decision: policy_decision.clone(),
-                            respond: tx,
-                        },
-                    );
-                    matches!(
-                        tokio::time::timeout(Duration::from_mins(1), rx).await,
-                        Ok(Ok(true))
-                    )
-                }
+            let mut context =
+                ToolRuntimeContext::new(session.id.to_string(), dispatch_config.clone());
+            context.hooks_config = Some(&hooks_config);
+            context.hook_tool_name = Some(format!("{}.{}", self.agent_id, tc.function.name));
+            let mut resolver = SubagentApprovalResolver {
+                event_tx,
+                agent_id: &self.agent_id,
+                permission_mode: shared_permission_mode,
+                arguments: &tc.function.arguments,
             };
-
-            if !approved {
-                push_subagent_tool_result(
-                    &mut results,
-                    &mut audit_meta,
+            let mut backend = SubagentRuntimeBackend {
+                client: self.client.clone(),
+                project_root: self.project_root.clone(),
+                spawn_depth: self.config.spawn_depth,
+                bus: self.bus.as_ref(),
+                agent_id: &self.agent_id,
+                event_tx: event_tx.clone(),
+            };
+            let outcome = runtime
+                .execute(
                     tc,
-                    format!("Tool '{}' was denied.", tc.function.name),
-                    true,
-                    false,
-                    policy_decision.display.risk_level.to_string(),
-                );
-                continue;
-            }
-
-            let mut hook_payload = HookPayload::new(
-                HookEvent::PreToolUse,
-                session.id.to_string(),
-                self.project_root.clone(),
-            );
-            hook_payload.tool_call_id = Some(tc.id.clone());
-            hook_payload.tool_name = Some(format!("{}.{}", self.agent_id, tc.function.name));
-            hook_payload.arguments = Some(tc.function.arguments.clone());
-            if let Some(pre_hooks) = crate::hooks::run_configured_hooks(
-                HookEvent::PreToolUse,
-                &hooks_config,
-                &hook_payload,
-                &self.project_root,
-                policy_config.command_timeout_seconds,
-            )
-            .await
-            {
+                    crate::policy::ToolCallSource::Subagent,
+                    context,
+                    &mut resolver,
+                    &mut backend,
+                )
+                .await;
+            for hook_summary in &outcome.hook_summaries {
                 send_event(
                     event_tx,
                     AgentEvent::HookExecuted {
-                        event: pre_hooks.event,
-                        success: pre_hooks.success(),
-                        summary: pre_hooks.brief(),
-                        command_count: pre_hooks.outcomes.len(),
-                    },
-                );
-                if !pre_hooks.success() {
-                    push_subagent_tool_result(
-                        &mut results,
-                        &mut audit_meta,
-                        tc,
-                        format!("Blocked by pre_tool hook: {}", pre_hooks.brief()),
-                        true,
-                        approved,
-                        policy_decision.display.risk_level.to_string(),
-                    );
-                    continue;
-                }
-            }
-
-            // Delegate run_subagent to a child handler after policy and subagent permissions.
-            // The free function `run_nested_subagent` breaks the opaque-type-in-defining-scope
-            // limitation, allowing Rust to verify the Send bound without a circular inference.
-            if tc.function.name == "run_subagent" {
-                let (result_text, is_error) = if self.config.spawn_depth < MAX_SPAWN_DEPTH {
-                    run_nested_subagent(
-                        self.client.clone(),
-                        self.project_root.clone(),
-                        self.config.spawn_depth + 1,
-                        tc.function.arguments.clone(),
-                        event_tx.clone(),
-                    )
-                    .await
-                } else {
-                    (
-                        "Subagent spawning is not allowed at this nesting depth.".to_string(),
-                        true,
-                    )
-                };
-                push_subagent_tool_result(
-                    &mut results,
-                    &mut audit_meta,
-                    tc,
-                    result_text,
-                    is_error,
-                    true,
-                    policy_decision.display.risk_level.to_string(),
-                );
-                continue;
-            }
-
-            // File-lock coordination for write operations in parallel mode
-            // RAII guard ensures unlock on Drop even if the tool panics or errors.
-            struct FileLockGuard<'a> {
-                bus: &'a MessageBus,
-                agent_id: &'a str,
-                path: String,
-            }
-
-            impl Drop for FileLockGuard<'_> {
-                fn drop(&mut self) {
-                    self.bus.announce_file_unlock(self.agent_id, &self.path);
-                }
-            }
-
-            let _lock_guard: Option<FileLockGuard<'_>> = if let Some(ref bus) = self.bus {
-                if tc.function.name == "write_file" || tc.function.name == "edit_file" {
-                    let args: serde_json::Value = match serde_json::from_str(&tc.function.arguments)
-                    {
-                        Ok(args) => args,
-                        Err(error) => {
-                            push_subagent_tool_result(
-                                &mut results,
-                                &mut audit_meta,
-                                tc,
-                                format!(
-                                    "Tool arguments could not be parsed for file locking: {error}"
-                                ),
-                                true,
-                                true,
-                                policy_decision.display.risk_level.to_string(),
-                            );
-                            continue;
-                        }
-                    };
-                    if let Some(path) = args["path"].as_str() {
-                        if bus.is_file_locked(path) {
-                            push_subagent_tool_result(
-                                &mut results,
-                                &mut audit_meta,
-                                tc,
-                                format!(
-                                    "File '{path}' is currently locked by another subagent. Wait for it to complete."
-                                ),
-                                true,
-                                true,
-                                policy_decision.display.risk_level.to_string(),
-                            );
-                            continue;
-                        }
-                        bus.announce_file_lock(&self.agent_id, path);
-                        Some(FileLockGuard {
-                            bus,
-                            agent_id: &self.agent_id,
-                            path: path.to_string(),
-                        })
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            // Actually execute the tool
-            let (result_text, is_error) = crate::tools::dispatch::execute_single_tool_with_config(
-                tc,
-                &self.project_root,
-                dispatch_config.clone(),
-            )
-            .await;
-            let mut post_payload = HookPayload::new(
-                HookEvent::PostToolUse,
-                session.id.to_string(),
-                self.project_root.clone(),
-            );
-            post_payload.tool_call_id = Some(tc.id.clone());
-            post_payload.tool_name = Some(format!("{}.{}", self.agent_id, tc.function.name));
-            post_payload.arguments = Some(tc.function.arguments.clone());
-            post_payload.success = Some(!is_error);
-            post_payload.summary =
-                Some(crate::agent::utils::truncate_for_summary(&result_text, 200));
-            if let Some(post_hooks) = crate::hooks::run_configured_hooks(
-                HookEvent::PostToolUse,
-                &hooks_config,
-                &post_payload,
-                &self.project_root,
-                policy_config.command_timeout_seconds,
-            )
-            .await
-            {
-                send_event(
-                    event_tx,
-                    AgentEvent::HookExecuted {
-                        event: post_hooks.event,
-                        success: post_hooks.success(),
-                        summary: post_hooks.brief(),
-                        command_count: post_hooks.outcomes.len(),
+                        event: hook_summary.event,
+                        success: hook_summary.success(),
+                        summary: hook_summary.brief(),
+                        command_count: hook_summary.outcomes.len(),
                     },
                 );
             }
-
-            push_subagent_tool_result(
-                &mut results,
-                &mut audit_meta,
-                tc,
-                result_text,
-                is_error,
-                approved,
-                policy_decision.display.risk_level.to_string(),
+            audit_meta.insert(
+                tc.id.clone(),
+                ToolAuditMeta {
+                    approved: outcome.approval.approved(),
+                    risk_level: outcome.decision.display.risk_level.to_string(),
+                },
             );
+            results.push((tc.clone(), outcome.result_record));
         }
 
         // Record in session history
@@ -761,6 +554,165 @@ impl SubagentExecutor {
 struct ToolAuditMeta {
     approved: bool,
     risk_level: String,
+}
+
+fn shared_permission_mode(mode: PermissionMode) -> crate::policy::PermissionMode {
+    match mode {
+        PermissionMode::Default => crate::policy::PermissionMode::Default,
+        PermissionMode::AcceptEdits => crate::policy::PermissionMode::AcceptEdits,
+        PermissionMode::ReadOnly => crate::policy::PermissionMode::ReadOnly,
+        PermissionMode::Bypass => crate::policy::PermissionMode::Bypass,
+    }
+}
+
+struct SubagentApprovalResolver<'a> {
+    event_tx: &'a mpsc::UnboundedSender<AgentEvent>,
+    agent_id: &'a str,
+    permission_mode: crate::policy::PermissionMode,
+    arguments: &'a str,
+}
+
+impl ApprovalResolver for SubagentApprovalResolver<'_> {
+    fn resolve<'a>(
+        &'a mut self,
+        call: &'a crate::runtime::tool_runtime::ToolCall,
+        decision: &'a crate::policy::PolicyDecision,
+    ) -> ApprovalFuture<'a> {
+        Box::pin(async move {
+            if self.permission_mode.auto_approves(&call.tool, decision) {
+                return ApprovalOutcome::Approved;
+            }
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            send_event(
+                self.event_tx,
+                AgentEvent::SubagentToolApprovalNeeded {
+                    agent_id: self.agent_id.to_string(),
+                    tool_name: call.tool.clone(),
+                    arguments: self.arguments.to_string(),
+                    policy_decision: decision.clone(),
+                    respond: tx,
+                },
+            );
+            match tokio::time::timeout(Duration::from_secs(60), rx).await {
+                Ok(Ok(true)) => ApprovalOutcome::Approved,
+                Ok(Ok(false)) => ApprovalOutcome::denied("Denied by user"),
+                Ok(Err(_)) => ApprovalOutcome::denied("Approval channel closed"),
+                Err(_) => ApprovalOutcome::denied("Denied by user or timeout"),
+            }
+        })
+    }
+}
+
+struct SubagentRuntimeBackend<'a> {
+    client: Arc<DeepSeekClient>,
+    project_root: PathBuf,
+    spawn_depth: u8,
+    bus: Option<&'a MessageBus>,
+    agent_id: &'a str,
+    event_tx: mpsc::UnboundedSender<AgentEvent>,
+}
+
+impl ToolRuntimeBackend for SubagentRuntimeBackend<'_> {
+    fn execute<'a>(
+        &'a mut self,
+        call: &'a ToolCall,
+        context: &'a ToolExecutionContext,
+    ) -> ToolRuntimeBackendFuture<'a> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let (content, success) = if call.function.name == "run_subagent" {
+                if self.spawn_depth < MAX_SPAWN_DEPTH {
+                    let (content, is_error) = run_nested_subagent(
+                        self.client.clone(),
+                        self.project_root.clone(),
+                        self.spawn_depth + 1,
+                        call.function.arguments.clone(),
+                        self.event_tx.clone(),
+                    )
+                    .await;
+                    (content, !is_error)
+                } else {
+                    (
+                        "Subagent spawning is not allowed at this nesting depth.".to_string(),
+                        false,
+                    )
+                }
+            } else {
+                self.execute_local_with_locks(call, context).await
+            };
+            ToolExecutionResult {
+                success,
+                summary: crate::agent::utils::truncate_for_summary(&content, 200),
+                content,
+                changed_files: crate::tools::backend::changed_files_for_call(call),
+                duration_ms: start.elapsed().as_millis() as u64,
+            }
+        })
+    }
+}
+
+impl SubagentRuntimeBackend<'_> {
+    async fn execute_local_with_locks(
+        &self,
+        call: &ToolCall,
+        context: &ToolExecutionContext,
+    ) -> (String, bool) {
+        struct FileLockGuard<'a> {
+            bus: &'a MessageBus,
+            agent_id: &'a str,
+            path: String,
+        }
+
+        impl Drop for FileLockGuard<'_> {
+            fn drop(&mut self) {
+                self.bus.announce_file_unlock(self.agent_id, &self.path);
+            }
+        }
+
+        let _lock_guard = if let Some(bus) = self.bus {
+            if matches!(call.function.name.as_str(), "write_file" | "edit_file") {
+                let args: serde_json::Value = match serde_json::from_str(&call.function.arguments) {
+                    Ok(args) => args,
+                    Err(error) => {
+                        return (
+                            format!("Tool arguments could not be parsed for file locking: {error}"),
+                            false,
+                        );
+                    }
+                };
+                if let Some(path) = args["path"].as_str() {
+                    if bus.is_file_locked(path) {
+                        return (
+                            format!(
+                                "File '{path}' is currently locked by another subagent. Wait for it to complete."
+                            ),
+                            false,
+                        );
+                    }
+                    bus.announce_file_lock(self.agent_id, path);
+                    Some(FileLockGuard {
+                        bus,
+                        agent_id: self.agent_id,
+                        path: path.to_string(),
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let (content, is_error) = crate::tools::dispatch::execute_single_tool_with_config(
+            call,
+            &context.project_root,
+            context.dispatch_config.clone(),
+        )
+        .await;
+        (content, !is_error)
+    }
 }
 
 fn push_subagent_tool_result(

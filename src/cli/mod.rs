@@ -33,6 +33,7 @@ pub mod task;
 pub mod welcome;
 
 pub use agent::agent;
+pub use approval::approval;
 pub use archive::archive;
 pub use ask::ask;
 pub use assess::assess;

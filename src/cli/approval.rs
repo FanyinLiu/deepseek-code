@@ -106,6 +106,63 @@ fn resolve_non_interactive_policy(
     None
 }
 
+#[derive(Debug, Clone)]
+pub enum ApprovalCommand {
+    List { json: bool },
+    Show { id: String },
+    Approve { id: String, reason: Option<String> },
+    Deny { id: String, reason: Option<String> },
+}
+
+pub async fn approval(
+    command: ApprovalCommand,
+    project_root: Option<std::path::PathBuf>,
+) -> anyhow::Result<()> {
+    let root = crate::cli::resolve_project_root(project_root, "approval")?;
+    match command {
+        ApprovalCommand::List { json } => {
+            let pending = crate::mcp::approval_bridge::list_pending(&root).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&pending)?);
+            } else if pending.is_empty() {
+                println!("No pending approvals.");
+            } else {
+                for approval in pending {
+                    println!(
+                        "{}  {}  {}  expires {}",
+                        approval.id, approval.tool, approval.risk, approval.expires_at
+                    );
+                }
+            }
+        }
+        ApprovalCommand::Show { id } => {
+            let approval = crate::mcp::approval_bridge::show_pending(&root, &id).await?;
+            println!("{}", serde_json::to_string_pretty(&approval)?);
+        }
+        ApprovalCommand::Approve { id, reason } => {
+            crate::mcp::approval_bridge::respond(
+                &root,
+                &id,
+                true,
+                reason.unwrap_or_else(|| "approved by operator".to_string()),
+            )
+            .await?;
+            println!("Approved {id}");
+        }
+        ApprovalCommand::Deny { id, reason } => {
+            crate::mcp::approval_bridge::respond(
+                &root,
+                &id,
+                false,
+                reason.unwrap_or_else(|| "denied by operator".to_string()),
+            )
+            .await?;
+            println!("Denied {id}");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

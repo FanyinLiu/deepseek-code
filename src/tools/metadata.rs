@@ -158,6 +158,12 @@ pub const ALL_TOOLS: &[ToolMetadata] = &[
         concurrency_safe: false,
     },
     ToolMetadata {
+        name: "task_stop",
+        read_only: false,
+        destructive: false,
+        concurrency_safe: false,
+    },
+    ToolMetadata {
         name: "git_add",
         read_only: false,
         destructive: false,
@@ -174,6 +180,30 @@ pub const ALL_TOOLS: &[ToolMetadata] = &[
         name: "run_command",
         read_only: false,
         destructive: true,
+        concurrency_safe: false,
+    },
+    ToolMetadata {
+        name: "fetch_url",
+        read_only: false,
+        destructive: false,
+        concurrency_safe: true,
+    },
+    ToolMetadata {
+        name: "web_search",
+        read_only: false,
+        destructive: false,
+        concurrency_safe: true,
+    },
+    ToolMetadata {
+        name: "github_pr",
+        read_only: false,
+        destructive: false,
+        concurrency_safe: false,
+    },
+    ToolMetadata {
+        name: "run_subagent",
+        read_only: false,
+        destructive: false,
         concurrency_safe: false,
     },
     // ── background shells ──

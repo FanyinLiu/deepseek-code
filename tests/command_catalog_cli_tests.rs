@@ -24,6 +24,16 @@ fn commands_list_json_exposes_builtin_slash_commands() {
         .expect("/help command");
     assert_eq!(help["group"], "local");
     assert!(help["usage"].as_str().unwrap().contains("/help"));
+    let btw = builtins
+        .iter()
+        .find(|cmd| cmd["name"] == "/btw")
+        .expect("/btw command");
+    assert_eq!(btw["group"], "agent");
+    let recap = builtins
+        .iter()
+        .find(|cmd| cmd["name"] == "/recap")
+        .expect("/recap command");
+    assert_eq!(recap["group"], "history");
 }
 
 #[test]

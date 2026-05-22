@@ -78,6 +78,16 @@ octo resume
 octo export <session-id>
 ```
 
+TUI 中常用本地命令：
+
+```text
+/btw <question>   独立只读侧问；禁用工具，不写入主会话历史
+/recap            生成当前会话摘要；可用时优先用 Flash 刷新，失败则保留本地摘要
+/tasks            汇总后台 subagent 和后台 shell
+/tasks --json     输出稳定字段：kind, id, status, started, duration, summary, latest_output
+/permissions      显示可见权限模式：ask, accept-edits, plan, yolo
+```
+
 `octo` 是主命令，`octocode` 只做兼容入口。如果 PowerShell 提示找不到 `octo`，请确认 Cargo 或 npm 的 bin 目录在 PATH 中。Cargo 通常是 `%USERPROFILE%\.cargo\bin`。
 
 ## Feature Discovery

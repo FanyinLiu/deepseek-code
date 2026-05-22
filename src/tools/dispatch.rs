@@ -4,6 +4,39 @@ use crate::policy::sandbox::CommandSandboxConfig;
 use crate::storage::config::PolicyConfig;
 use crate::tools;
 
+pub const SUPPORTED_TOOL_NAMES: &[&str] = &[
+    "read_file",
+    "list_dir",
+    "glob",
+    "grep",
+    "search_files",
+    "search_code",
+    "todo_write",
+    "task_create",
+    "task_get",
+    "task_list",
+    "task_update",
+    "task_stop",
+    "ask_user",
+    "ask_user_question",
+    "git_status",
+    "git_diff",
+    "edit_file",
+    "write_file",
+    "apply_patch",
+    "run_command",
+    "bash_output",
+    "kill_shell",
+    "notebook_edit",
+    "git_add",
+    "git_commit",
+    "fetch_url",
+    "web_search",
+    "github_pr",
+    "semantic_search",
+    "think",
+];
+
 #[derive(Debug, Clone)]
 pub struct ToolDispatchConfig {
     pub command_timeout_seconds: u64,

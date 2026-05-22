@@ -21,6 +21,9 @@
    - `cargo run --bin octo -- --help`
    - `cargo run --bin octo -- task --help`
    - `cargo run --bin octo -- preview-tui --api ready --scenario welcome --width 80 --height 24`
+   - `cargo run --bin octo -- preview-tui --api ready --scenario workbench --width 80 --height 24`
+   - `cargo run --bin octo -- preview-tui --api ready --scenario diff --width 100 --height 28`
+   - `cargo run --bin octo -- preview-tui --api ready --scenario approval --width 100 --height 28`
 6. npm 包预检：
    - `node scripts/npm-bootstrap.js --dry-run`
    - `npm pack --dry-run`

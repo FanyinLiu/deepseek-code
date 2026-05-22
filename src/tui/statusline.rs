@@ -6,14 +6,15 @@ use ratatui::{
     Frame,
 };
 
-use crate::deepseek::{CacheUsage, DeepSeekModel};
+use crate::deepseek::CacheUsage;
 use crate::tui::{status_bar::AppMode, theme};
 
 const DEFAULT_CONTEXT_BUDGET_TOKENS: u64 = 12_000;
 
 pub struct StatuslineProps<'a> {
     pub mode: AppMode,
-    pub model: &'a DeepSeekModel,
+    pub provider: &'a str,
+    pub model: &'a str,
     pub status: &'a str,
     pub tokens: u64,
     pub input_tokens: u64,
@@ -76,7 +77,7 @@ fn statusline_row(props: &StatuslineProps<'_>, canvas: Color, width: u16) -> Vec
         );
         push_text(
             &mut spans,
-            compact_model_label(props.model).to_string(),
+            model_value(props.provider, props.model, width),
             colors.text,
         );
     }
@@ -130,13 +131,42 @@ fn label(chinese: bool, en: &'static str, zh: &'static str) -> &'static str {
     }
 }
 
-fn compact_model_label(model: &DeepSeekModel) -> &'static str {
-    match model {
-        DeepSeekModel::Pro => "V4 Pro",
-        DeepSeekModel::Flash => "V4 Flash",
-        DeepSeekModel::LegacyChat => "Chat",
-        DeepSeekModel::LegacyReasoner => "Reasoner",
+fn model_value(provider: &str, model: &str, width: u16) -> String {
+    let model = if width < 112 {
+        compact_model_name(model)
+    } else {
+        model.to_string()
+    };
+    let provider = if width < 112 {
+        compact_provider_name(provider)
+    } else {
+        provider.to_string()
+    };
+    if provider.is_empty() {
+        model
+    } else {
+        format!("{provider}/{model}")
     }
+}
+
+fn compact_model_name(model: &str) -> String {
+    model
+        .strip_prefix("deepseek-v4-")
+        .or_else(|| model.strip_prefix("deepseek-"))
+        .or_else(|| model.strip_prefix("qwen-"))
+        .or_else(|| model.strip_prefix("kimi-"))
+        .unwrap_or(model)
+        .to_string()
+}
+
+fn compact_provider_name(provider: &str) -> String {
+    match provider {
+        "deepseek" => "ds",
+        "openai-compatible" => "oai",
+        "openrouter" => "or",
+        other => other,
+    }
+    .to_string()
 }
 
 fn context_value_for_width(tokens: u64, width: u16, context_limit: u64) -> String {
@@ -268,7 +298,8 @@ mod tests {
                     f.area(),
                     StatuslineProps {
                         mode: AppMode::Chat,
-                        model: &DeepSeekModel::Pro,
+                        provider: "deepseek",
+                        model: "deepseek-v4-pro",
                         status: "ready",
                         tokens: 128,
                         input_tokens: 0,
@@ -294,7 +325,7 @@ mod tests {
         assert!(!rendered.contains("Model:"));
         assert!(!rendered.contains("octo"));
         assert!(rendered.contains("Mode chat"));
-        assert!(rendered.contains("Model V4 Pro"));
+        assert!(rendered.contains("Model deepseek/deepseek-v4-pro"));
         assert!(rendered.contains("Context 128/12K (1.1%)"));
         assert!(!rendered.contains("tok "));
         assert!(!rendered.contains("↑"));
@@ -326,7 +357,8 @@ mod tests {
                     f.area(),
                     StatuslineProps {
                         mode: AppMode::Chat,
-                        model: &DeepSeekModel::Flash,
+                        provider: "deepseek",
+                        model: "deepseek-v4-flash",
                         status: "ready",
                         tokens: 128,
                         input_tokens: 0,
@@ -350,7 +382,7 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(rendered.contains("confirm"));
-        assert!(rendered.contains("V4 Flash"));
+        assert!(rendered.contains("ds/flash"));
         assert!(rendered.contains("Context 128/12K (1.1%)"));
     }
 
@@ -364,7 +396,8 @@ mod tests {
                     f.area(),
                     StatuslineProps {
                         mode: AppMode::Run,
-                        model: &DeepSeekModel::Flash,
+                        provider: "deepseek",
+                        model: "deepseek-v4-flash",
                         status: "working",
                         tokens: 5_700,
                         input_tokens: 742,
@@ -403,7 +436,8 @@ mod tests {
                     f.area(),
                     StatuslineProps {
                         mode: AppMode::Run,
-                        model: &DeepSeekModel::Flash,
+                        provider: "deepseek",
+                        model: "deepseek-v4-flash",
                         status: "working",
                         tokens: 5_700,
                         input_tokens: 54,
@@ -442,7 +476,8 @@ mod tests {
                     f.area(),
                     StatuslineProps {
                         mode: AppMode::Chat,
-                        model: &DeepSeekModel::Flash,
+                        provider: "deepseek",
+                        model: "deepseek-v4-flash",
                         status: "ready",
                         tokens: 0,
                         input_tokens: 0,
@@ -481,7 +516,8 @@ mod tests {
                     f.area(),
                     StatuslineProps {
                         mode: AppMode::Run,
-                        model: &DeepSeekModel::Flash,
+                        provider: "deepseek",
+                        model: "deepseek-v4-flash",
                         status: "working",
                         tokens: 16_160,
                         input_tokens: 0,

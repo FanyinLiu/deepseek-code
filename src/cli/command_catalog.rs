@@ -879,14 +879,16 @@ fn normalize_filter(value: &str) -> String {
 
 fn command_group(name: &str) -> &'static str {
     match name {
-        "/ask" | "/run" | "/plan" | "/review" | "/security-review" | "/simplify" | "/fix"
-        | "/explain" | "/wiki" | "/readiness-report" => "agent",
+        "/ask" | "/btw" | "/run" | "/plan" | "/review" | "/security-review" | "/simplify"
+        | "/fix" | "/explain" | "/wiki" | "/readiness-report" => "agent",
         "/agents" | "/swarm" | "/tasks" | "/task" | "/schedule" => "team",
         "/mcp" | "/tools" | "/skills" | "/hooks" | "/plugins" | "/commands" => "extension",
         "/permissions" | "/auto" | "/yolo" | "/mode" | "/doctor" => "control",
         "/model" | "/theme" | "/tui" | "/settings" | "/language" | "/output-style"
         | "/keybindings" | "/statusline" | "/config" => "settings",
-        "/sessions" | "/checkpoint" | "/restore" | "/memory" | "/compact" | "/todo" => "history",
+        "/sessions" | "/checkpoint" | "/restore" | "/memory" | "/compact" | "/recap" | "/todo" => {
+            "history"
+        }
         "/status" | "/context" | "/usage" | "/cwd" | "/search" | "/glob" | "/grep" => "status",
         "/clear" | "/exit" | "/copy" | "/undo" | "/image" | "/commit" | "/test" | "/help" => {
             "local"
