@@ -115,7 +115,7 @@ jobs:
           }
           $welcome | Set-Content -Encoding utf8 $welcomePath
           $welcomeText = $welcome -join "`n"
-          foreach ($Marker in @("OCTOCODE", "DeepSeek V4 Flash")) {
+          foreach ($Marker in @("OCTOCODE", "octo", "V4 Flash")) {
             if ($welcomeText -notmatch [regex]::Escape($Marker)) {
               throw "welcome preview missing marker: $Marker"
             }
@@ -127,7 +127,7 @@ jobs:
           }
           $workbench | Set-Content -Encoding utf8 $workbenchPath
           $workbenchText = $workbench -join "`n"
-          foreach ($Marker in @("Thinking", "type message", "V4 Flash")) {
+          foreach ($Marker in @("Thinking", "Agents", "V4 Flash")) {
             if ($workbenchText -notmatch [regex]::Escape($Marker)) {
               throw "workbench preview missing marker: $Marker"
             }
