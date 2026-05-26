@@ -226,10 +226,7 @@ fn count_skills(project_root: &Path) -> usize {
     for dir in skill_dirs(project_root) {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
-                if entry
-                    .file_type()
-                    .map(|t| t.is_dir())
-                    .unwrap_or(false)
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
                     && entry.path().join("SKILL.md").is_file()
                 {
                     total += 1;
@@ -257,7 +254,8 @@ fn git_worktree_works_here(project_root: &Path) -> bool {
         .arg(project_root)
         .args(["rev-parse", "--is-inside-work-tree"])
         .output();
-    let inside_ok = matches!(inside, Ok(out) if out.status.success() && out.stdout.starts_with(b"true"));
+    let inside_ok =
+        matches!(inside, Ok(out) if out.status.success() && out.stdout.starts_with(b"true"));
     if !inside_ok {
         return false;
     }
