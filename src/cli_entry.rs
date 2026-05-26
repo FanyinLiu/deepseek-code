@@ -897,6 +897,11 @@ enum AgentCommands {
         /// Preview the agent run without resolving API keys or calling the model
         #[arg(long)]
         dry_run: bool,
+        /// Filesystem isolation strategy: `none` (default) shares the parent
+        /// working tree; `worktree` runs the subagent in a temporary
+        /// `git worktree` and surfaces any changes back to you.
+        #[arg(long, value_enum, default_value_t = AgentIsolationArg::None)]
+        isolation: AgentIsolationArg,
         /// Print machine-readable JSON
         #[arg(long)]
         json: bool,
@@ -930,6 +935,22 @@ enum AgentTemplateArg {
     Tester,
     Planner,
     Writer,
+}
+
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum AgentIsolationArg {
+    #[default]
+    None,
+    Worktree,
+}
+
+impl From<AgentIsolationArg> for crate::agent::subagent::SubagentIsolation {
+    fn from(value: AgentIsolationArg) -> Self {
+        match value {
+            AgentIsolationArg::None => crate::agent::subagent::SubagentIsolation::None,
+            AgentIsolationArg::Worktree => crate::agent::subagent::SubagentIsolation::Worktree,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -1690,6 +1711,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
                     max_turns,
                     model,
                     dry_run,
+                    isolation,
                     json,
                 } => cli::agent::AgentCommand::Run {
                     name,
@@ -1698,6 +1720,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
                     max_turns,
                     model,
                     dry_run,
+                    isolation: isolation.into(),
                     json,
                 },
                 AgentCommands::Create { name, template } => cli::agent::AgentCommand::Create {

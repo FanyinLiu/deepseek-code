@@ -266,6 +266,7 @@ mod tests {
             error: (!success).then(|| "failed".to_string()),
             started_at: chrono::Utc::now(),
             completed_at: chrono::Utc::now(),
+            worktree: None,
         }
     }
 

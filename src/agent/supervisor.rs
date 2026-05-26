@@ -9,8 +9,8 @@ use super::bus::MessageBus;
 use super::decomposer::LlmDecomposer;
 use super::orchestrator::AgentEvent;
 use super::subagent::{
-    MergeStrategy, ParallelBatch, SubagentConfig, SubagentExecutor, SubagentRegistry,
-    SubagentResult, SubagentTask, SubagentType,
+    finalize_worktree, maybe_start_worktree, MergeStrategy, ParallelBatch, SubagentConfig,
+    SubagentExecutor, SubagentRegistry, SubagentResult, SubagentTask, SubagentType,
 };
 
 const DEFAULT_MAX_PARALLEL_SUBAGENTS: usize = 8;
@@ -50,9 +50,18 @@ impl Supervisor {
         task: SubagentTask,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
     ) -> SubagentResult {
-        let executor =
-            SubagentExecutor::new(self.client.clone(), self.project_root.clone(), config);
-        executor.run(&task, event_tx).await
+        let guard = match maybe_start_worktree(&self.project_root, config.isolation) {
+            Ok(guard) => guard,
+            Err(error) => return worktree_setup_failure(error),
+        };
+        let effective_root = guard
+            .as_ref()
+            .map(|g| g.path().to_path_buf())
+            .unwrap_or_else(|| self.project_root.clone());
+        let executor = SubagentExecutor::new(self.client.clone(), effective_root, config);
+        let mut result = executor.run(&task, event_tx).await;
+        finalize_worktree(guard, &mut result);
+        result
     }
 
     /// Run a batch of subagent tasks in parallel.
@@ -79,9 +88,21 @@ impl Supervisor {
                 };
                 task.context = Some(merged);
             }
-            let executor =
-                SubagentExecutor::new(self.client.clone(), self.project_root.clone(), config)
-                    .with_bus(bus.clone());
+            let isolation = config.isolation;
+            let parent_root = self.project_root.clone();
+            let guard = match maybe_start_worktree(&parent_root, isolation) {
+                Ok(guard) => guard,
+                Err(error) => {
+                    handles.push(tokio::spawn(async move { worktree_setup_failure(error) }));
+                    continue;
+                }
+            };
+            let effective_root = guard
+                .as_ref()
+                .map(|g| g.path().to_path_buf())
+                .unwrap_or_else(|| parent_root.clone());
+            let executor = SubagentExecutor::new(self.client.clone(), effective_root, config)
+                .with_bus(bus.clone());
             let event_tx = event_tx.clone();
             let semaphore = semaphore.clone();
             let handle = tokio::spawn(async move {
@@ -92,7 +113,9 @@ impl Supervisor {
                         "supervisor limiter closed".to_string(),
                     );
                 };
-                executor.run(&task, &event_tx).await
+                let mut result = executor.run(&task, &event_tx).await;
+                finalize_worktree(guard, &mut result);
+                result
             });
             handles.push(handle);
         }
@@ -390,6 +413,14 @@ fn normalize_max_parallel_subagents(limit: usize) -> usize {
     limit.max(1)
 }
 
+fn worktree_setup_failure(error: anyhow::Error) -> SubagentResult {
+    subagent_failure(
+        "Subagent skipped: failed to set up isolated worktree".to_string(),
+        format!("worktree setup failed: {error}"),
+        error.to_string(),
+    )
+}
+
 fn subagent_failure(summary: String, output: String, error: String) -> SubagentResult {
     SubagentResult {
         success: false,
@@ -403,6 +434,7 @@ fn subagent_failure(summary: String, output: String, error: String) -> SubagentR
         error: Some(error),
         started_at: chrono::Utc::now(),
         completed_at: chrono::Utc::now(),
+        worktree: None,
     }
 }
 
@@ -498,6 +530,7 @@ mod tests {
                 error: None,
                 started_at: chrono::Utc::now(),
                 completed_at: chrono::Utc::now(),
+                worktree: None,
             },
             SubagentResult {
                 success: true,
@@ -511,6 +544,7 @@ mod tests {
                 error: None,
                 started_at: chrono::Utc::now(),
                 completed_at: chrono::Utc::now(),
+                worktree: None,
             },
         ];
 

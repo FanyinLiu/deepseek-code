@@ -316,6 +316,7 @@ impl SubagentExecutor {
             error,
             started_at,
             completed_at,
+            worktree: None,
         };
 
         send_event(

@@ -140,6 +140,22 @@ pub enum PermissionMode {
 // Subagent Configuration
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+/// Filesystem-isolation strategy a subagent runs under.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentIsolation {
+    /// Share the parent's working tree directly. Edits land on the
+    /// parent's branch immediately. This is the default to preserve
+    /// existing behavior.
+    #[default]
+    None,
+    /// Run the subagent inside a freshly created `git worktree` so writes
+    /// don't pollute the parent workspace. The worktree is cleaned up
+    /// automatically when the subagent leaves it pristine; if there are
+    /// changes the path + branch are returned to the parent for review.
+    Worktree,
+}
+
 /// Configuration for a subagent instance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubagentConfig {
@@ -177,6 +193,10 @@ pub struct SubagentConfig {
     /// Whether this agent was spawned as a background task.
     #[serde(default)]
     pub is_background: bool,
+    /// Filesystem isolation strategy. `Worktree` puts the subagent in a
+    /// throwaway `git worktree` so the parent's tree stays clean.
+    #[serde(default)]
+    pub isolation: SubagentIsolation,
 }
 
 impl Default for SubagentConfig {
@@ -194,6 +214,7 @@ impl Default for SubagentConfig {
             working_dir: None,
             spawn_depth: 0,
             is_background: false,
+            isolation: SubagentIsolation::None,
         }
     }
 }
@@ -284,6 +305,16 @@ pub struct SubagentTask {
 // Execution Result
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+/// Where a worktree-isolated subagent left changes for the parent to
+/// inspect, if any. `path` and `branch` reference the artifacts created
+/// by `git worktree add` — clean runs are cleaned up automatically and
+/// don't produce an artifact.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorktreeArtifact {
+    pub path: PathBuf,
+    pub branch: String,
+}
+
 /// Result returned by a subagent after completing its task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubagentResult {
@@ -313,6 +344,11 @@ pub struct SubagentResult {
     pub started_at: DateTime<Utc>,
     /// When the task completed.
     pub completed_at: DateTime<Utc>,
+    /// Where a worktree-isolated subagent left uncommitted/committed
+    /// changes for the parent to merge or discard. `None` when the
+    /// subagent ran without isolation or finished with a pristine tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<WorktreeArtifact>,
 }
 
 impl SubagentResult {
@@ -472,6 +508,7 @@ mod tests {
             error: None,
             started_at: now,
             completed_at: now,
+            worktree: None,
         }
     }
 

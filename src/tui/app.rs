@@ -8295,6 +8295,7 @@ mod tests {
                 error: None,
                 started_at: chrono::Utc::now(),
                 completed_at: chrono::Utc::now(),
+                worktree: None,
             },
         });
 
@@ -9532,6 +9533,7 @@ mod tests {
                 error: None,
                 started_at: chrono::Utc::now(),
                 completed_at: chrono::Utc::now(),
+                worktree: None,
             },
         });
         app.apply_agent_event(AgentEvent::SwarmFinished {

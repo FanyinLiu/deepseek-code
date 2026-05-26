@@ -292,6 +292,7 @@ mod tests {
             error: None,
             started_at: chrono::Utc::now(),
             completed_at: chrono::Utc::now(),
+            worktree: None,
         };
 
         card.complete(&result);

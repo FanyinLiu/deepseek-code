@@ -41,6 +41,7 @@ pub enum AgentCommand {
         max_turns: Option<u32>,
         model: Option<String>,
         dry_run: bool,
+        isolation: crate::agent::subagent::SubagentIsolation,
         json: bool,
     },
     Create {
@@ -97,12 +98,16 @@ pub async fn agent(
             max_turns,
             model,
             dry_run,
+            isolation,
             json,
         } => {
             let result = if dry_run {
-                run_agent_dry_run(&root, &name, &task, focus, max_turns, model)?
+                run_agent_dry_run(&root, &name, &task, focus, max_turns, model, isolation)?
             } else {
-                run_agent(&root, &name, &task, focus, max_turns, model, !json).await?
+                run_agent(
+                    &root, &name, &task, focus, max_turns, model, isolation, !json,
+                )
+                .await?
             };
             let failed = !result.success;
             if json {
@@ -182,8 +187,16 @@ pub struct AgentRunPayload {
     pub token_usage: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<AgentFailureReasonPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<AgentWorktreePayload>,
     pub error: Option<String>,
     pub approval_denials: Vec<AgentApprovalDenialPayload>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentWorktreePayload {
+    pub path: String,
+    pub branch: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -194,6 +207,7 @@ pub struct AgentRunDryRunPlan {
     pub max_turns: u32,
     pub permission_mode: String,
     pub allowed_tools: Vec<String>,
+    pub isolation: String,
     pub would_request_api_key: bool,
     pub network_required: bool,
 }
@@ -435,6 +449,7 @@ fn create_agent(
     Ok(path)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_agent(
     project_root: &Path,
     name: &str,
@@ -442,9 +457,11 @@ async fn run_agent(
     focus: Option<PathBuf>,
     max_turns: Option<u32>,
     model: Option<String>,
+    isolation: crate::agent::subagent::SubagentIsolation,
     show_events: bool,
 ) -> Result<AgentRunPayload, anyhow::Error> {
-    let config = resolve_run_config(project_root, name, max_turns, model)?;
+    let mut config = resolve_run_config(project_root, name, max_turns, model)?;
+    config.isolation = isolation;
     let configured_max_turns = config.max_turns;
 
     let app_config = storage::Config::load(Some(project_root))?;
@@ -461,7 +478,23 @@ async fn run_agent(
         expected_output: Some("Concise agent result".to_string()),
     };
 
-    let executor = SubagentExecutor::new(client, project_root.to_path_buf(), config);
+    let guard = match crate::agent::subagent::maybe_start_worktree(project_root, config.isolation) {
+        Ok(g) => g,
+        Err(error) => {
+            return Ok(run_payload_from_result(
+                name,
+                task_text,
+                worktree_setup_result(error),
+                Vec::new(),
+                configured_max_turns,
+            ))
+        }
+    };
+    let effective_root = guard
+        .as_ref()
+        .map(|g| g.path().to_path_buf())
+        .unwrap_or_else(|| project_root.to_path_buf());
+    let executor = SubagentExecutor::new(client, effective_root, config);
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let mut handle = Box::pin(tokio::spawn(
         async move { executor.run(&task, &event_tx).await },
@@ -469,7 +502,7 @@ async fn run_agent(
 
     let mut auto_approve_session = false;
     let mut approval_denials = Vec::new();
-    let result = loop {
+    let mut result = loop {
         tokio::select! {
             joined = &mut handle => {
                 break joined.context("agent task join failed")?;
@@ -496,6 +529,7 @@ async fn run_agent(
         )
         .await;
     }
+    crate::agent::subagent::finalize_worktree(guard, &mut result);
 
     Ok(run_payload_from_result(
         name,
@@ -513,11 +547,17 @@ fn run_agent_dry_run(
     focus: Option<PathBuf>,
     max_turns: Option<u32>,
     model: Option<String>,
+    isolation: crate::agent::subagent::SubagentIsolation,
 ) -> Result<AgentRunPayload, anyhow::Error> {
-    let config = resolve_run_config(project_root, name, max_turns, model)?;
+    let mut config = resolve_run_config(project_root, name, max_turns, model)?;
+    config.isolation = isolation;
     let focus_files = focus
         .map(|path| vec![path.display().to_string()])
         .unwrap_or_default();
+    let isolation_label = match config.isolation {
+        crate::agent::subagent::SubagentIsolation::None => "none",
+        crate::agent::subagent::SubagentIsolation::Worktree => "worktree",
+    };
     let plan = AgentRunDryRunPlan {
         project_root: project_root.display().to_string(),
         focus_files,
@@ -525,6 +565,7 @@ fn run_agent_dry_run(
         max_turns: config.max_turns,
         permission_mode: permission_mode_label(&config.permission_mode).to_string(),
         allowed_tools: config.allowed_tools.clone(),
+        isolation: isolation_label.to_string(),
         would_request_api_key: false,
         network_required: false,
     };
@@ -546,6 +587,7 @@ fn run_agent_dry_run(
         duration_ms: 0,
         token_usage: 0,
         failure_reason: None,
+        worktree: None,
         error: None,
         approval_denials: Vec::new(),
     })
@@ -646,6 +688,24 @@ async fn handle_run_event(
     }
 }
 
+fn worktree_setup_result(error: anyhow::Error) -> crate::agent::subagent::SubagentResult {
+    let now = chrono::Utc::now();
+    crate::agent::subagent::SubagentResult {
+        success: false,
+        summary: "Subagent skipped: failed to set up isolated worktree".to_string(),
+        output: format!("worktree setup failed: {error}"),
+        tool_calls_used: Vec::new(),
+        files_read: Vec::new(),
+        files_written: Vec::new(),
+        duration_ms: 0,
+        token_usage: 0,
+        error: Some(error.to_string()),
+        started_at: now,
+        completed_at: now,
+        worktree: None,
+    }
+}
+
 fn run_payload_from_result(
     name: &str,
     task: &str,
@@ -654,6 +714,10 @@ fn run_payload_from_result(
     max_turns: u32,
 ) -> AgentRunPayload {
     let failure_reason = classify_run_failure(&result, approval_denials.as_slice(), max_turns);
+    let worktree = result.worktree.map(|artifact| AgentWorktreePayload {
+        path: artifact.path.display().to_string(),
+        branch: artifact.branch,
+    });
     AgentRunPayload {
         agent: name.to_string(),
         task: task.to_string(),
@@ -668,6 +732,7 @@ fn run_payload_from_result(
         duration_ms: result.duration_ms,
         token_usage: result.token_usage,
         failure_reason,
+        worktree,
         error: result.error,
         approval_denials,
     }
@@ -1093,6 +1158,7 @@ mod tests {
             duration_ms: 0,
             token_usage: 0,
             failure_reason: None,
+            worktree: None,
             error: Some("approval denied".to_string()),
             approval_denials: vec![AgentApprovalDenialPayload {
                 agent_id: "agent-1".to_string(),
@@ -1127,6 +1193,7 @@ mod tests {
             error: Some("子任务停止：已用完轮次预算。".to_string()),
             started_at: now,
             completed_at: now,
+            worktree: None,
         };
 
         let payload = run_payload_from_result("code-explorer", "inspect", result, Vec::new(), 1);
