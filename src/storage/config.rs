@@ -614,8 +614,8 @@ impl Config {
         let mut config = Config::default();
 
         // 1. User global
-        if let Some(user_dir) = dirs::home_dir() {
-            let global_path = user_dir.join(".octocode").join("config.toml");
+        if let Some(user_dir) = crate::storage::user_config_dir() {
+            let global_path = user_dir.join("config.toml");
             if global_path.exists() {
                 let content = std::fs::read_to_string(&global_path)?;
                 let patch = parse_config_patch(&content)?;
@@ -788,7 +788,7 @@ impl Config {
         );
         set_toml_bool(&mut value, "telemetry", "enabled", self.telemetry.enabled);
 
-        std::fs::write(&path, toml::to_string_pretty(&value)?)?;
+        crate::storage::atomic::write_text_atomic(&path, &toml::to_string_pretty(&value)?)?;
         Ok(path)
     }
 
@@ -1328,7 +1328,7 @@ pub fn find_project_root_strict() -> Option<PathBuf> {
 }
 
 fn find_project_root_strict_from(cwd: &Path) -> Option<PathBuf> {
-    let home_dir = dirs::home_dir();
+    let home_dir = crate::storage::user_home_dir();
     for ancestor in cwd.ancestors() {
         if has_project_root_marker(ancestor, home_dir.as_deref()) {
             return Some(ancestor.to_path_buf());
@@ -1338,7 +1338,7 @@ fn find_project_root_strict_from(cwd: &Path) -> Option<PathBuf> {
 }
 
 fn find_project_root_from(cwd: &Path) -> PathBuf {
-    let home_dir = dirs::home_dir();
+    let home_dir = crate::storage::user_home_dir();
     for ancestor in cwd.ancestors() {
         if has_project_root_marker(ancestor, home_dir.as_deref()) {
             return ancestor.to_path_buf();

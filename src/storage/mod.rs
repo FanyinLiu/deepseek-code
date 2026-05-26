@@ -1,3 +1,4 @@
+pub mod atomic;
 pub mod cache_index;
 pub mod config;
 pub mod events;
@@ -7,6 +8,8 @@ pub mod missions;
 pub mod scheduled_tasks;
 pub mod sessions;
 pub mod transcripts;
+
+use std::path::{Path, PathBuf};
 
 pub use config::{find_project_root, find_project_root_strict, Config};
 pub use events::{EventLogStore, SessionEvent, SessionEventKind};
@@ -22,3 +25,56 @@ pub use scheduled_tasks::{
 };
 pub use sessions::SessionStore;
 pub use transcripts::{export_transcript, TranscriptFormat};
+
+#[must_use]
+pub fn user_home_dir() -> Option<PathBuf> {
+    std::env::var_os("OCTOCODE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("DEEPSEEK_CODE_HOME")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(dirs::home_dir)
+}
+
+#[must_use]
+pub fn user_config_dir() -> Option<PathBuf> {
+    user_home_dir().map(|home| home.join(".octocode"))
+}
+
+pub(crate) fn project_storage_key(project_root: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    use unicode_normalization::UnicodeNormalization;
+
+    let project_root = config::normalize_project_root(project_root);
+    let normalized =
+        std::fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    let display = normalized.to_string_lossy().replace('\\', "/");
+    let nfc = display.nfc().collect::<String>();
+    let digest = Sha256::digest(nfc.as_bytes());
+    digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+pub(crate) fn legacy_project_storage_key(project_root: &Path) -> String {
+    use std::hash::Hasher;
+    let project_root = config::normalize_project_root(project_root);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&project_root.to_string_lossy().to_string(), &mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+pub(crate) fn project_storage_keys(project_root: &Path) -> Vec<String> {
+    let stable = project_storage_key(project_root);
+    let legacy = legacy_project_storage_key(project_root);
+    if stable == legacy {
+        vec![stable]
+    } else {
+        vec![stable, legacy]
+    }
+}

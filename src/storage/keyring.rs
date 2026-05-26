@@ -255,10 +255,9 @@ pub fn store_api_key_with_project_fallback(
 /// Store the API key in `~/.octocode/config.toml` (user-global config).
 /// Returns `Ok(None)` if no home directory is available.
 pub fn store_api_key_in_user_global_config(key: &str) -> Result<Option<PathBuf>, anyhow::Error> {
-    let Some(home) = dirs::home_dir() else {
+    let Some(config_dir) = crate::storage::user_config_dir() else {
         return Ok(None);
     };
-    let config_dir = home.join(".octocode");
     std::fs::create_dir_all(&config_dir)?;
     let path = config_dir.join("config.toml");
 
@@ -278,7 +277,7 @@ pub fn store_api_key_in_user_global_config(key: &str) -> Result<Option<PathBuf>,
         toml::Value::String(key.trim().to_string()),
     );
     let rendered = toml::to_string_pretty(&toml::Value::Table(table))?;
-    std::fs::write(&path, rendered)?;
+    write_api_key_config(&path, &rendered)?;
     tracing::warn!("API key stored in user-global config: {}", path.display());
     Ok(Some(path))
 }
@@ -326,9 +325,13 @@ pub fn store_api_key_in_project_local_config(
         toml::Value::String(key.trim().to_string()),
     );
     let rendered = toml::to_string_pretty(&toml::Value::Table(table))?;
-    std::fs::write(&path, rendered)?;
+    write_api_key_config(&path, &rendered)?;
     tracing::warn!("API key stored in local project config: {}", path.display());
     Ok(path)
+}
+
+fn write_api_key_config(path: &Path, rendered: &str) -> Result<(), anyhow::Error> {
+    crate::storage::atomic::write_private_text_atomic(path, rendered)
 }
 
 pub fn delete_api_key() -> Result<(), anyhow::Error> {
@@ -391,6 +394,29 @@ mod tests {
         assert_eq!(loaded.api_key.as_deref(), Some("sk-local"));
         assert!(!loaded.ui.show_cache_hud);
         assert_eq!(loaded.router.simple_threshold, 55);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_local_api_key_file_is_owner_only_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let config_dir = root.path().join(".octocode");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        let local = config_dir.join("local.toml");
+        std::fs::write(&local, "[ui]\ntheme = \"light\"\n").expect("write local config");
+        std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o644))
+            .expect("loosen local config permissions");
+
+        store_api_key_in_project_local_config(root.path(), "sk-local").expect("store api key");
+
+        let mode = std::fs::metadata(&local)
+            .expect("local metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

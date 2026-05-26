@@ -13,17 +13,16 @@ impl SessionStore {
         Self { base_path }
     }
 
-    /// Path: ~/.octocode/sessions/{project_hash}/{session_id}/
+    /// Path: ~/.octocode/{project_storage_key}/{session_id}/
     #[must_use]
     pub fn session_dir(&self, project_root: &Path, session_id: &SessionId) -> PathBuf {
-        self.base_path
-            .join(project_hash(project_root))
-            .join(session_id.to_string())
+        self.project_dir(project_root).join(session_id.to_string())
     }
 
     #[must_use]
     pub fn project_dir(&self, project_root: &Path) -> PathBuf {
-        self.base_path.join(project_hash(project_root))
+        self.base_path
+            .join(crate::storage::project_storage_key(project_root))
     }
 
     /// Save a session to disk.
@@ -32,11 +31,11 @@ impl SessionStore {
         std::fs::create_dir_all(&dir)?;
 
         let session_json = serde_json::to_string_pretty(session)?;
-        std::fs::write(dir.join("session.json"), session_json)?;
+        crate::storage::atomic::write_text_atomic(&dir.join("session.json"), &session_json)?;
 
         // Also write a human-readable transcript
         let transcript = transcript_to_markdown(session);
-        std::fs::write(dir.join("transcript.md"), transcript)?;
+        crate::storage::atomic::write_text_atomic(&dir.join("transcript.md"), &transcript)?;
 
         // Update index
         self.update_index(session)?;
@@ -53,6 +52,12 @@ impl SessionStore {
         let path = self
             .session_dir(project_root, session_id)
             .join("session.json");
+        let path = if path.exists() {
+            path
+        } else {
+            self.legacy_session_dir(project_root, session_id)
+                .join("session.json")
+        };
         let content = std::fs::read_to_string(&path)?;
         let session: Session = serde_json::from_str(&content)?;
         Ok(session)
@@ -60,13 +65,19 @@ impl SessionStore {
 
     /// List all sessions for a project.
     pub fn list(&self, project_root: &Path) -> Result<Vec<SessionSummary>, anyhow::Error> {
-        let index_path = self.project_dir(project_root).join("index.json");
-        if !index_path.exists() {
-            return Ok(Vec::new());
+        let mut summaries = Vec::new();
+        for project_dir in self.project_dirs(project_root) {
+            let loaded = self.load_or_rebuild_project_index(&project_dir)?;
+            for summary in loaded {
+                if !summaries
+                    .iter()
+                    .any(|existing: &SessionSummary| existing.id == summary.id)
+                {
+                    summaries.push(summary);
+                }
+            }
         }
-
-        let content = std::fs::read_to_string(&index_path)?;
-        let summaries: Vec<SessionSummary> = serde_json::from_str(&content)?;
+        summaries.sort_by_key(|summary| std::cmp::Reverse(summary.updated_at));
         Ok(summaries)
     }
 
@@ -75,6 +86,10 @@ impl SessionStore {
         let dir = self.session_dir(project_root, session_id);
         if dir.exists() {
             std::fs::remove_dir_all(&dir)?;
+        }
+        let legacy_dir = self.legacy_session_dir(project_root, session_id);
+        if legacy_dir.exists() && legacy_dir != dir {
+            std::fs::remove_dir_all(&legacy_dir)?;
         }
         self.remove_from_index(project_root, session_id)?;
         Ok(())
@@ -86,11 +101,11 @@ impl SessionStore {
         let lock_file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
-            .truncate(true)
+            .truncate(false)
             .open(&lock_path)?;
         fs2::FileExt::lock_exclusive(&lock_file)?;
 
-        let mut summaries = self.list(&session.project_root).unwrap_or_default();
+        let mut summaries = self.list(&session.project_root)?;
         let summary = SessionSummary {
             id: session.id,
             name: session.name.clone(),
@@ -111,14 +126,7 @@ impl SessionStore {
         summaries.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
 
         let index_path = project_dir.join("index.json");
-        std::fs::create_dir_all(
-            index_path
-                .parent()
-                .ok_or_else(|| anyhow::anyhow!("invalid path: no parent directory"))?,
-        )?;
-        let tmp_path = index_path.with_extension("tmp");
-        std::fs::write(&tmp_path, serde_json::to_string_pretty(&summaries)?)?;
-        std::fs::rename(&tmp_path, &index_path)?;
+        crate::storage::atomic::write_json_pretty_atomic(&index_path, &summaries)?;
 
         // lock released when lock_file drops
         Ok(())
@@ -129,32 +137,120 @@ impl SessionStore {
         project_root: &Path,
         session_id: &SessionId,
     ) -> Result<(), anyhow::Error> {
-        let project_dir = self.project_dir(project_root);
-        let lock_path = project_dir.join(".index.lock");
-        let lock_file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&lock_path)?;
-        fs2::FileExt::lock_exclusive(&lock_file)?;
+        for project_dir in self.project_dirs(project_root) {
+            if !project_dir.exists() {
+                continue;
+            }
+            let lock_path = project_dir.join(".index.lock");
+            let lock_file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&lock_path)?;
+            fs2::FileExt::lock_exclusive(&lock_file)?;
 
-        let mut summaries = self.list(project_root).unwrap_or_default();
-        summaries.retain(|s| s.id != *session_id);
-
-        let index_path = project_dir.join("index.json");
-        let tmp_path = index_path.with_extension("tmp");
-        std::fs::write(&tmp_path, serde_json::to_string_pretty(&summaries)?)?;
-        std::fs::rename(&tmp_path, &index_path)?;
-        // lock released when lock_file drops
+            let index_path = project_dir.join("index.json");
+            let mut summaries: Vec<SessionSummary> = if index_path.exists() {
+                serde_json::from_str(&std::fs::read_to_string(&index_path)?)?
+            } else {
+                Vec::new()
+            };
+            summaries.retain(|s| s.id != *session_id);
+            crate::storage::atomic::write_json_pretty_atomic(&index_path, &summaries)?;
+        }
         Ok(())
     }
-}
 
-fn project_hash(project_root: &Path) -> String {
-    use std::hash::Hasher;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(&project_root.to_string_lossy().to_string(), &mut hasher);
-    format!("{:016x}", hasher.finish())
+    fn legacy_session_dir(&self, project_root: &Path, session_id: &SessionId) -> PathBuf {
+        self.base_path
+            .join(crate::storage::legacy_project_storage_key(project_root))
+            .join(session_id.to_string())
+    }
+
+    fn project_dirs(&self, project_root: &Path) -> Vec<PathBuf> {
+        crate::storage::project_storage_keys(project_root)
+            .into_iter()
+            .map(|key| self.base_path.join(key))
+            .collect()
+    }
+
+    fn load_or_rebuild_project_index(
+        &self,
+        project_dir: &Path,
+    ) -> Result<Vec<SessionSummary>, anyhow::Error> {
+        let index_path = project_dir.join("index.json");
+        if index_path.exists() {
+            match serde_json::from_str::<Vec<SessionSummary>>(&std::fs::read_to_string(
+                &index_path,
+            )?) {
+                Ok(summaries) => return Ok(summaries),
+                Err(error) => {
+                    tracing::warn!(
+                        "rebuilding session index after parse failure at {}: {error}",
+                        index_path.display()
+                    );
+                }
+            }
+        }
+        self.rebuild_project_index(project_dir)
+    }
+
+    fn rebuild_project_index(
+        &self,
+        project_dir: &Path,
+    ) -> Result<Vec<SessionSummary>, anyhow::Error> {
+        if !project_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut summaries = Vec::new();
+        for entry in std::fs::read_dir(project_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let session_path = path.join("session.json");
+            if !session_path.exists() {
+                continue;
+            }
+            let content = match std::fs::read_to_string(&session_path) {
+                Ok(content) => content,
+                Err(error) => {
+                    tracing::warn!(
+                        "skipping unreadable session {}: {error}",
+                        session_path.display()
+                    );
+                    continue;
+                }
+            };
+            let session: Session = match serde_json::from_str(&content) {
+                Ok(session) => session,
+                Err(error) => {
+                    tracing::warn!(
+                        "skipping malformed session {}: {error}",
+                        session_path.display()
+                    );
+                    continue;
+                }
+            };
+            summaries.push(SessionSummary {
+                id: session.id,
+                name: session.name,
+                created_at: session.created_at,
+                updated_at: session.updated_at,
+                message_count: session.messages.len(),
+                tool_call_count: session.tool_call_history.len(),
+            });
+        }
+        summaries.sort_by_key(|summary| std::cmp::Reverse(summary.updated_at));
+        if !summaries.is_empty() {
+            crate::storage::atomic::write_json_pretty_atomic(
+                &project_dir.join("index.json"),
+                &summaries,
+            )?;
+        }
+        Ok(summaries)
+    }
 }
 
 fn transcript_to_markdown(session: &Session) -> String {

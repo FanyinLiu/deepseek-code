@@ -23,6 +23,7 @@ pub struct MissionEventsLoad {
 impl MissionStore {
     #[must_use]
     pub fn for_project(project_root: &Path) -> Self {
+        let project_root = crate::storage::config::normalize_project_root(project_root);
         Self {
             root: project_root.join(".octocode").join("missions"),
         }
@@ -89,9 +90,14 @@ impl MissionStore {
         write_pretty_json(&dir.join("mission.json"), &bundle.mission)?;
         write_pretty_json(&dir.join("state.json"), &bundle.state)?;
         write_pretty_json(&dir.join("plan.json"), &bundle.plan)?;
-        std::fs::write(dir.join("events.jsonl"), "")?;
-        for event in &bundle.events {
-            self.append_event(&bundle.mission.id, event)?;
+        let events_path = dir.join("events.jsonl");
+        if !bundle.events.is_empty() || !events_path.exists() {
+            let mut events_jsonl = String::new();
+            for event in &bundle.events {
+                events_jsonl.push_str(&serde_json::to_string(event)?);
+                events_jsonl.push('\n');
+            }
+            crate::storage::atomic::write_text_atomic(&events_path, &events_jsonl)?;
         }
         self.update_index(&bundle.mission, &bundle.state)?;
         Ok(())
@@ -107,12 +113,7 @@ impl MissionStore {
             std::fs::create_dir_all(parent)?;
         }
         let line = serde_json::to_string(event)?;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
-        use std::io::Write;
-        writeln!(file, "{line}")?;
+        crate::storage::atomic::append_jsonl_locked(&path, &line)?;
         Ok(())
     }
 
@@ -146,11 +147,17 @@ impl MissionStore {
 
     pub fn list(&self) -> Result<Vec<MissionSummary>, anyhow::Error> {
         let path = self.index_path();
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let content = std::fs::read_to_string(&path)?;
-        let mut summaries: Vec<MissionSummary> = serde_json::from_str(&content)?;
+        let mut summaries = if path.exists() {
+            match serde_json::from_str::<Vec<MissionSummary>>(&std::fs::read_to_string(&path)?) {
+                Ok(summaries) => summaries,
+                Err(error) => {
+                    tracing::warn!("rebuilding mission index after parse failure: {error}");
+                    self.rebuild_index_from_dirs()?
+                }
+            }
+        } else {
+            self.rebuild_index_from_dirs()?
+        };
         summaries.sort_by_key(|summary| std::cmp::Reverse(summary.updated_at));
         Ok(summaries)
     }
@@ -330,6 +337,14 @@ impl MissionStore {
     {
         let id = self.resolve_id(id_or_latest)?;
         let dir = self.mission_dir(&id);
+        std::fs::create_dir_all(&dir)?;
+        let lock_path = dir.join(".mission.lock");
+        let _lock_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        fs2::FileExt::lock_exclusive(&_lock_file)?;
         let mut mission: Mission = read_json(&dir.join("mission.json"))?;
         let plan: MissionPlan = read_json(&dir.join("plan.json"))?;
         let now = Utc::now();
@@ -342,17 +357,30 @@ impl MissionStore {
             updated_at: now,
         };
         mission.updated_at = now;
-        write_pretty_json(&dir.join("mission.json"), &mission)?;
-        write_pretty_json(&dir.join("state.json"), &state)?;
         let event = MissionEvent::new(mission.id.clone(), event_kind(state.clone()));
         self.append_event(&mission.id, &event)?;
+        write_pretty_json(&dir.join("mission.json"), &mission)?;
+        write_pretty_json(&dir.join("state.json"), &state)?;
         self.update_index(&mission, &state)?;
         self.load_bundle(&mission.id, true)
     }
 
     fn update_index(&self, mission: &Mission, state: &MissionState) -> Result<(), anyhow::Error> {
         std::fs::create_dir_all(&self.root)?;
-        let mut summaries = self.list().unwrap_or_default();
+        let lock_path = self.root.join(".index.lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        fs2::FileExt::lock_exclusive(&lock_file)?;
+
+        let index_path = self.index_path();
+        let mut summaries: Vec<MissionSummary> = if index_path.exists() {
+            serde_json::from_str(&std::fs::read_to_string(&index_path)?)?
+        } else {
+            Vec::new()
+        };
         let summary = MissionSummary {
             id: mission.id.clone(),
             goal: mission.goal.clone(),
@@ -369,21 +397,70 @@ impl MissionStore {
             summaries.push(summary);
         }
         summaries.sort_by_key(|summary| std::cmp::Reverse(summary.updated_at));
-        write_pretty_json(&self.index_path(), &summaries)?;
+        write_pretty_json(&index_path, &summaries)?;
         Ok(())
     }
 
     fn index_path(&self) -> PathBuf {
         self.root.join("index.json")
     }
+
+    fn rebuild_index_from_dirs(&self) -> Result<Vec<MissionSummary>, anyhow::Error> {
+        if !self.root.exists() {
+            return Ok(Vec::new());
+        }
+        let mut summaries = Vec::new();
+        for entry in std::fs::read_dir(&self.root)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let mission_path = path.join("mission.json");
+            let state_path = path.join("state.json");
+            if !mission_path.exists() || !state_path.exists() {
+                continue;
+            }
+            let mission: Mission = match read_json(&mission_path) {
+                Ok(mission) => mission,
+                Err(error) => {
+                    tracing::warn!(
+                        "skipping unreadable mission metadata {}: {error}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
+            let state: MissionState = match read_json(&state_path) {
+                Ok(state) => state,
+                Err(error) => {
+                    tracing::warn!(
+                        "skipping unreadable mission state {}: {error}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
+            summaries.push(MissionSummary {
+                id: mission.id.clone(),
+                goal: mission.goal.clone(),
+                dry_run: mission.dry_run,
+                status: state.status.clone(),
+                recommended_mode: mission.recommended_mode.clone(),
+                created_at: mission.created_at,
+                updated_at: mission.updated_at.max(state.updated_at),
+            });
+        }
+        summaries.sort_by_key(|summary| std::cmp::Reverse(summary.updated_at));
+        if !summaries.is_empty() {
+            write_pretty_json(&self.index_path(), &summaries)?;
+        }
+        Ok(summaries)
+    }
 }
 
 fn write_pretty_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), anyhow::Error> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, serde_json::to_string_pretty(value)?)?;
-    Ok(())
+    crate::storage::atomic::write_json_pretty_atomic(path, value)
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, anyhow::Error> {
@@ -455,5 +532,46 @@ mod tests {
                 .status,
             MissionStatus::Completed
         );
+    }
+
+    #[test]
+    fn mission_concurrent_notes_preserve_all_events() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let store = std::sync::Arc::new(MissionStore::for_project(root.path()));
+        let bundle = store
+            .create_dry_run("coordinate storage updates".to_string(), root.path().into())
+            .expect("create dry-run mission");
+
+        let mut handles = Vec::new();
+        for index in 0..24 {
+            let store = std::sync::Arc::clone(&store);
+            let id = bundle.mission.id.clone();
+            handles.push(std::thread::spawn(move || {
+                store
+                    .add_note(&id, format!("note-{index}"))
+                    .expect("add note");
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("thread joins");
+        }
+
+        let loaded = store
+            .load_events_lossy(&bundle.mission.id)
+            .expect("load events");
+        let mut notes = loaded
+            .events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                MissionEventKind::MissionNote { message } => Some(message.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        notes.sort();
+
+        assert_eq!(loaded.skipped_malformed_lines, 0);
+        assert_eq!(notes.len(), 24);
+        assert_eq!(notes.first().map(String::as_str), Some("note-0"));
+        assert!(notes.contains(&"note-23".to_string()));
     }
 }

@@ -163,7 +163,7 @@ impl EventLogStore {
     #[must_use]
     pub fn events_path(&self, project_root: &Path, session_id: &SessionId) -> PathBuf {
         self.base_path
-            .join(project_hash(project_root))
+            .join(crate::storage::project_storage_key(project_root))
             .join(session_id.to_string())
             .join("events.jsonl")
     }
@@ -171,7 +171,7 @@ impl EventLogStore {
     #[must_use]
     pub fn artifacts_dir(&self, project_root: &Path, session_id: &SessionId) -> PathBuf {
         self.base_path
-            .join(project_hash(project_root))
+            .join(crate::storage::project_storage_key(project_root))
             .join(session_id.to_string())
             .join("artifacts")
     }
@@ -186,12 +186,13 @@ impl EventLogStore {
         let dir = self.artifacts_dir(project_root, session_id);
         std::fs::create_dir_all(&dir)?;
         let filename = format!(
-            "{}-{}.md",
+            "{}-{}-{}.md",
             Utc::now().format("%Y%m%dT%H%M%SZ"),
+            Uuid::new_v4().simple(),
             artifact_slug(slug)
         );
         let path = dir.join(filename);
-        std::fs::write(&path, content)?;
+        crate::storage::atomic::write_text_atomic(&path, content)?;
         Ok(path)
     }
 
@@ -201,12 +202,7 @@ impl EventLogStore {
             std::fs::create_dir_all(parent)?;
         }
         let line = serde_json::to_string(event)?;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
-        use std::io::Write;
-        writeln!(file, "{line}")?;
+        crate::storage::atomic::append_jsonl_locked(&path, &line)?;
         Ok(())
     }
 
@@ -216,13 +212,28 @@ impl EventLogStore {
         session_id: &SessionId,
     ) -> Result<Vec<SessionEvent>, anyhow::Error> {
         let path = self.events_path(project_root, session_id);
+        let path = if path.exists() {
+            path
+        } else {
+            self.legacy_events_path(project_root, session_id)
+        };
         if !path.exists() {
             return Ok(Vec::new());
         }
         let content = std::fs::read_to_string(path)?;
+        let non_empty_lines: Vec<_> = content
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
         let mut events = Vec::new();
-        for line in content.lines().filter(|line| !line.trim().is_empty()) {
-            events.push(serde_json::from_str(line)?);
+        for (index, line) in non_empty_lines.iter().enumerate() {
+            match serde_json::from_str(line) {
+                Ok(event) => events.push(event),
+                Err(error) if index + 1 == non_empty_lines.len() => {
+                    tracing::warn!("ignored malformed final session event line: {error}");
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
         Ok(events)
     }
@@ -243,6 +254,13 @@ impl EventLogStore {
     ) -> Result<Option<SwarmResumeState>, anyhow::Error> {
         let events = self.load(project_root, session_id)?;
         Ok(latest_swarm_state_from_events(&events))
+    }
+
+    fn legacy_events_path(&self, project_root: &Path, session_id: &SessionId) -> PathBuf {
+        self.base_path
+            .join(crate::storage::legacy_project_storage_key(project_root))
+            .join(session_id.to_string())
+            .join("events.jsonl")
     }
 }
 
@@ -394,13 +412,6 @@ pub fn latest_swarm_state_from_events(events: &[SessionEvent]) -> Option<SwarmRe
     state
 }
 
-fn project_hash(project_root: &Path) -> String {
-    use std::hash::Hasher;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(&project_root.to_string_lossy().to_string(), &mut hasher);
-    format!("{:016x}", hasher.finish())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,6 +485,77 @@ mod tests {
 
         store.append(&root, &event).expect("append compact event");
         let events = store.load(&root, &session_id).expect("load events");
+
+        assert_eq!(events, vec![event]);
+    }
+
+    #[test]
+    fn session_event_concurrent_appends_preserve_all_events() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = std::sync::Arc::new(EventLogStore::new(temp.path().to_path_buf()));
+        let root = temp.path().join("project");
+        let session_id = SessionId::new_v4();
+
+        let mut handles = Vec::new();
+        for index in 0..32 {
+            let store = std::sync::Arc::clone(&store);
+            let root = root.clone();
+            handles.push(std::thread::spawn(move || {
+                let event = SessionEvent::new(
+                    session_id,
+                    None,
+                    SessionEventKind::UserMessage {
+                        content: format!("message-{index}"),
+                    },
+                );
+                store.append(&root, &event).expect("append event");
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("thread joins");
+        }
+
+        let events = store.load(&root, &session_id).expect("load events");
+        let mut messages = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                SessionEventKind::UserMessage { content } => Some(content.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        messages.sort();
+
+        assert_eq!(messages.len(), 32);
+        assert_eq!(messages.first().map(String::as_str), Some("message-0"));
+        assert!(messages.contains(&"message-31".to_string()));
+    }
+
+    #[test]
+    fn corrupt_final_jsonl_line_keeps_prior_session_events() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = EventLogStore::new(temp.path().to_path_buf());
+        let root = temp.path().join("project");
+        let session_id = SessionId::new_v4();
+        let event = SessionEvent::new(
+            session_id,
+            None,
+            SessionEventKind::UserMessage {
+                content: "hello".to_string(),
+            },
+        );
+        store.append(&root, &event).expect("append event");
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(store.events_path(&root, &session_id))
+                .expect("open events");
+            use std::io::Write;
+            writeln!(file, "{{not-json").expect("append broken final line");
+        }
+
+        let events = store
+            .load(&root, &session_id)
+            .expect("load lossy final line");
 
         assert_eq!(events, vec![event]);
     }
