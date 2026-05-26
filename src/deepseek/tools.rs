@@ -851,6 +851,11 @@ fn run_subagent_def() -> ToolDefinition {
                     "max_turns": {
                         "type": "integer",
                         "description": "Maximum tool-call turns before forcing completion (default: 10)"
+                    },
+                    "isolation": {
+                        "type": "string",
+                        "description": "Filesystem isolation: 'none' (default) shares the parent working tree; 'worktree' runs the subagent in a temporary git worktree and surfaces any changes back to you.",
+                        "enum": ["none", "worktree"]
                     }
                 },
                 "required": ["description", "prompt"]

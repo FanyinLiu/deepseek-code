@@ -431,6 +431,12 @@ pub struct SubagentToolArgs {
     /// Run the subagent in the background (return task ID instead of waiting).
     #[serde(default)]
     pub background: bool,
+    /// Filesystem isolation strategy. `Worktree` runs the subagent in a
+    /// temporary `git worktree` so writes don't pollute the parent tree;
+    /// any changes are returned on the subagent result. Defaults to
+    /// `None` for backwards compatibility.
+    #[serde(default)]
+    pub isolation: SubagentIsolation,
 }
 
 fn default_subagent_type() -> SubagentType {

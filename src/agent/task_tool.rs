@@ -64,6 +64,7 @@ impl TaskToolHandler {
         if let Some(max_turns) = args.max_turns {
             config.max_turns = max_turns;
         }
+        config.isolation = args.isolation;
         config.spawn_depth = self.spawn_depth;
 
         // Build task — merge optional parent context into the task context
@@ -186,6 +187,7 @@ mod tests {
             model: None,
             max_turns: None,
             background: false,
+            isolation: crate::agent::subagent::SubagentIsolation::None,
         }
     }
 
@@ -207,6 +209,33 @@ mod tests {
             &general_args,
             &general_config,
             true
+        ));
+    }
+
+    #[test]
+    fn subagent_tool_args_deserializes_isolation_field() {
+        let json = serde_json::json!({
+            "description": "scan",
+            "prompt": "scan",
+            "isolation": "worktree"
+        });
+        let args: SubagentToolArgs = serde_json::from_value(json).expect("deserialize");
+        assert!(matches!(
+            args.isolation,
+            crate::agent::subagent::SubagentIsolation::Worktree
+        ));
+    }
+
+    #[test]
+    fn subagent_tool_args_defaults_isolation_to_none() {
+        let json = serde_json::json!({
+            "description": "scan",
+            "prompt": "scan"
+        });
+        let args: SubagentToolArgs = serde_json::from_value(json).expect("deserialize");
+        assert!(matches!(
+            args.isolation,
+            crate::agent::subagent::SubagentIsolation::None
         ));
     }
 
