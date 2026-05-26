@@ -180,6 +180,11 @@ pub struct TuiApp {
     pub current_task_title: String,
     pub pending_user_message: Option<String>,
     pub queued_inputs: VecDeque<String>,
+    /// Set by custom slash commands whose frontmatter declares
+    /// `allowed-tools:`. The TUI submit handler hands this off to the
+    /// orchestrator when the queued prompt is next consumed, so the
+    /// per-command allowlist applies only to that one turn.
+    pub pending_allowed_tools: Option<Vec<String>>,
     pending_side_outputs: VecDeque<String>,
     pub stream_buffer: String,
     pub is_streaming: bool,
@@ -760,6 +765,7 @@ impl TuiApp {
             current_task_title: String::new(),
             pending_user_message: None,
             queued_inputs: VecDeque::new(),
+            pending_allowed_tools: None,
             pending_side_outputs: VecDeque::new(),
             stream_buffer: String::new(),
             is_streaming: false,
@@ -7208,6 +7214,16 @@ pub async fn run_tui(
                     }
                 },
                 TuiAction::Submit(mut input) => {
+                    // Hand any pending per-command allowlist over to the
+                    // orchestrator before processing this input. The TUI
+                    // sees both raw user keystrokes and rendered prompt
+                    // commands here; only the second pass (after a slash
+                    // command has populated `pending_allowed_tools`) carries
+                    // an allowlist to consume.
+                    let staged_allowed_tools = app.pending_allowed_tools.take();
+                    if let Some(orchestrator) = orchestrator.as_mut() {
+                        orchestrator.stage_allowed_tools(staged_allowed_tools);
+                    }
                     // Slash commands
                     let mut registry = crate::commands::CommandRegistry::new();
                     registry.load_prompt_commands(&root);

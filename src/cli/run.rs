@@ -19,6 +19,7 @@ pub async fn run(
     output_format: TurnOutputFormat,
     tool_approval: ToolApprovalPolicy,
     model_override: Option<String>,
+    allowed_tools: Option<Vec<String>>,
 ) -> Result<(), anyhow::Error> {
     let root = match resolve_project_root(project_root, "run") {
         Ok(root) => root,
@@ -32,10 +33,13 @@ pub async fn run(
         Ok(api_key) => api_key,
         Err(error) => return json_error_result(output_format, error),
     };
-    let config = match crate::storage::Config::load(Some(&root)) {
+    let mut config = match crate::storage::Config::load(Some(&root)) {
         Ok(config) => config,
         Err(error) => return json_error_result(output_format, error),
     };
+    if allowed_tools.is_some() {
+        config.policy.allowed_tools = allowed_tools;
+    }
     let provider = build_provider(&config.provider, api_key);
     let client = provider.create_deepseek_client();
     let model =

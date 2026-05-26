@@ -275,6 +275,18 @@ fn evaluate_tool_inner(
     project_root: &Path,
     policy: &PolicyConfig,
 ) -> PolicyDecision {
+    if let Some(allowed) = &policy.allowed_tools {
+        if !allowed.iter().any(|name| name == tool_name) {
+            let allowlist = allowed.join(", ");
+            return PolicyDecision::deny(
+                format!("tool {tool_name} blocked by command allowed-tools"),
+                format!("Blocked: {tool_name}"),
+                "Tool not in the active command's allowed-tools list",
+                RiskLevel::Blocked,
+                format!("active allowed-tools: {allowlist}"),
+            );
+        }
+    }
     let auto_approve_safe_read = policy.auto_approve_safe_read || policy.auto_mode;
     let args: serde_json::Value = match serde_json::from_str(arguments) {
         Ok(args) => args,
@@ -874,6 +886,54 @@ mod tests {
 
     fn args(value: serde_json::Value) -> String {
         value.to_string()
+    }
+
+    #[test]
+    fn allowed_tools_blocks_tool_outside_allowlist() {
+        let policy = PolicyConfig {
+            allowed_tools: Some(vec!["read_file".to_string(), "glob".to_string()]),
+            ..PolicyConfig::default()
+        };
+        let decision = evaluate_tool(
+            "write_file",
+            &args(serde_json::json!({ "path": "a.txt", "content": "x" })),
+            Path::new("."),
+            &policy,
+        );
+        assert_eq!(decision.action, PolicyAction::Deny);
+        assert_eq!(decision.display.risk_level, RiskLevel::Blocked);
+    }
+
+    #[test]
+    fn allowed_tools_permits_tool_in_allowlist() {
+        let policy = PolicyConfig {
+            auto_approve_safe_read: true,
+            allowed_tools: Some(vec!["glob".to_string()]),
+            ..PolicyConfig::default()
+        };
+        let decision = evaluate_tool(
+            "glob",
+            &args(serde_json::json!({ "pattern": "src/**" })),
+            Path::new("."),
+            &policy,
+        );
+        assert_eq!(decision.action, PolicyAction::Allow);
+    }
+
+    #[test]
+    fn allowed_tools_none_means_unrestricted() {
+        let policy = PolicyConfig {
+            allowed_tools: None,
+            ..PolicyConfig::default()
+        };
+        let decision = evaluate_tool(
+            "glob",
+            &args(serde_json::json!({ "pattern": "src/**" })),
+            Path::new("."),
+            &policy,
+        );
+        // Without an allowlist, glob still passes through (it is a SafeRead).
+        assert_ne!(decision.action, PolicyAction::Deny);
     }
 
     fn mcp_metadata(

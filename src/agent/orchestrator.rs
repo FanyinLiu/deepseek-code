@@ -479,6 +479,15 @@ pub struct Orchestrator {
     event_log_store: Option<EventLogStore>,
     swarm_cancel_token: Option<Arc<AtomicBool>>,
     lifecycle_hooks_started: bool,
+    /// Optional per-turn allowed-tools allowlist consumed on the next turn.
+    /// Populated when the user runs a custom slash command whose frontmatter
+    /// declares `allowed-tools:`; cleared right after the turn-scoped policy
+    /// is materialized so the restriction does not leak into later turns.
+    pending_allowed_tools: Option<Vec<String>>,
+    /// Mirror of `pending_allowed_tools` for the lifetime of the current
+    /// turn. Picked up at the start of `run_turn_inner`, applied to every
+    /// policy clone the turn consults, and cleared on turn exit.
+    current_turn_allowed_tools: Option<Vec<String>>,
 }
 
 impl Orchestrator {
@@ -498,6 +507,24 @@ impl Orchestrator {
             event_log_store,
             swarm_cancel_token: None,
             lifecycle_hooks_started: false,
+            pending_allowed_tools: None,
+            current_turn_allowed_tools: None,
+        }
+    }
+
+    /// Stage an allowed-tools allowlist that the next turn must enforce.
+    /// Calling again before the turn runs replaces the pending list (so the
+    /// most recent custom command wins).
+    pub fn stage_allowed_tools(&mut self, allowed_tools: Option<Vec<String>>) {
+        self.pending_allowed_tools = allowed_tools;
+    }
+
+    /// Materialize the active allowed-tools allowlist into a policy clone.
+    /// Called right after a `PolicyConfig::clone()` so the next
+    /// `evaluate_tool` call honors per-command restrictions.
+    fn apply_active_allowed_tools(&self, policy: &mut crate::storage::config::PolicyConfig) {
+        if let Some(allowed) = &self.current_turn_allowed_tools {
+            policy.allowed_tools = Some(allowed.clone());
         }
     }
 
@@ -895,7 +922,8 @@ impl Orchestrator {
         };
         let runtime_config =
             crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
-        let policy_config = runtime_config.policy.clone();
+        let mut policy_config = runtime_config.policy.clone();
+        self.apply_active_allowed_tools(&mut policy_config);
         let patch_policy = policy::evaluate_tool(
             &call.function.name,
             &call.function.arguments,
@@ -1085,7 +1113,8 @@ impl Orchestrator {
         }
         let runtime_config =
             crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
-        let policy_config = runtime_config.policy.clone();
+        let mut policy_config = runtime_config.policy.clone();
+        self.apply_active_allowed_tools(&mut policy_config);
         let backend = crate::tools::backend::LocalToolBackend;
         let mut lines = Vec::new();
         let mut failed = false;
@@ -1420,6 +1449,21 @@ impl Orchestrator {
     }
 
     async fn run_turn_inner(
+        &mut self,
+        user_input: &str,
+        images: &[String],
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+        force_lane: Option<ExecutionLane>,
+    ) -> Result<(), anyhow::Error> {
+        self.current_turn_allowed_tools = self.pending_allowed_tools.take();
+        let result = self
+            .run_turn_inner_body(user_input, images, event_tx, force_lane)
+            .await;
+        self.current_turn_allowed_tools = None;
+        result
+    }
+
+    async fn run_turn_inner_body(
         &mut self,
         user_input: &str,
         images: &[String],
@@ -2301,7 +2345,8 @@ impl Orchestrator {
 
         let runtime_config =
             crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
-        let policy_config = runtime_config.policy.clone();
+        let mut policy_config = runtime_config.policy.clone();
+        self.apply_active_allowed_tools(&mut policy_config);
         let hooks_config = runtime_config.hooks.clone();
 
         // Separate subagent calls from regular tool calls

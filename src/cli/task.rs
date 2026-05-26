@@ -78,6 +78,7 @@ pub async fn task(
                 output_format,
                 ToolApprovalPolicy::Deny,
                 None,
+                None,
             )
             .await;
             match result {

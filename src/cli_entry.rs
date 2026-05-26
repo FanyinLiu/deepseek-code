@@ -1406,6 +1406,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
                 output_format.turn_output_format(),
                 tool_approval,
                 None,
+                None,
             )
             .await
         }

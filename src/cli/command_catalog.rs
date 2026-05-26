@@ -56,6 +56,7 @@ struct CustomCommandPayload {
     path: String,
     argument_hint: Option<String>,
     model: Option<String>,
+    allowed_tools: Option<Vec<String>>,
     conflicts_builtin: bool,
 }
 
@@ -67,6 +68,7 @@ struct CustomCommandRunPayload {
     path: String,
     argument_hint: Option<String>,
     model: Option<String>,
+    allowed_tools: Option<Vec<String>>,
     args: Vec<String>,
     prompt: String,
     dry_run: bool,
@@ -80,6 +82,7 @@ struct CustomCommandDocument {
     path: PathBuf,
     argument_hint: Option<String>,
     model: Option<String>,
+    allowed_tools: Option<Vec<String>>,
     prompt_template: String,
 }
 
@@ -171,6 +174,7 @@ fn show(root: &Path, name: &str, json: bool) -> Result<(), anyhow::Error> {
         path: command.path.display().to_string(),
         argument_hint: command.argument_hint.clone(),
         model: command.model.clone(),
+        allowed_tools: command.allowed_tools.clone(),
         args: Vec::new(),
         prompt: command.prompt_template.clone(),
         dry_run: true,
@@ -201,6 +205,7 @@ async fn run_custom_command(
         path: command.path.display().to_string(),
         argument_hint: command.argument_hint,
         model: command.model.clone(),
+        allowed_tools: command.allowed_tools.clone(),
         args,
         prompt,
         dry_run,
@@ -233,6 +238,7 @@ async fn run_custom_command(
         output_format,
         crate::cli::ToolApprovalPolicy::Deny,
         payload.model.clone(),
+        payload.allowed_tools.clone(),
     )
     .await
 }
@@ -248,6 +254,9 @@ fn print_custom_command(payload: &CustomCommandRunPayload, title: &str) {
     }
     if let Some(model) = &payload.model {
         println!("Model: {model}");
+    }
+    if let Some(tools) = &payload.allowed_tools {
+        println!("Allowed tools: {}", tools.join(", "));
     }
     if !payload.args.is_empty() {
         println!("Input args: {}", payload.args.join(" "));
@@ -455,12 +464,14 @@ fn collect_custom_commands(
         let description = read_custom_description(&path).ok().flatten();
         let argument_hint = read_custom_argument_hint(&path).ok().flatten();
         let model = read_custom_model(&path).ok().flatten();
+        let allowed_tools = read_custom_allowed_tools(&path).ok().flatten();
         out.push(CustomCommandPayload {
             conflicts_builtin: builtin_names.contains(&name),
             name,
             description,
             argument_hint,
             model,
+            allowed_tools,
             source,
             path: path.display().to_string(),
         });
@@ -673,6 +684,7 @@ fn read_custom_command_document(
         path: path.to_path_buf(),
         argument_hint: parsed.argument_hint,
         model: parsed.model,
+        allowed_tools: parsed.allowed_tools,
         prompt_template: parsed.prompt_template,
     })
 }
@@ -681,6 +693,7 @@ struct ParsedCustomCommand {
     description: Option<String>,
     argument_hint: Option<String>,
     model: Option<String>,
+    allowed_tools: Option<Vec<String>>,
     prompt_template: String,
 }
 
@@ -702,6 +715,7 @@ fn custom_command_from_toml(content: &str) -> Result<ParsedCustomCommand, anyhow
         .and_then(toml::Value::as_str)
         .map(trim_description)
         .filter(|value| !value.is_empty());
+    let allowed_tools = allowed_tools_from_toml(&value);
     let prompt = value
         .get("prompt")
         .or_else(|| value.get("template"))
@@ -714,6 +728,7 @@ fn custom_command_from_toml(content: &str) -> Result<ParsedCustomCommand, anyhow
         description,
         argument_hint,
         model,
+        allowed_tools,
         prompt_template: prompt,
     })
 }
@@ -723,8 +738,51 @@ fn custom_command_from_markdown(content: &str) -> ParsedCustomCommand {
         description: description_from_markdown(content),
         argument_hint: argument_hint_from_markdown(content),
         model: model_from_markdown(content),
+        allowed_tools: allowed_tools_from_markdown(content),
         prompt_template: markdown_body(content).trim().to_string(),
     }
+}
+
+fn allowed_tools_from_toml(value: &toml::Value) -> Option<Vec<String>> {
+    let raw = value
+        .get("allowed_tools")
+        .or_else(|| value.get("allowed-tools"))?;
+    if let Some(array) = raw.as_array() {
+        let tools: Vec<String> = array
+            .iter()
+            .filter_map(|item| item.as_str().map(|s| s.trim().to_string()))
+            .filter(|s| !s.is_empty())
+            .collect();
+        if tools.is_empty() {
+            None
+        } else {
+            Some(tools)
+        }
+    } else if let Some(text) = raw.as_str() {
+        crate::commands::parse_allowed_tools_value(text)
+    } else {
+        None
+    }
+}
+
+fn allowed_tools_from_markdown(content: &str) -> Option<Vec<String>> {
+    let frontmatter = markdown_frontmatter(content)?;
+    for line in frontmatter.lines() {
+        let line = line.trim();
+        for key in [
+            "allowed-tools:",
+            "allowed_tools:",
+            "allowed-tools =",
+            "allowed_tools =",
+        ] {
+            if let Some(value) = line.strip_prefix(key) {
+                if let Some(tools) = crate::commands::parse_allowed_tools_value(value) {
+                    return Some(tools);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn model_from_markdown(content: &str) -> Option<String> {
@@ -758,6 +816,18 @@ fn read_custom_argument_hint(path: &Path) -> Result<Option<String>, anyhow::Erro
             .filter(|value| !value.is_empty()));
     }
     Ok(argument_hint_from_markdown(&content))
+}
+
+fn read_custom_allowed_tools(path: &Path) -> Result<Option<Vec<String>>, anyhow::Error> {
+    let content = std::fs::read_to_string(path)?;
+    if matches!(
+        path.extension().and_then(|value| value.to_str()),
+        Some("toml")
+    ) {
+        let value: toml::Value = content.parse()?;
+        return Ok(allowed_tools_from_toml(&value));
+    }
+    Ok(allowed_tools_from_markdown(&content))
 }
 
 fn read_custom_model(path: &Path) -> Result<Option<String>, anyhow::Error> {

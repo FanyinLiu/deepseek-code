@@ -112,6 +112,12 @@ pub struct PolicyConfig {
     pub autonomy_level: AutonomyLevel,
     #[serde(default)]
     pub command_sandbox: CommandSandboxConfig,
+    /// Optional per-turn allowlist of tool names. `None` = no restriction;
+    /// `Some(set)` = block any tool not in the set. Populated by custom
+    /// slash commands declaring `allowed-tools:` in their frontmatter; not
+    /// persisted to disk.
+    #[serde(skip)]
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -498,6 +504,7 @@ impl Default for PolicyConfig {
             auto_mode: false,
             autonomy_level: AutonomyLevel::Off,
             command_sandbox: CommandSandboxConfig::default(),
+            allowed_tools: None,
         }
     }
 }
@@ -1044,6 +1051,7 @@ impl PolicyConfig {
             command_sandbox: self
                 .command_sandbox
                 .merge_command_sandbox(patch.command_sandbox),
+            allowed_tools: self.allowed_tools,
         }
     }
 }

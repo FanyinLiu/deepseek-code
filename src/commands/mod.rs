@@ -122,6 +122,7 @@ pub struct PromptCommand {
     pub body: String,
     pub argument_hint: Option<String>,
     pub model: Option<String>,
+    pub allowed_tools: Option<Vec<String>>,
     pub source_path: std::path::PathBuf,
 }
 
@@ -131,6 +132,7 @@ pub struct ParsedPrompt {
     pub body: String,
     pub argument_hint: Option<String>,
     pub model: Option<String>,
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 /// Borrowed view over a slash command, whether built-in or user-defined.
@@ -312,6 +314,7 @@ impl CommandRegistry {
                     body: parsed.body,
                     argument_hint: parsed.argument_hint,
                     model: parsed.model,
+                    allowed_tools: parsed.allowed_tools,
                     source_path: path,
                 },
             );
@@ -368,6 +371,11 @@ impl CommandRegistry {
                     }
                 }
             }
+            let mut tools_note = String::new();
+            if let Some(tools) = &prompt.allowed_tools {
+                ctx.app.pending_allowed_tools = Some(tools.clone());
+                tools_note = format!(" [tools={}]", tools.join(","));
+            }
             ctx.app.queued_inputs.push_back(rendered);
             let label = prompt
                 .source_path
@@ -375,8 +383,8 @@ impl CommandRegistry {
                 .and_then(|s| s.to_str())
                 .unwrap_or("command");
             return Some(Ok(Some(format!(
-                "→ {} ({}){}",
-                prompt.name, label, model_note
+                "→ {} ({}){}{}",
+                prompt.name, label, model_note, tools_note
             ))));
         }
 
@@ -494,6 +502,7 @@ fn parse_prompt_command(content: &str) -> ParsedPrompt {
             let mut description = String::new();
             let mut argument_hint = None;
             let mut model = None;
+            let mut allowed_tools = None;
             for line in frontmatter.lines() {
                 let line = line.trim();
                 if let Some(rest) = line.strip_prefix("description:") {
@@ -511,6 +520,11 @@ fn parse_prompt_command(content: &str) -> ParsedPrompt {
                     if !value.is_empty() {
                         model = Some(value);
                     }
+                } else if let Some(rest) = line
+                    .strip_prefix("allowed-tools:")
+                    .or_else(|| line.strip_prefix("allowed_tools:"))
+                {
+                    allowed_tools = parse_allowed_tools_value(rest);
                 }
             }
             if description.is_empty() {
@@ -521,6 +535,7 @@ fn parse_prompt_command(content: &str) -> ParsedPrompt {
                 body,
                 argument_hint,
                 model,
+                allowed_tools,
             };
         }
     }
@@ -540,6 +555,36 @@ fn parse_prompt_command(content: &str) -> ParsedPrompt {
         body,
         argument_hint: None,
         model: None,
+        allowed_tools: None,
+    }
+}
+
+/// Parse the value of an `allowed-tools:` frontmatter line.
+///
+/// Accepts a bracketed YAML list (`[a, b, c]`) or a comma-separated string.
+/// Returns `Some` only when at least one non-empty tool name is present.
+#[must_use]
+pub fn parse_allowed_tools_value(raw: &str) -> Option<Vec<String>> {
+    let trimmed = raw.trim().trim_matches('"').trim_matches('\'');
+    let inner = trimmed
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    let tools: Vec<String> = inner
+        .split(',')
+        .map(|piece| {
+            piece
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string()
+        })
+        .filter(|piece| !piece.is_empty())
+        .collect();
+    if tools.is_empty() {
+        None
+    } else {
+        Some(tools)
     }
 }
 
@@ -3508,6 +3553,7 @@ mod tests {
             body: "Look at $ARGUMENTS carefully.".to_string(),
             argument_hint: None,
             model: None,
+            allowed_tools: None,
             source_path: std::path::PathBuf::from("test.md"),
         };
         assert_eq!(cmd.render("src/main.rs"), "Look at src/main.rs carefully.");
@@ -3521,6 +3567,7 @@ mod tests {
             body: "Compare $1 with $2 (full args: $ARGUMENTS).".to_string(),
             argument_hint: None,
             model: None,
+            allowed_tools: None,
             source_path: std::path::PathBuf::from("test.md"),
         };
         let rendered = cmd.render("HEAD~1 HEAD");
@@ -3538,6 +3585,7 @@ mod tests {
             body: "first=$1 second=$2".to_string(),
             argument_hint: None,
             model: None,
+            allowed_tools: None,
             source_path: std::path::PathBuf::from("test.md"),
         };
         assert_eq!(cmd.render("only"), "first=only second=");
@@ -3575,6 +3623,71 @@ mod tests {
             .get("/git:status")
             .expect("/git:status should load");
         assert_eq!(cmd.description, "show git status");
+    }
+
+    #[test]
+    fn parse_allowed_tools_handles_string_and_array_forms() {
+        assert_eq!(
+            parse_allowed_tools_value("read_file, glob, grep"),
+            Some(vec![
+                "read_file".to_string(),
+                "glob".to_string(),
+                "grep".to_string()
+            ])
+        );
+        assert_eq!(
+            parse_allowed_tools_value("[ read_file, glob ]"),
+            Some(vec!["read_file".to_string(), "glob".to_string()])
+        );
+        assert!(parse_allowed_tools_value("").is_none());
+        assert!(parse_allowed_tools_value("[]").is_none());
+    }
+
+    #[test]
+    fn parse_prompt_command_reads_allowed_tools_frontmatter() {
+        let content =
+            "---\ndescription: locked-down lookup\nallowed-tools: read_file, glob\n---\nDo it";
+        let parsed = parse_prompt_command(content);
+        assert_eq!(
+            parsed.allowed_tools.as_deref(),
+            Some(&["read_file".to_string(), "glob".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn prompt_command_with_allowed_tools_stages_on_app() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cmd_dir = temp.path().join(".octocode").join("commands");
+        std::fs::create_dir_all(&cmd_dir).expect("mkdir");
+        std::fs::write(
+            cmd_dir.join("safelook.md"),
+            "---\ndescription: read-only lookup\nallowed-tools: read_file, glob\n---\nLook at $ARGUMENTS",
+        )
+        .expect("write");
+
+        let mut reg = CommandRegistry::new();
+        reg.load_prompt_commands(temp.path());
+        let mut app = crate::tui::app::TuiApp::new(
+            crate::deepseek::DeepSeekModel::Flash,
+            crate::deepseek::ThinkingMode::Auto,
+            None,
+            std::path::PathBuf::from("."),
+        );
+        let mut yolo = false;
+        let mut ctx = CommandContext {
+            app: &mut app,
+            project_root: temp.path(),
+            yolo_mode: &mut yolo,
+            mcp_status: "MCP: not initialized",
+            background_tasks: &[],
+        };
+        reg.execute("/safelook src/", &mut ctx)
+            .expect("handled")
+            .expect("ok");
+        assert_eq!(
+            app.pending_allowed_tools.as_deref(),
+            Some(&["read_file".to_string(), "glob".to_string()][..])
+        );
     }
 
     #[test]
