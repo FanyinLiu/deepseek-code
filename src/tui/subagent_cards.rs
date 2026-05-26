@@ -62,6 +62,11 @@ pub struct SubagentCard {
     pub files_written: usize,
     pub token_usage: u64,
     pub is_background: bool,
+    /// When the subagent ran with `Worktree` isolation and left changes,
+    /// this is the `git worktree` path + branch the user can cd into.
+    /// Surfaced as a final-line note so the parent doesn't lose track of
+    /// the artifact.
+    pub worktree: Option<crate::agent::subagent::WorktreeArtifact>,
 }
 
 impl SubagentCard {
@@ -85,6 +90,7 @@ impl SubagentCard {
             files_written: 0,
             token_usage: 0,
             is_background: false,
+            worktree: None,
         }
     }
 
@@ -119,6 +125,7 @@ impl SubagentCard {
         self.files_read = result.files_read.len();
         self.files_written = result.files_written.len();
         self.token_usage = result.token_usage;
+        self.worktree = result.worktree.clone();
     }
 
     pub fn mark_waiting_approval(&mut self, tool_name: &str) {
@@ -204,6 +211,22 @@ pub fn render_subagent_cards(
                 ]));
             }
         }
+        // Surface worktree artifact path so the parent knows where the
+        // subagent left its changes after a Worktree-isolated run.
+        if let Some(worktree) = card.worktree.as_ref() {
+            if lines.len() < area.height as usize {
+                let desc_width = area.width.saturating_sub(6) as usize;
+                let note = format!(
+                    "worktree {} · branch {}",
+                    worktree.path.display(),
+                    worktree.branch
+                );
+                lines.push(Line::from(vec![
+                    Span::styled("  ⌥ ", Style::default().fg(p.divider)),
+                    Span::styled(truncate(&note, desc_width), Style::default().fg(p.accent)),
+                ]));
+            }
+        }
         if lines.len() < area.height as usize {
             lines.push(Line::from(""));
         }
@@ -275,6 +298,39 @@ mod tests {
     #[test]
     fn truncate_is_char_safe() {
         assert_eq!(truncate("多智能体任务", 5), "多智能体…");
+    }
+
+    #[test]
+    fn completed_card_records_worktree_artifact() {
+        let mut card = SubagentCard::new("agent-1", "worker", "Implement isolation");
+        let now = chrono::Utc::now();
+        let artifact = crate::agent::subagent::WorktreeArtifact {
+            path: std::path::PathBuf::from("/tmp/octo-wt-abc"),
+            branch: "octo-subagent/abc".to_string(),
+        };
+        let result = SubagentResult {
+            success: true,
+            summary: "Made edits".to_string(),
+            output: "done".to_string(),
+            tool_calls_used: Vec::new(),
+            files_read: Vec::new(),
+            files_written: vec!["src/foo.rs".to_string()],
+            duration_ms: 50,
+            token_usage: 10,
+            error: None,
+            started_at: now,
+            completed_at: now,
+            worktree: Some(artifact.clone()),
+        };
+        card.complete(&result);
+        assert_eq!(
+            card.worktree.as_ref().map(|w| w.branch.as_str()),
+            Some("octo-subagent/abc")
+        );
+        assert_eq!(
+            card.worktree.as_ref().map(|w| w.path.clone()),
+            Some(artifact.path)
+        );
     }
 
     #[test]
