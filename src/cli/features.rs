@@ -95,6 +95,20 @@ pub struct FeatureStatus {
     pub session_storage_present: bool,
     pub plan_mode_present: bool,
     pub swarm_subagent_support_present: bool,
+    /// Number of user-defined slash commands discovered in
+    /// `.octocode/commands` (project) + `~/.octocode/commands` (user).
+    pub custom_slash_commands_count: usize,
+    /// Number of skills discovered under `.octocode/skills` (project) +
+    /// `~/.octocode/skills` (user) — auto-injected at turn start when their
+    /// frontmatter keywords match the user's input.
+    pub skills_count: usize,
+    /// Whether the cwd is a git repo *and* `git worktree` works here, so
+    /// `octo agent run --isolation worktree` will actually create an
+    /// isolated worktree.
+    pub worktree_isolation_available: bool,
+    /// Number of HookEvent variants that have at least one command
+    /// configured in settings.json `hooks.*`.
+    pub configured_hook_events: usize,
     pub config_paths: ConfigPaths,
 }
 
@@ -181,6 +195,12 @@ pub fn status_payload(project_root: &Path) -> FeatureStatus {
         .count();
     let custom_agents_count = agent_names.len().saturating_sub(built_in_agents_count);
 
+    let mut command_registry = crate::commands::CommandRegistry::new();
+    let custom_slash_commands_count = command_registry.load_prompt_commands(project_root);
+    let skills_count = count_skills(project_root);
+    let worktree_isolation_available = git_worktree_works_here(project_root);
+    let configured_hook_events = count_configured_hook_events(&config.hooks);
+
     FeatureStatus {
         tui_available: true,
         deepseek_config_status,
@@ -193,8 +213,79 @@ pub fn status_payload(project_root: &Path) -> FeatureStatus {
         session_storage_present: true,
         plan_mode_present: true,
         swarm_subagent_support_present: true,
+        custom_slash_commands_count,
+        skills_count,
+        worktree_isolation_available,
+        configured_hook_events,
         config_paths: config_paths(project_root),
     }
+}
+
+fn count_skills(project_root: &Path) -> usize {
+    let mut total = 0;
+    for dir in skill_dirs(project_root) {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if entry
+                    .file_type()
+                    .map(|t| t.is_dir())
+                    .unwrap_or(false)
+                    && entry.path().join("SKILL.md").is_file()
+                {
+                    total += 1;
+                }
+            }
+        }
+    }
+    total
+}
+
+fn skill_dirs(project_root: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![project_root.join(".octocode").join("skills")];
+    if let Some(home) = crate::storage::user_home_dir() {
+        dirs.push(home.join(".octocode").join("skills"));
+    }
+    dirs
+}
+
+fn git_worktree_works_here(project_root: &Path) -> bool {
+    // `git rev-parse --is-inside-work-tree` returns 0 only inside a real
+    // git repo; if that holds and `git worktree list` succeeds, we can
+    // create isolated worktrees.
+    let inside = std::process::Command::new("git")
+        .arg("-C")
+        .arg(project_root)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output();
+    let inside_ok = matches!(inside, Ok(out) if out.status.success() && out.stdout.starts_with(b"true"));
+    if !inside_ok {
+        return false;
+    }
+    matches!(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(project_root)
+            .args(["worktree", "list"])
+            .output(),
+        Ok(out) if out.status.success()
+    )
+}
+
+fn count_configured_hook_events(hooks: &crate::storage::config::HooksConfig) -> usize {
+    [
+        crate::hooks::HookEvent::UserPromptSubmit,
+        crate::hooks::HookEvent::PreToolUse,
+        crate::hooks::HookEvent::PostToolUse,
+        crate::hooks::HookEvent::SessionStart,
+        crate::hooks::HookEvent::SessionEnd,
+        crate::hooks::HookEvent::Stop,
+        crate::hooks::HookEvent::SubagentStop,
+        crate::hooks::HookEvent::PreCompact,
+        crate::hooks::HookEvent::Notification,
+    ]
+    .into_iter()
+    .filter(|event| !crate::hooks::configured_commands(hooks, *event).is_empty())
+    .count()
 }
 
 pub fn recommend_payload(task: &str) -> FeatureRecommendation {
@@ -378,6 +469,19 @@ fn print_status(status: &FeatureStatus) {
     println!(
         "  Swarm/subagent support present: {}",
         status.swarm_subagent_support_present
+    );
+    println!(
+        "  Custom slash commands: {}",
+        status.custom_slash_commands_count
+    );
+    println!("  Skills loaded: {}", status.skills_count);
+    println!(
+        "  Worktree isolation available: {}",
+        status.worktree_isolation_available
+    );
+    println!(
+        "  Configured hook events: {}",
+        status.configured_hook_events
     );
     println!("Config paths");
     println!("  Project root: {}", status.config_paths.project_root);
