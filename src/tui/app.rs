@@ -7216,6 +7216,7 @@ pub async fn run_tui(
                         .as_ref()
                         .map(Orchestrator::background_tasks)
                         .unwrap_or_default();
+                    let model_before = app.model.clone();
                     let mut ctx = crate::commands::CommandContext {
                         app: &mut app,
                         project_root: &root,
@@ -7227,7 +7228,7 @@ pub async fn run_tui(
                         match result {
                             Ok(Some(msg)) => {
                                 let command_name = input.split_whitespace().next();
-                                if input.split_whitespace().next() == Some("/model") {
+                                if app.model != model_before {
                                     if let Some(orchestrator) = orchestrator.as_mut() {
                                         orchestrator.set_active_model(app.model.clone());
                                     }

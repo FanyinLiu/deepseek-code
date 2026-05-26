@@ -348,13 +348,36 @@ impl CommandRegistry {
             // the user's own keystrokes flow through, so the prompt rides the
             // normal turn pipeline (history, hooks, policy, …).
             let rendered = prompt.render(args);
+            let mut model_note = String::new();
+            if let Some(requested) = &prompt.model {
+                match crate::provider::parse_model(requested) {
+                    Ok(model) => {
+                        if ctx.app.model != model {
+                            ctx.app.model = model.clone();
+                            ctx.app.welcome = crate::tui::welcome::WelcomeDashboardData::load(
+                                ctx.project_root,
+                                ctx.app.model.clone(),
+                                ctx.app.thinking_mode.clone(),
+                            );
+                            let display = crate::tui::model_hint::model_display_name(&model);
+                            model_note = format!(" [model→{display}]");
+                        }
+                    }
+                    Err(error) => {
+                        model_note = format!(" [ignored model `{requested}`: {error}]");
+                    }
+                }
+            }
             ctx.app.queued_inputs.push_back(rendered);
             let label = prompt
                 .source_path
                 .file_name()
                 .and_then(|s| s.to_str())
                 .unwrap_or("command");
-            return Some(Ok(Some(format!("→ {} ({})", prompt.name, label))));
+            return Some(Ok(Some(format!(
+                "→ {} ({}){}",
+                prompt.name, label, model_note
+            ))));
         }
 
         Some(Err(format!(
@@ -3552,6 +3575,39 @@ mod tests {
             .get("/git:status")
             .expect("/git:status should load");
         assert_eq!(cmd.description, "show git status");
+    }
+
+    #[test]
+    fn prompt_command_with_model_frontmatter_switches_app_model() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cmd_dir = temp.path().join(".octocode").join("commands");
+        std::fs::create_dir_all(&cmd_dir).expect("mkdir");
+        std::fs::write(
+            cmd_dir.join("usepro.md"),
+            "---\ndescription: use pro\nmodel: pro\n---\nDo it",
+        )
+        .expect("write");
+
+        let mut reg = CommandRegistry::new();
+        reg.load_prompt_commands(temp.path());
+        let mut app = crate::tui::app::TuiApp::new(
+            crate::deepseek::DeepSeekModel::Flash,
+            crate::deepseek::ThinkingMode::Auto,
+            None,
+            std::path::PathBuf::from("."),
+        );
+        let mut yolo = false;
+        let mut ctx = CommandContext {
+            app: &mut app,
+            project_root: temp.path(),
+            yolo_mode: &mut yolo,
+            mcp_status: "MCP: not initialized",
+            background_tasks: &[],
+        };
+
+        let result = reg.execute("/usepro", &mut ctx).expect("handled");
+        assert!(result.is_ok());
+        assert_eq!(app.model, crate::deepseek::DeepSeekModel::Pro);
     }
 
     #[test]
