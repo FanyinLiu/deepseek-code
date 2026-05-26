@@ -376,7 +376,9 @@ impl CommandRegistry {
                 ctx.app.pending_allowed_tools = Some(tools.clone());
                 tools_note = format!(" [tools={}]", tools.join(","));
             }
-            ctx.app.queued_inputs.push_back(rendered);
+            let bang_enabled = allowed_tools_permit_bang(prompt.allowed_tools.as_deref());
+            let expanded = expand_bang_lines(&rendered, ctx.project_root, bang_enabled);
+            ctx.app.queued_inputs.push_back(expanded);
             let label = prompt
                 .source_path
                 .file_name()
@@ -557,6 +559,84 @@ fn parse_prompt_command(content: &str) -> ParsedPrompt {
         model: None,
         allowed_tools: None,
     }
+}
+
+/// Expand leading `!cmd` lines in `text` by running each command via `sh -c`
+/// from `project_root` and inlining its stdout. Lines that don't start with
+/// `!` pass through. When `enabled` is `false` the text is returned unchanged
+/// — the caller (typically a custom slash command) is expected to gate this
+/// on `allowed-tools` containing `Bash`.
+///
+/// On command failure the line is replaced with `[!cmd failed: …]` so the
+/// prompt still renders rather than aborting the whole turn.
+#[must_use]
+pub fn expand_bang_lines(text: &str, project_root: &std::path::Path, enabled: bool) -> String {
+    if !text.contains('!') {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for line in text.split_inclusive('\n') {
+        let (body, eol) = match line.strip_suffix('\n') {
+            Some(rest) => (rest, "\n"),
+            None => (line, ""),
+        };
+        let trimmed = body.trim_start();
+        let indent_len = body.len() - trimmed.len();
+        if !enabled || !trimmed.starts_with('!') {
+            out.push_str(line);
+            continue;
+        }
+        let command = trimmed[1..].trim();
+        if command.is_empty() {
+            out.push_str(line);
+            continue;
+        }
+        out.push_str(&body[..indent_len]);
+        out.push_str(&run_bang_line(command, project_root));
+        out.push_str(eol);
+    }
+    out
+}
+
+fn run_bang_line(command: &str, project_root: &std::path::Path) -> String {
+    use std::process::Command;
+    match Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(project_root)
+        .output()
+    {
+        Ok(output) => {
+            if output.status.success() {
+                String::from_utf8_lossy(&output.stdout)
+                    .trim_end_matches('\n')
+                    .to_string()
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                format!(
+                    "[!{command} failed (exit {}): {}]",
+                    output.status.code().unwrap_or(-1),
+                    stderr.trim()
+                )
+            }
+        }
+        Err(error) => format!("[!{command} error: {error}]"),
+    }
+}
+
+/// True iff `allowed_tools` would permit a custom command to shell out via
+/// inline `!cmd` lines. Matches `Bash` case-insensitively to align with
+/// Claude Code's `allowed-tools: Bash(...)` convention; we ignore the
+/// arg-pattern part for now.
+#[must_use]
+pub fn allowed_tools_permit_bang(allowed: Option<&[String]>) -> bool {
+    let Some(tools) = allowed else {
+        return false;
+    };
+    tools.iter().any(|tool| {
+        let head = tool.split(['(', ':']).next().unwrap_or("");
+        head.trim().eq_ignore_ascii_case("Bash")
+    })
 }
 
 /// Parse the value of an `allowed-tools:` frontmatter line.
@@ -3623,6 +3703,46 @@ mod tests {
             .get("/git:status")
             .expect("/git:status should load");
         assert_eq!(cmd.description, "show git status");
+    }
+
+    #[test]
+    fn allowed_tools_permit_bang_matches_bash_case_insensitively() {
+        assert!(allowed_tools_permit_bang(Some(&["Bash".to_string()])));
+        assert!(allowed_tools_permit_bang(Some(
+            &["bash(git:*)".to_string()]
+        )));
+        assert!(allowed_tools_permit_bang(Some(&[
+            "read_file".to_string(),
+            "BASH".to_string()
+        ])));
+        assert!(!allowed_tools_permit_bang(Some(&["read_file".to_string()])));
+        assert!(!allowed_tools_permit_bang(None));
+    }
+
+    #[test]
+    fn expand_bang_lines_runs_shell_when_enabled() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("note.txt"), "marker\n").expect("write");
+        let body = "Before\n!echo hello world\n!cat note.txt\nAfter";
+        let out = expand_bang_lines(body, temp.path(), true);
+        assert!(out.contains("hello world"));
+        assert!(out.contains("marker"));
+        assert!(!out.contains("!echo"));
+    }
+
+    #[test]
+    fn expand_bang_lines_passthrough_when_disabled() {
+        let body = "x\n!echo nope\n";
+        let out = expand_bang_lines(body, std::path::Path::new("."), false);
+        assert_eq!(out, body);
+    }
+
+    #[test]
+    fn expand_bang_lines_reports_failures_inline() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let body = "!nonexistent-command-zzz-octo";
+        let out = expand_bang_lines(body, temp.path(), true);
+        assert!(out.contains("failed") || out.contains("not found"));
     }
 
     #[test]
