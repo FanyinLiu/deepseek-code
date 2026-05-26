@@ -785,12 +785,12 @@ fn read_only_allows_tool(tool_name: &str) -> bool {
 fn structured_subagent_limit_message(task: &SubagentTask, _max_turns: u32) -> String {
     if subagent_task_uses_chinese(task) {
         format!(
-            "子任务未形成可用结论。\n任务：{}\n建议：缩小任务范围后重试。",
+            "子任务停止：已用完轮次预算。\n任务：{}\n建议：提高 --max-turns 或缩小任务范围后重试。",
             task.description
         )
     } else {
         format!(
-            "Subtask did not produce a usable conclusion.\nTask: {}\nNext: narrow the scope and retry.",
+            "Subtask stopped because the turn budget was exhausted.\nTask: {}\nNext: increase --max-turns or narrow the scope and retry.",
             task.description
         )
     }
@@ -1185,8 +1185,8 @@ mod tests {
 
         let message = structured_subagent_limit_message(&task, 12);
 
-        assert!(message.contains("子任务未形成可用结论"));
-        assert!(!message.contains("轮次"));
+        assert!(message.contains("已用完轮次预算"));
+        assert!(message.contains("--max-turns"));
         assert!(!message.contains("max_turns"));
         assert!(!message.contains("Subagent reached max turns limit"));
     }

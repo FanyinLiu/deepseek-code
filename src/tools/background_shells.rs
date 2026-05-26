@@ -30,6 +30,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 
+use crate::policy::sandbox::{command_invocation, CommandSandboxConfig};
+
 const MAX_LINES_PER_SHELL: usize = 4096;
 
 /// One running background shell.
@@ -38,6 +40,7 @@ pub struct BackgroundShell {
     pub command: String,
     pub cwd: PathBuf,
     pub started_at: DateTime<Utc>,
+    pid: Option<u32>,
     inner: Arc<Mutex<ShellState>>,
     child: Arc<AsyncMutex<Option<Child>>>,
     _stdout_task: JoinHandle<()>,
@@ -125,7 +128,19 @@ impl BackgroundShellsRegistry {
 
     /// Spawn a new background shell. Returns its shell_id.
     pub async fn spawn(&self, command: &str, cwd: &Path) -> Result<String> {
-        let shell = BackgroundShell::spawn(command, cwd).await?;
+        self.spawn_with_sandbox(command, cwd, &CommandSandboxConfig::default())
+            .await
+    }
+
+    /// Spawn a new background shell with the same sandbox/env/process isolation
+    /// used by synchronous `run_command`.
+    pub async fn spawn_with_sandbox(
+        &self,
+        command: &str,
+        cwd: &Path,
+        sandbox: &CommandSandboxConfig,
+    ) -> Result<String> {
+        let shell = BackgroundShell::spawn(command, cwd, sandbox).await?;
         let id = shell.shell_id.clone();
         let mut shells = self
             .shells
@@ -155,23 +170,61 @@ impl BackgroundShellsRegistry {
         shells.remove(shell_id);
         Ok(())
     }
+
+    pub async fn kill_all(&self) -> usize {
+        let ids = {
+            let shells = self
+                .shells
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            shells.keys().cloned().collect::<Vec<_>>()
+        };
+        let mut killed = 0;
+        for id in ids {
+            if self.kill(&id).await.is_ok() {
+                killed += 1;
+            }
+        }
+        killed
+    }
 }
 
 impl BackgroundShell {
-    async fn spawn(command: &str, cwd: &Path) -> Result<Self> {
+    async fn spawn(command: &str, cwd: &Path, sandbox: &CommandSandboxConfig) -> Result<Self> {
+        if let Some(reason) = crate::tools::run_command::command_policy_violation(command) {
+            return Err(anyhow!(reason));
+        }
+
         let shell_id = format!("sh-{}", uuid::Uuid::new_v4());
         let started_at = Utc::now();
 
-        let mut cmd = shell_command(command);
+        let (shell, shell_arg) = shell_program();
+        let sandbox_invocation = command_invocation(shell, shell_arg, command, cwd, sandbox)?;
+        let mut cmd = match sandbox_invocation {
+            Some(invocation) => {
+                let mut builder = Command::new(invocation.program);
+                builder.args(invocation.args);
+                builder
+            }
+            None => {
+                let mut builder = Command::new(shell);
+                builder.arg(shell_arg).arg(command);
+                builder
+            }
+        };
         cmd.current_dir(cwd)
+            .env_clear()
+            .envs(crate::tools::run_command::sanitized_command_env())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        crate::tools::run_command::isolate_command_process_tree(&mut cmd);
 
         let mut child = cmd
             .spawn()
             .map_err(|e| anyhow!("failed to spawn background command: {e}"))?;
+        let pid = child.id();
 
         let stdout = child
             .stdout
@@ -243,6 +296,7 @@ impl BackgroundShell {
             command: command.to_string(),
             cwd: cwd.to_path_buf(),
             started_at,
+            pid,
             inner: state,
             child,
             _stdout_task: stdout_task,
@@ -279,32 +333,57 @@ impl BackgroundShell {
     }
 
     async fn kill(&self) -> Result<()> {
-        let mut guard = self.child.lock().await;
-        if let Some(child) = guard.as_mut() {
-            let _ = child.start_kill();
+        {
+            let state = self
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.exit_code.is_some() {
+                return Ok(());
+            }
         }
-        Ok(())
+        crate::tools::run_command::terminate_process_tree(self.pid);
+        if let Ok(mut guard) = self.child.try_lock() {
+            if let Some(child) = guard.as_mut() {
+                let _ = child.start_kill();
+            }
+        }
+        for _ in 0..20 {
+            {
+                let state = self
+                    .inner
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.exit_code.is_some() {
+                    return Ok(());
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        Err(anyhow!("shell did not exit after kill: {}", self.shell_id))
     }
 }
 
-#[cfg(unix)]
-fn shell_command(command: &str) -> Command {
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c").arg(command);
-    cmd
-}
-
-#[cfg(windows)]
-fn shell_command(command: &str) -> Command {
-    let mut cmd = Command::new("cmd");
-    cmd.arg("/C").arg(command);
-    cmd
+fn shell_program() -> (&'static str, &'static str) {
+    if cfg!(target_os = "windows") {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    struct EnvGuard(&'static str);
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var(self.0);
+        }
+    }
 
     #[tokio::test]
     async fn spawn_and_poll_picks_up_stdout() {
@@ -359,5 +438,89 @@ mod tests {
     async fn kill_marks_unknown_shell_as_error() {
         let err = registry().kill("does-not-exist").await.unwrap_err();
         assert!(err.to_string().contains("unknown shell_id"));
+    }
+
+    #[tokio::test]
+    async fn kill_all_removes_running_shells() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let cmd = "ping -n 30 127.0.0.1 > nul";
+        #[cfg(not(windows))]
+        let cmd = "sleep 20";
+
+        let registry = BackgroundShellsRegistry::default();
+        let first = registry.spawn(cmd, temp.path()).await.unwrap();
+        let second = registry.spawn(cmd, temp.path()).await.unwrap();
+
+        let killed = registry.kill_all().await;
+
+        assert!(killed >= 2);
+        assert!(registry.get(&first).is_none());
+        assert!(registry.get(&second).is_none());
+    }
+
+    #[tokio::test]
+    async fn background_spawn_blocks_dangerous_command() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let err = registry().spawn("rm -rf /", temp.path()).await.unwrap_err();
+        assert!(err.to_string().contains("dangerous command blocked"));
+    }
+
+    #[tokio::test]
+    async fn background_spawn_strips_sensitive_env() {
+        std::env::set_var("OCTO_BACKGROUND_API_KEY", "should-not-leak");
+        let _guard = EnvGuard("OCTO_BACKGROUND_API_KEY");
+        let temp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let cmd = "echo key=%OCTO_BACKGROUND_API_KEY%";
+        #[cfg(not(windows))]
+        let cmd = "printf 'key=%s\\n' \"${OCTO_BACKGROUND_API_KEY:-}\"";
+
+        let id = registry().spawn(cmd, temp.path()).await.unwrap();
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let snap = registry().get(&id).unwrap().snapshot(0, 0);
+            if snap.exit_code.is_some() && !snap.stdout.is_empty() {
+                assert!(!snap.stdout.contains("should-not-leak"));
+                let _ = registry().kill(&id).await;
+                return;
+            }
+        }
+        panic!("background shell did not produce env output in time");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kill_terminates_child_process_group() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let pid_file = temp.path().join("child.pid");
+        let command = format!(
+            "sleep 20 & printf '%s' \"$!\" > '{}'; wait",
+            pid_file.display()
+        );
+
+        let id = registry().spawn(&command, temp.path()).await.unwrap();
+        for _ in 0..20 {
+            if pid_file.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let pid = std::fs::read_to_string(&pid_file)
+            .expect("pid file")
+            .trim()
+            .to_string();
+
+        registry().kill(&id).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let status = std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("kill -0");
+        assert!(
+            !status.success(),
+            "background child process {pid} should be gone"
+        );
     }
 }

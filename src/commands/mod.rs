@@ -1390,10 +1390,10 @@ fn cmd_usage(args: &str, ctx: &mut CommandContext) -> CommandResult {
 /// for the current project. Sessions written before P1-B don't have the
 /// cache fields and are read with `#[serde(default)]` → zero contribution.
 fn cmd_usage_all_time(ctx: &mut CommandContext) -> CommandResult {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::storage::user_home_dir() else {
         return Ok(Some("Cannot resolve home directory.".to_string()));
     };
-    let session_store = crate::storage::SessionStore::new(home.join(".octocode").join("sessions"));
+    let session_store = crate::storage::SessionStore::new(home.join(".octocode"));
     let summaries = session_store.list(ctx.project_root).unwrap_or_default();
 
     let mut total_tokens: u64 = 0;
@@ -1438,8 +1438,8 @@ fn cmd_doctor(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     let config = crate::storage::Config::load(Some(ctx.project_root));
     let git_available = command_available("git");
     let cargo_available = command_available("cargo");
-    let session_store = dirs::home_dir()
-        .map(|home| home.join(".octocode").join("sessions"))
+    let session_store = crate::storage::user_home_dir()
+        .map(|home| home.join(".octocode"))
         .filter(|path| path.exists());
     let mut lines =
         crate::cli::doctor::doctor_no_network_lines(Some(ctx.project_root.to_path_buf()))
@@ -1962,7 +1962,7 @@ fn cmd_memory(_args: &str, ctx: &mut CommandContext) -> CommandResult {
 }
 
 fn cmd_sessions(_args: &str, ctx: &mut CommandContext) -> CommandResult {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::storage::user_home_dir() else {
         return Err("Cannot find home directory.".to_string());
     };
     let store = crate::storage::SessionStore::new(home.join(".octocode"));
@@ -2414,7 +2414,16 @@ fn latest_shell_output(shell: &crate::tools::background_shells::ShellSnapshot) -
 
 fn cmd_tasks(args: &str, ctx: &mut CommandContext) -> CommandResult {
     let shells = crate::tools::background_shells::registry().list();
-    let views = unified_background_task_views(ctx.background_tasks, &shells, chrono::Utc::now());
+    render_background_tasks(args, ctx.background_tasks, &shells, chrono::Utc::now())
+}
+
+fn render_background_tasks(
+    args: &str,
+    background_tasks: &[crate::agent::BackgroundTaskSnapshot],
+    shells: &[crate::tools::background_shells::ShellSnapshot],
+    now: chrono::DateTime<chrono::Utc>,
+) -> CommandResult {
+    let views = unified_background_task_views(background_tasks, shells, now);
     let json = matches!(args.trim(), "--json" | "json");
     if json {
         return serde_json::to_string_pretty(&serde_json::json!({
@@ -3697,13 +3706,6 @@ mod tests {
 
     #[test]
     fn tasks_command_formats_background_snapshots() {
-        let reg = CommandRegistry::new();
-        let mut app = crate::tui::app::TuiApp::new(
-            crate::deepseek::DeepSeekModel::Flash,
-            crate::deepseek::ThinkingMode::Auto,
-            None,
-            std::path::PathBuf::from("."),
-        );
         let tasks = vec![crate::agent::BackgroundTaskSnapshot {
             task_id: "bg-test".to_string(),
             description: "Review plan UI".to_string(),
@@ -3714,18 +3716,7 @@ mod tests {
             completed_at: None,
             duration_ms: None,
         }];
-        let mut yolo = false;
-        let mut ctx = CommandContext {
-            app: &mut app,
-            project_root: std::path::Path::new("."),
-            yolo_mode: &mut yolo,
-            mcp_status: "MCP: not initialized",
-            background_tasks: &tasks,
-        };
-
-        let output = reg
-            .execute("/tasks", &mut ctx)
-            .expect("command should be handled")
+        let output = render_background_tasks("", &tasks, &[], chrono::Utc::now())
             .expect("tasks should run")
             .expect("tasks should show output");
 

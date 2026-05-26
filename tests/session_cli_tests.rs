@@ -3,8 +3,8 @@ use std::process::Command;
 use deepseek_code::deepseek::{ReasoningState, Session, SessionId, SessionMetadata};
 use deepseek_code::storage::{EventLogStore, SessionEvent, SessionEventKind, SessionStore};
 
-fn octocode_command(project_root: &std::path::Path, home: &std::path::Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_octocode"));
+fn octo_command(project_root: &std::path::Path, home: &std::path::Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_octo"));
     command.arg("-C").arg(project_root);
     command.env("HOME", home);
     command.env("DEEPSEEK_CODE_HOME", home);
@@ -60,7 +60,7 @@ fn session_list_replay_and_export_use_saved_data_without_rerun() {
         )
         .expect("append hook event");
 
-    let output = octocode_command(root.path(), home.path())
+    let output = octo_command(root.path(), home.path())
         .args(["session", "list", "--json"])
         .output()
         .expect("run octocode session list");
@@ -69,7 +69,7 @@ fn session_list_replay_and_export_use_saved_data_without_rerun() {
         serde_json::from_slice(&output.stdout).expect("session list json parses");
     assert_eq!(json.as_array().expect("list").len(), 1);
 
-    let output = octocode_command(root.path(), home.path())
+    let output = octo_command(root.path(), home.path())
         .args(["session", "replay", "test-session"])
         .output()
         .expect("run octocode session replay");
@@ -78,7 +78,7 @@ fn session_list_replay_and_export_use_saved_data_without_rerun() {
     assert!(replay_stdout.contains("hook pre_tool_use success=true commands=1"));
     assert!(replay_stdout.contains("No tools or commands were re-run"));
 
-    let output = octocode_command(root.path(), home.path())
+    let output = octo_command(root.path(), home.path())
         .args(["session", "export", "test-session", "--format", "json"])
         .output()
         .expect("run octocode session export");

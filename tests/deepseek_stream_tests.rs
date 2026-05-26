@@ -180,6 +180,7 @@ fn test_cache_usage_from_usage() {
         total_tokens: 1200,
         prompt_cache_hit_tokens: Some(800),
         prompt_cache_miss_tokens: Some(200),
+        prompt_tokens_details: None,
     };
 
     let cache = CacheUsage::from_usage(&usage);
@@ -196,4 +197,25 @@ fn test_cache_hit_rate_zero_when_no_tokens() {
         prompt_cache_miss_tokens: 0,
     };
     assert_eq!(cache.hit_rate(), 0.0);
+}
+
+#[test]
+fn test_cache_usage_from_openai_prompt_token_details() {
+    use deepseek_code::deepseek::models::PromptTokensDetails;
+    use deepseek_code::deepseek::{CacheUsage, Usage};
+
+    let usage = Usage {
+        prompt_tokens: 1000,
+        completion_tokens: 200,
+        total_tokens: 1200,
+        prompt_cache_hit_tokens: None,
+        prompt_cache_miss_tokens: None,
+        prompt_tokens_details: Some(PromptTokensDetails {
+            cached_tokens: Some(300),
+        }),
+    };
+
+    let cache = CacheUsage::from_usage(&usage);
+    assert_eq!(cache.prompt_cache_hit_tokens, 300);
+    assert_eq!(cache.prompt_cache_miss_tokens, 700);
 }

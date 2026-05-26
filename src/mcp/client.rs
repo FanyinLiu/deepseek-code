@@ -1,6 +1,7 @@
 //! MCP client — connects to an MCP server over stdio, HTTP, or SSE.
-use std::{collections::HashMap, process::Stdio, time::Duration};
+use std::{collections::HashMap, path::PathBuf, process::Stdio, time::Duration};
 
+use anyhow::Context;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -48,6 +49,7 @@ pub struct McpServerConfig {
     pub command: Option<String>,
     pub args: Vec<String>,
     pub env: Option<HashMap<String, String>>,
+    pub cwd: Option<PathBuf>,
     pub url: Option<String>,
     pub headers: Option<HashMap<String, String>>,
 }
@@ -134,13 +136,13 @@ impl StdioMcpClient {
         cmd.args(&config.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-
-        if let Some(env_map) = &config.env {
-            for (k, v) in env_map {
-                cmd.env(k, v);
-            }
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        if let Some(cwd) = &config.cwd {
+            cmd.current_dir(cwd);
         }
+        configure_stdio_environment(&mut cmd, config.env.as_ref());
+        crate::tools::run_command::isolate_command_process_tree(&mut cmd);
 
         let mut child = cmd.spawn()?;
         let stdin = child
@@ -168,13 +170,20 @@ impl StdioMcpClient {
             protocol_version: PROTOCOL_VERSION.to_string(),
             capabilities: ClientCapabilities::default(),
             client_info: Implementation {
-                name: "octocode".to_string(),
+                name: "octo".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
         };
 
-        let result: InitializeResult = client.request("initialize", init_req).await?;
+        let result: InitializeResult = match client.request("initialize", init_req).await {
+            Ok(result) => result,
+            Err(error) => {
+                client.terminate_child_process().await;
+                return Err(error).context("initialize stdio MCP server");
+            }
+        };
         if result.protocol_version != PROTOCOL_VERSION {
+            client.terminate_child_process().await;
             anyhow::bail!(
                 "protocol version mismatch: expected {}, got {}",
                 PROTOCOL_VERSION,
@@ -236,12 +245,27 @@ impl StdioMcpClient {
 
     /// Gracefully shut down the connection.
     pub async fn shutdown(mut self) -> Result<(), anyhow::Error> {
-        let _ = self
-            .request::<_, serde_json::Value>("shutdown", serde_json::json!({}))
-            .await;
-        self.notify("exit", serde_json::json!({})).await.ok();
-        let _ = self.child.wait().await;
+        let pid = self.child.id();
+        let grace = self.timeout.min(Duration::from_secs(2));
+        let _ = time::timeout(
+            grace,
+            self.request::<_, serde_json::Value>("shutdown", serde_json::json!({})),
+        )
+        .await;
+        let _ = time::timeout(grace, self.notify("exit", serde_json::json!({}))).await;
+        if time::timeout(grace, self.child.wait()).await.is_err() {
+            crate::tools::run_command::terminate_process_tree(pid);
+            let _ = self.child.start_kill();
+            let _ = time::timeout(Duration::from_secs(1), self.child.wait()).await;
+        }
         Ok(())
+    }
+
+    async fn terminate_child_process(&mut self) {
+        let pid = self.child.id();
+        crate::tools::run_command::terminate_process_tree(pid);
+        let _ = self.child.start_kill();
+        let _ = time::timeout(Duration::from_secs(1), self.child.wait()).await;
     }
 
     // -----------------------------------------------------------------------
@@ -303,6 +327,65 @@ impl StdioMcpClient {
     async fn read_message(&mut self) -> Result<String, anyhow::Error> {
         read_mcp_message_with_timeout(&mut self.reader, self.timeout, self.max_content_length).await
     }
+}
+
+fn configure_stdio_environment(cmd: &mut Command, explicit_env: Option<&HashMap<String, String>>) {
+    cmd.env_clear();
+    for (key, value) in std::env::vars() {
+        if is_safe_stdio_env_key(&key) {
+            cmd.env(key, value);
+        }
+    }
+    if let Some(env_map) = explicit_env {
+        for (key, value) in env_map {
+            cmd.env(key, value);
+        }
+    }
+}
+
+fn is_safe_stdio_env_key(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    matches!(
+        upper.as_str(),
+        "PATH"
+            | "HOME"
+            | "USER"
+            | "USERNAME"
+            | "TMPDIR"
+            | "TEMP"
+            | "TMP"
+            | "LANG"
+            | "SHELL"
+            | "SYSTEMROOT"
+            | "WINDIR"
+            | "COMSPEC"
+            | "PATHEXT"
+            | "APPDATA"
+            | "LOCALAPPDATA"
+            | "PROGRAMDATA"
+            | "USERPROFILE"
+            | "NVM_DIR"
+            | "NVM_BIN"
+            | "PNPM_HOME"
+            | "VOLTA_HOME"
+            | "BUN_INSTALL"
+            | "CARGO_HOME"
+            | "RUSTUP_HOME"
+            | "VIRTUAL_ENV"
+            | "PYENV_ROOT"
+            | "CONDA_PREFIX"
+            | "SSL_CERT_FILE"
+            | "SSL_CERT_DIR"
+            | "REQUESTS_CA_BUNDLE"
+            | "CURL_CA_BUNDLE"
+            | "HTTP_PROXY"
+            | "HTTPS_PROXY"
+            | "ALL_PROXY"
+            | "NO_PROXY"
+            | "NODE_OPTIONS"
+            | "SSH_AUTH_SOCK"
+    ) || upper.starts_with("LC_")
+        || upper.starts_with("XDG_")
 }
 
 /// An active MCP connection over HTTP-style transports.
@@ -646,10 +729,26 @@ mod tests {
             command: Some("echo".into()),
             args: vec!["hello".into()],
             env: None,
+            cwd: None,
             url: None,
             headers: None,
         };
         let _ = cfg.clone();
+    }
+
+    #[test]
+    fn stdio_env_allowlist_drops_provider_secrets() {
+        assert!(is_safe_stdio_env_key("PATH"));
+        assert!(is_safe_stdio_env_key("LC_ALL"));
+        assert!(is_safe_stdio_env_key("TMPDIR"));
+        assert!(is_safe_stdio_env_key("NVM_BIN"));
+        assert!(is_safe_stdio_env_key("PNPM_HOME"));
+        assert!(is_safe_stdio_env_key("VIRTUAL_ENV"));
+        assert!(is_safe_stdio_env_key("HTTPS_PROXY"));
+        assert!(is_safe_stdio_env_key("SSH_AUTH_SOCK"));
+        assert!(!is_safe_stdio_env_key("DEEPSEEK_API_KEY"));
+        assert!(!is_safe_stdio_env_key("OPENAI_API_KEY"));
+        assert!(!is_safe_stdio_env_key("GITHUB_TOKEN"));
     }
 
     #[tokio::test]
@@ -743,6 +842,7 @@ mod tests {
             command: None,
             args: Vec::new(),
             env: None,
+            cwd: None,
             url: Some(server.uri()),
             headers: None,
         };

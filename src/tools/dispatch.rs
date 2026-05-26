@@ -468,7 +468,7 @@ pub async fn execute_single_tool_with_config(
                     );
                 };
                 match crate::tools::background_shells::registry()
-                    .spawn(command, &workspace_cwd)
+                    .spawn_with_sandbox(command, &workspace_cwd, &dispatch_config.command_sandbox)
                     .await
                 {
                     Ok(shell_id) => (

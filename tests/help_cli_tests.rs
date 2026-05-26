@@ -45,6 +45,10 @@ fn root_help_lists_core_discoverability_commands() {
     );
     assert_stdout_contains(
         &output,
+        "onboard    Run terminal-first setup and readiness checks",
+    );
+    assert_stdout_contains(
+        &output,
         "evolve     Inspect and run self-evolution proposal workflows",
     );
     assert_stdout_contains(

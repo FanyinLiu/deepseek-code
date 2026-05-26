@@ -1,5 +1,5 @@
 //! MCP server registry — manages multiple MCP connections and aggregates their tools.
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 
 use super::client::{McpClient, McpServerConfig, McpTransport, DEFAULT_MCP_TIMEOUT_MS};
 use super::protocol::McpTool;
@@ -46,6 +46,7 @@ pub struct McpServerEntry {
 /// Registry of MCP servers.
 pub struct McpRegistry {
     servers: HashMap<String, McpServerEntry>,
+    project_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +82,15 @@ impl McpRegistry {
     pub fn new() -> Self {
         Self {
             servers: HashMap::new(),
+            project_root: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_project_root(project_root: PathBuf) -> Self {
+        Self {
+            servers: HashMap::new(),
+            project_root: Some(project_root),
         }
     }
 
@@ -118,6 +128,7 @@ impl McpRegistry {
                 command: server_config.command.clone(),
                 args: server_config.args.clone(),
                 env: server_config.env.clone(),
+                cwd: self.project_root.clone(),
                 url: server_config.url.clone(),
                 headers: server_config.headers.clone(),
             },

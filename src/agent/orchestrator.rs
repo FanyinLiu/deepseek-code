@@ -16,6 +16,7 @@ use crate::hooks::{HookEvent, HookPayload, HookRunSummary};
 use crate::plan;
 use crate::plan::schema::{Plan, RiskLevel};
 use crate::policy;
+use crate::provider::Provider;
 use crate::runtime::tool_runtime::{
     ApprovalFuture, ApprovalOutcome, ApprovalResolver, McpRegistryRuntimeBackend, ToolRuntime,
     ToolRuntimeContext,
@@ -484,7 +485,7 @@ impl Orchestrator {
     #[must_use]
     pub fn new(client: DeepSeekClient, project_root: std::path::PathBuf, session: Session) -> Self {
         let event_log_store =
-            dirs::home_dir().map(|home| EventLogStore::new(home.join(".octocode")));
+            crate::storage::user_home_dir().map(|home| EventLogStore::new(home.join(".octocode")));
         Self {
             client,
             project_root,
@@ -517,6 +518,22 @@ impl Orchestrator {
                 at: Utc::now(),
                 reason: "user selection".to_string(),
             });
+    }
+
+    fn record_usage_event(&self, usage: &Usage) {
+        let config = crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
+        let model = self.session.reasoning_state.effective_model();
+        let provider = crate::provider::build_provider(&config.provider, String::new());
+        let provider_name = config.provider.default.as_str();
+        let model_name = provider.request_model_name(&model);
+        if let Err(error) = crate::storage::record_usage_event(
+            &self.project_root,
+            provider_name,
+            &model_name,
+            usage,
+        ) {
+            tracing::warn!("failed to record usage event: {error}");
+        }
     }
 
     pub fn set_swarm_cancel_token(&mut self, token: Arc<AtomicBool>) {
@@ -1245,7 +1262,7 @@ impl Orchestrator {
         if !config.enabled {
             return;
         }
-        let mut registry = crate::mcp::McpRegistry::new();
+        let mut registry = crate::mcp::McpRegistry::with_project_root(self.project_root.clone());
         for (name, server_config) in &config.servers {
             registry.register_config(name.clone(), server_config);
         }
@@ -1711,6 +1728,8 @@ impl Orchestrator {
                         send_event(event_tx, AgentEvent::ContentDelta(visible_content.clone()));
                     }
                     if let Some(ref usage) = stream_result.usage {
+                        self.record_usage_event(usage);
+                        let cache = CacheUsage::from_usage(usage);
                         self.session.metadata.total_tokens += u64::from(usage.total_tokens);
                         self.session.metadata.total_cost_estimate += usage
                             .estimate_cost_cny(&self.session.reasoning_state.effective_model());
@@ -1718,12 +1737,12 @@ impl Orchestrator {
                             .session
                             .metadata
                             .prompt_cache_hit_tokens
-                            .saturating_add(u64::from(usage.prompt_cache_hit_tokens.unwrap_or(0)));
+                            .saturating_add(cache.prompt_cache_hit_tokens);
                         self.session.metadata.prompt_cache_miss_tokens = self
                             .session
                             .metadata
                             .prompt_cache_miss_tokens
-                            .saturating_add(u64::from(usage.prompt_cache_miss_tokens.unwrap_or(0)));
+                            .saturating_add(cache.prompt_cache_miss_tokens);
                         send_event(
                             event_tx,
                             AgentEvent::StreamDone {
@@ -1732,7 +1751,7 @@ impl Orchestrator {
                                     .clone()
                                     .map(FinishReason::from),
                                 usage: Some(usage.clone()),
-                                cache: Some(CacheUsage::from_usage(usage)),
+                                cache: Some(cache),
                             },
                         );
                     }
@@ -2143,6 +2162,8 @@ impl Orchestrator {
                                 ),
                             );
                             if let Some(ref usage) = stream_result.usage {
+                                self.record_usage_event(usage);
+                                let cache = CacheUsage::from_usage(usage);
                                 self.session.metadata.total_tokens += u64::from(usage.total_tokens);
                                 self.session.metadata.total_cost_estimate += usage
                                     .estimate_cost_cny(
@@ -2156,7 +2177,7 @@ impl Orchestrator {
                                             .clone()
                                             .map(FinishReason::from),
                                         usage: Some(usage.clone()),
-                                        cache: Some(CacheUsage::from_usage(usage)),
+                                        cache: Some(cache),
                                     },
                                 );
                             }
@@ -2794,6 +2815,8 @@ impl Orchestrator {
                         send_event(event_tx, AgentEvent::ContentDelta(visible_content));
                     }
                     if let Some(ref usage) = followup_result.usage {
+                        self.record_usage_event(usage);
+                        let cache = CacheUsage::from_usage(usage);
                         self.session.metadata.total_tokens += u64::from(usage.total_tokens);
                         self.session.metadata.total_cost_estimate += usage
                             .estimate_cost_cny(&self.session.reasoning_state.effective_model());
@@ -2801,18 +2824,18 @@ impl Orchestrator {
                             .session
                             .metadata
                             .prompt_cache_hit_tokens
-                            .saturating_add(u64::from(usage.prompt_cache_hit_tokens.unwrap_or(0)));
+                            .saturating_add(cache.prompt_cache_hit_tokens);
                         self.session.metadata.prompt_cache_miss_tokens = self
                             .session
                             .metadata
                             .prompt_cache_miss_tokens
-                            .saturating_add(u64::from(usage.prompt_cache_miss_tokens.unwrap_or(0)));
+                            .saturating_add(cache.prompt_cache_miss_tokens);
                         send_event(
                             event_tx,
                             AgentEvent::StreamDone {
                                 finish_reason: None,
                                 usage: Some(usage.clone()),
-                                cache: Some(CacheUsage::from_usage(usage)),
+                                cache: Some(cache),
                             },
                         );
                     }

@@ -383,6 +383,14 @@ pub struct Usage {
     pub prompt_cache_hit_tokens: Option<u32>,
     #[serde(default)]
     pub prompt_cache_miss_tokens: Option<u32>,
+    #[serde(default)]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PromptTokensDetails {
+    #[serde(default)]
+    pub cached_tokens: Option<u32>,
 }
 
 impl Usage {
@@ -474,9 +482,17 @@ pub struct CacheUsage {
 impl CacheUsage {
     #[must_use]
     pub fn from_usage(u: &Usage) -> Self {
+        let fallback_hit = u
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|details| details.cached_tokens);
+        let hit = u.prompt_cache_hit_tokens.or(fallback_hit);
+        let miss = u
+            .prompt_cache_miss_tokens
+            .or_else(|| hit.map(|hit| u.prompt_tokens.saturating_sub(hit)));
         Self {
-            prompt_cache_hit_tokens: u64::from(u.prompt_cache_hit_tokens.unwrap_or(0)),
-            prompt_cache_miss_tokens: u64::from(u.prompt_cache_miss_tokens.unwrap_or(0)),
+            prompt_cache_hit_tokens: u64::from(hit.unwrap_or(0)),
+            prompt_cache_miss_tokens: u64::from(miss.unwrap_or(0)),
         }
     }
 

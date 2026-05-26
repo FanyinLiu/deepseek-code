@@ -348,12 +348,41 @@ fn evaluate_tool_inner(
         }
 
         "glob" | "grep" | "search_files" | "search_code" | "git_status" | "git_diff"
-        | "git_log" | "task_get" | "task_list" | "ask_user" | "ask_user_question" => {
-            PolicyDecision::allow(
-                "safe read-only operation",
-                tool_name.to_string(),
-                "Read-only search/git operation",
-                RiskLevel::SafeRead,
+        | "git_log" | "task_get" | "task_list" | "ask_user" | "ask_user_question"
+        | "bash_output" => PolicyDecision::allow(
+            "safe read-only operation",
+            tool_name.to_string(),
+            "Read-only search/git operation",
+            RiskLevel::SafeRead,
+        ),
+
+        "kill_shell" => {
+            let shell_id = match args.get("shell_id").and_then(serde_json::Value::as_str) {
+                Some(shell_id) => shell_id,
+                None => {
+                    return PolicyDecision::deny(
+                        "missing required shell_id",
+                        "Blocked: Kill Shell",
+                        "The shell_id argument is required",
+                        RiskLevel::Blocked,
+                        "No shell_id argument was supplied.".to_string(),
+                    );
+                }
+            };
+            if policy.autonomy_level.auto_local_commands() || !policy.require_approval_for_command {
+                return PolicyDecision::allow(
+                    format!("kill_shell allowed by policy: {shell_id}"),
+                    "Kill Shell",
+                    format!("Terminate background shell {shell_id}"),
+                    RiskLevel::CommandExecution,
+                );
+            }
+            PolicyDecision::ask_once(
+                format!("terminate background shell: {shell_id}"),
+                "Kill Shell",
+                format!("Terminate background shell {shell_id}"),
+                RiskLevel::CommandExecution,
+                format!("shell_id: {shell_id}"),
             )
         }
 
@@ -1008,6 +1037,39 @@ mod tests {
         let decision = evaluate_tool(
             "run_command",
             &args(serde_json::json!({ "command": "cargo test" })),
+            Path::new("."),
+            &policy,
+        );
+
+        assert_eq!(decision.action, PolicyAction::AskOnce);
+        assert_eq!(decision.display.risk_level, RiskLevel::CommandExecution);
+    }
+
+    #[test]
+    fn background_shell_poll_is_safe_read_tool() {
+        let policy = PolicyConfig::default();
+
+        let decision = evaluate_tool(
+            "bash_output",
+            &args(serde_json::json!({ "shell_id": "sh-test" })),
+            Path::new("."),
+            &policy,
+        );
+
+        assert_eq!(decision.action, PolicyAction::Allow);
+        assert_eq!(decision.display.risk_level, RiskLevel::SafeRead);
+    }
+
+    #[test]
+    fn kill_shell_uses_command_approval_policy() {
+        let policy = PolicyConfig {
+            require_approval_for_command: true,
+            ..PolicyConfig::default()
+        };
+
+        let decision = evaluate_tool(
+            "kill_shell",
+            &args(serde_json::json!({ "shell_id": "sh-test" })),
             Path::new("."),
             &policy,
         );

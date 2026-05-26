@@ -40,6 +40,7 @@ pub enum AgentCommand {
         focus: Option<PathBuf>,
         max_turns: Option<u32>,
         model: Option<String>,
+        dry_run: bool,
         json: bool,
     },
     Create {
@@ -95,9 +96,14 @@ pub async fn agent(
             focus,
             max_turns,
             model,
+            dry_run,
             json,
         } => {
-            let result = run_agent(&root, &name, &task, focus, max_turns, model, !json).await?;
+            let result = if dry_run {
+                run_agent_dry_run(&root, &name, &task, focus, max_turns, model)?
+            } else {
+                run_agent(&root, &name, &task, focus, max_turns, model, !json).await?
+            };
             let failed = !result.success;
             if json {
                 print_json(&result)?;
@@ -163,16 +169,44 @@ pub struct AgentShowPayload {
 pub struct AgentRunPayload {
     pub agent: String,
     pub task: String,
+    pub dry_run: bool,
     pub success: bool,
     pub summary: String,
     pub output: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<AgentRunDryRunPlan>,
     pub tool_calls_used: Vec<String>,
     pub files_read: Vec<String>,
     pub files_written: Vec<String>,
     pub duration_ms: u64,
     pub token_usage: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<AgentFailureReasonPayload>,
     pub error: Option<String>,
     pub approval_denials: Vec<AgentApprovalDenialPayload>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentRunDryRunPlan {
+    pub project_root: String,
+    pub focus_files: Vec<String>,
+    pub model: Option<String>,
+    pub max_turns: u32,
+    pub permission_mode: String,
+    pub allowed_tools: Vec<String>,
+    pub would_request_api_key: bool,
+    pub network_required: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentFailureReasonPayload {
+    pub code: String,
+    pub message: String,
+    pub hint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turns_used: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -410,18 +444,8 @@ async fn run_agent(
     model: Option<String>,
     show_events: bool,
 ) -> Result<AgentRunPayload, anyhow::Error> {
-    let registry = SubagentRegistry::load_from_project(project_root);
-    let Some(base_config) = registry.get(name) else {
-        bail!("unknown agent '{name}'");
-    };
-
-    let mut config = base_config.clone();
-    if let Some(max_turns) = max_turns {
-        config.max_turns = max_turns;
-    }
-    if let Some(model) = model {
-        config.model = Some(crate::provider::parse_model(&model)?);
-    }
+    let config = resolve_run_config(project_root, name, max_turns, model)?;
+    let configured_max_turns = config.max_turns;
 
     let app_config = storage::Config::load(Some(project_root))?;
     let api_key = super::login::resolve_or_prompt_api_key(Some(project_root))?;
@@ -478,7 +502,74 @@ async fn run_agent(
         task_text,
         result,
         approval_denials,
+        configured_max_turns,
     ))
+}
+
+fn run_agent_dry_run(
+    project_root: &Path,
+    name: &str,
+    task_text: &str,
+    focus: Option<PathBuf>,
+    max_turns: Option<u32>,
+    model: Option<String>,
+) -> Result<AgentRunPayload, anyhow::Error> {
+    let config = resolve_run_config(project_root, name, max_turns, model)?;
+    let focus_files = focus
+        .map(|path| vec![path.display().to_string()])
+        .unwrap_or_default();
+    let plan = AgentRunDryRunPlan {
+        project_root: project_root.display().to_string(),
+        focus_files,
+        model: config.model.as_ref().map(ToString::to_string),
+        max_turns: config.max_turns,
+        permission_mode: permission_mode_label(&config.permission_mode).to_string(),
+        allowed_tools: config.allowed_tools.clone(),
+        would_request_api_key: false,
+        network_required: false,
+    };
+    let summary = format!(
+        "dry-run: agent '{name}' would run locally with max_turns={} and no API request",
+        plan.max_turns
+    );
+    Ok(AgentRunPayload {
+        agent: name.to_string(),
+        task: task_text.to_string(),
+        dry_run: true,
+        success: true,
+        summary: summary.clone(),
+        output: summary,
+        plan: Some(plan),
+        tool_calls_used: Vec::new(),
+        files_read: Vec::new(),
+        files_written: Vec::new(),
+        duration_ms: 0,
+        token_usage: 0,
+        failure_reason: None,
+        error: None,
+        approval_denials: Vec::new(),
+    })
+}
+
+fn resolve_run_config(
+    project_root: &Path,
+    name: &str,
+    max_turns: Option<u32>,
+    model: Option<String>,
+) -> Result<SubagentConfig, anyhow::Error> {
+    let registry = SubagentRegistry::load_from_project(project_root);
+    let Some(base_config) = registry.get(name) else {
+        bail!("unknown agent '{name}'");
+    };
+
+    let mut config = base_config.clone();
+    if let Some(max_turns) = max_turns {
+        config.max_turns = max_turns;
+    }
+    if let Some(model) = model {
+        config.model = Some(crate::provider::parse_model(&model)?);
+    }
+    Ok(config)
 }
 
 async fn handle_run_event(
@@ -560,20 +651,117 @@ fn run_payload_from_result(
     task: &str,
     result: SubagentResult,
     approval_denials: Vec<AgentApprovalDenialPayload>,
+    max_turns: u32,
 ) -> AgentRunPayload {
+    let failure_reason = classify_run_failure(&result, approval_denials.as_slice(), max_turns);
     AgentRunPayload {
         agent: name.to_string(),
         task: task.to_string(),
+        dry_run: false,
         success: result.success,
         summary: result.summary,
         output: result.output,
+        plan: None,
         tool_calls_used: result.tool_calls_used,
         files_read: result.files_read,
         files_written: result.files_written,
         duration_ms: result.duration_ms,
         token_usage: result.token_usage,
+        failure_reason,
         error: result.error,
         approval_denials,
+    }
+}
+
+fn classify_run_failure(
+    result: &SubagentResult,
+    approval_denials: &[AgentApprovalDenialPayload],
+    max_turns: u32,
+) -> Option<AgentFailureReasonPayload> {
+    if result.success {
+        return None;
+    }
+    if !approval_denials.is_empty() {
+        return Some(failure_reason(
+            "approval_denied",
+            "agent run stopped because a tool approval was denied",
+            "approve the requested tool or narrow the task to avoid it",
+            None,
+            None,
+        ));
+    }
+    if result.summary.contains("已用完轮次预算")
+        || result.output.contains("已用完轮次预算")
+        || result.error.as_deref().is_some_and(|error| {
+            error.contains("已用完轮次预算")
+                || error.contains("turn budget was exhausted")
+                || error.contains("turn budget")
+        })
+    {
+        return Some(failure_reason(
+            "turn_budget_exhausted",
+            "agent stopped after using all configured tool-call turns",
+            "increase --max-turns or narrow the task/focus",
+            Some(max_turns),
+            Some(result.tool_calls_used.len() as u32),
+        ));
+    }
+    if result.files_read.is_empty()
+        && result
+            .tool_calls_used
+            .iter()
+            .any(|tool| tool == "list_dir" || tool == "search_code")
+    {
+        return Some(failure_reason(
+            "turn_budget_exhausted",
+            "agent stopped after using all configured tool-call turns",
+            "increase --max-turns or narrow the task/focus",
+            Some(max_turns),
+            Some(result.tool_calls_used.len() as u32),
+        ));
+    }
+    if result.tool_calls_used.is_empty() {
+        return Some(failure_reason(
+            "no_tool_progress",
+            "agent did not make observable tool progress",
+            "retry with a smaller task or provide a focus path",
+            Some(max_turns),
+            Some(0),
+        ));
+    }
+    if result.error.as_deref().is_some_and(|error| {
+        error.contains("未形成可用结论") || error.contains("no usable conclusion")
+    }) {
+        return Some(failure_reason(
+            "no_final_answer",
+            "agent finished tool work but did not produce a usable final answer",
+            "retry with a more specific expected output",
+            Some(max_turns),
+            Some(result.tool_calls_used.len() as u32),
+        ));
+    }
+    Some(failure_reason(
+        "agent_failed",
+        "agent run failed",
+        "inspect error and retry with a narrower task",
+        Some(max_turns),
+        Some(result.tool_calls_used.len() as u32),
+    ))
+}
+
+fn failure_reason(
+    code: &str,
+    message: &str,
+    hint: &str,
+    max_turns: Option<u32>,
+    turns_used: Option<u32>,
+) -> AgentFailureReasonPayload {
+    AgentFailureReasonPayload {
+        code: code.to_string(),
+        message: message.to_string(),
+        hint: hint.to_string(),
+        max_turns,
+        turns_used,
     }
 }
 
@@ -658,6 +846,9 @@ fn print_run_result(payload: &AgentRunPayload) {
     }
     if let Some(error) = &payload.error {
         println!("Error: {error}");
+    }
+    if let Some(reason) = &payload.failure_reason {
+        println!("Failure reason: {} - {}", reason.code, reason.hint);
     }
     if !payload.approval_denials.is_empty() {
         println!("Approval denials:");
@@ -891,14 +1082,17 @@ mod tests {
         let payload = AgentRunPayload {
             agent: "code-reviewer".to_string(),
             task: "review".to_string(),
+            dry_run: false,
             success: false,
             summary: String::new(),
             output: String::new(),
+            plan: None,
             tool_calls_used: Vec::new(),
             files_read: Vec::new(),
             files_written: Vec::new(),
             duration_ms: 0,
             token_usage: 0,
+            failure_reason: None,
             error: Some("approval denied".to_string()),
             approval_denials: vec![AgentApprovalDenialPayload {
                 agent_id: "agent-1".to_string(),
@@ -916,6 +1110,31 @@ mod tests {
             "{\"command\":\"echo hi\"}"
         );
         assert_eq!(value["approval_denials"][0]["details"], "Command: echo hi");
+    }
+
+    #[test]
+    fn run_payload_classifies_turn_budget_failure() {
+        let now = chrono::Utc::now();
+        let result = SubagentResult {
+            success: false,
+            summary: "子任务停止：已用完轮次预算。".to_string(),
+            output: "子任务停止：已用完轮次预算。".to_string(),
+            tool_calls_used: vec!["list_dir".to_string()],
+            files_read: Vec::new(),
+            files_written: Vec::new(),
+            duration_ms: 10,
+            token_usage: 20,
+            error: Some("子任务停止：已用完轮次预算。".to_string()),
+            started_at: now,
+            completed_at: now,
+        };
+
+        let payload = run_payload_from_result("code-explorer", "inspect", result, Vec::new(), 1);
+
+        let reason = payload.failure_reason.expect("failure reason");
+        assert_eq!(reason.code, "turn_budget_exhausted");
+        assert_eq!(reason.max_turns, Some(1));
+        assert_eq!(reason.turns_used, Some(1));
     }
 
     #[test]

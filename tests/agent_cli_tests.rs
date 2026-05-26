@@ -6,6 +6,12 @@ fn octocode_command(project_root: &std::path::Path) -> Command {
     command
 }
 
+fn octo_command(project_root: &std::path::Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_octo"));
+    command.arg("-C").arg(project_root);
+    command
+}
+
 #[test]
 fn agent_list_json_contains_built_ins() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -159,6 +165,66 @@ system_prompt = "Read the codebase and report concise findings."
         .find(|report| report["name"] == "toml-explorer")
         .expect("toml-explorer report");
     assert_eq!(report["valid"], true);
+}
+
+#[test]
+fn octo_agent_run_dry_run_json_does_not_require_api_key() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let output = octo_command(root.path())
+        .args([
+            "agent",
+            "run",
+            "code-explorer",
+            "inspect cli agent",
+            "--dry-run",
+            "--json",
+        ])
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .output()
+        .expect("run octo agent dry-run");
+
+    assert!(output.status.success(), "stderr={}", stderr(&output));
+    assert!(
+        !stderr(&output).contains("API key"),
+        "dry-run should not resolve API keys"
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("agent dry-run json parses");
+    assert_eq!(json["dry_run"], true);
+    assert_eq!(json["success"], true);
+    assert_eq!(json["plan"]["would_request_api_key"], false);
+    assert_eq!(json["plan"]["network_required"], false);
+    assert_eq!(json["agent"], "code-explorer");
+}
+
+#[test]
+fn octo_agent_run_dry_run_json_applies_overrides() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let output = octo_command(root.path())
+        .args([
+            "agent",
+            "run",
+            "code-explorer",
+            "inspect cli agent",
+            "--focus",
+            "src/cli/agent.rs",
+            "--max-turns",
+            "1",
+            "--model",
+            "flash",
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .expect("run octo agent dry-run with overrides");
+
+    assert!(output.status.success(), "stderr={}", stderr(&output));
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("agent dry-run json parses");
+    assert_eq!(json["plan"]["max_turns"], 1);
+    assert_eq!(json["plan"]["model"], "deepseek-v4-flash");
+    assert_eq!(json["plan"]["focus_files"][0], "src/cli/agent.rs");
 }
 
 fn stderr(output: &std::process::Output) -> String {

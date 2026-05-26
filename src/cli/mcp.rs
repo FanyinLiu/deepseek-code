@@ -174,7 +174,7 @@ fn get(root: &Path, name: &str, json: bool) -> Result<(), anyhow::Error> {
 
 async fn status(root: &Path, json: bool, connect: bool) -> Result<(), anyhow::Error> {
     let config = storage::Config::load(Some(root))?;
-    let mut registry = crate::mcp::McpRegistry::new();
+    let mut registry = crate::mcp::McpRegistry::with_project_root(root.to_path_buf());
     for (name, server) in &config.mcp.servers {
         registry.register_config(name.clone(), server);
     }
@@ -218,7 +218,7 @@ async fn status(root: &Path, json: bool, connect: bool) -> Result<(), anyhow::Er
                 enabled: payload.enabled,
                 servers: payload.servers,
             });
-            println!("Live check skipped. Use `octocode mcp status --connect` to connect.");
+            println!("Live check skipped. Use `octo mcp status --connect` to connect.");
         }
     }
     Ok(())
@@ -330,7 +330,7 @@ async fn read_resource(
 async fn connect_named_client(root: &Path, server: &str) -> Result<McpClient, anyhow::Error> {
     let config = storage::Config::load(Some(root))?;
     if !config.mcp.enabled {
-        anyhow::bail!("MCP is disabled; enable it with `octocode mcp add` or config mcp.enabled");
+        anyhow::bail!("MCP is disabled; enable it with `octo mcp add` or config mcp.enabled");
     }
     let Some(entry) = config.mcp.servers.get(server) else {
         anyhow::bail!("MCP server not found: {server}");
@@ -341,6 +341,7 @@ async fn connect_named_client(root: &Path, server: &str) -> Result<McpClient, an
         command: entry.command.clone(),
         args: entry.args.clone(),
         env: entry.env.clone(),
+        cwd: Some(root.to_path_buf()),
         url: entry.url.clone(),
         headers: entry.headers.clone(),
     };

@@ -10,7 +10,8 @@ pub async fn resume(
 ) -> Result<(), anyhow::Error> {
     let root = resolve_project_root(project_root, "resume")?;
 
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?;
+    let home =
+        storage::user_home_dir().ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?;
 
     let store = SessionStore::new(home.join(".octocode"));
     let event_store = EventLogStore::new(home.join(".octocode"));
@@ -103,7 +104,8 @@ pub async fn export(
 ) -> Result<(), anyhow::Error> {
     let root = resolve_project_root(project_root, "export")?;
 
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?;
+    let home =
+        storage::user_home_dir().ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?;
 
     let store = SessionStore::new(home.join(".octocode"));
 

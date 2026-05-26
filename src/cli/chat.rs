@@ -59,7 +59,7 @@ pub async fn chat(
         };
 
     // Create or load session
-    let home = match dirs::home_dir() {
+    let home = match storage::user_home_dir() {
         Some(home) => home,
         None => {
             return json_error_result(output_format, anyhow::anyhow!("cannot find home directory"));
@@ -704,7 +704,7 @@ pub async fn chat(
 
             // Save session after each interactive turn
             if let Some(ref o) = orchestrator {
-                let home = dirs::home_dir()
+                let home = storage::user_home_dir()
                     .ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?;
                 let store = storage::SessionStore::new(home.join(".octocode"));
                 if let Err(e) = store.save(&o.session) {

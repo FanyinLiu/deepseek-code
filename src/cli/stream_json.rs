@@ -506,12 +506,13 @@ fn finish_reason_label(reason: &FinishReason) -> String {
 }
 
 fn usage_json(usage: &Usage) -> serde_json::Value {
+    let cache = CacheUsage::from_usage(usage);
     json!({
         "prompt_tokens": usage.prompt_tokens,
         "completion_tokens": usage.completion_tokens,
         "total_tokens": usage.total_tokens,
-        "prompt_cache_hit_tokens": usage.prompt_cache_hit_tokens,
-        "prompt_cache_miss_tokens": usage.prompt_cache_miss_tokens,
+        "prompt_cache_hit_tokens": cache.prompt_cache_hit_tokens,
+        "prompt_cache_miss_tokens": cache.prompt_cache_miss_tokens,
     })
 }
 
@@ -631,6 +632,7 @@ mod tests {
                 total_tokens: 7,
                 prompt_cache_hit_tokens: Some(1),
                 prompt_cache_miss_tokens: Some(2),
+                prompt_tokens_details: None,
             }),
             cache: None,
         });

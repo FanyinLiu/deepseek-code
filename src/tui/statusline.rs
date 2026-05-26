@@ -87,7 +87,7 @@ fn statusline_row(props: &StatuslineProps<'_>, canvas: Color, width: u16) -> Vec
                 push_sep(&mut spans, canvas, colors.sep);
                 push_label(
                     &mut spans,
-                    label(props.chinese, "Cache", "缓存"),
+                    label(props.chinese, "Hit", "命中率"),
                     colors.label,
                 );
                 let rate = cache.hit_rate() * 100.0;
@@ -424,6 +424,87 @@ mod tests {
         assert!(!rendered.contains("↑ 742 tokens"));
         assert!(!rendered.contains("↓ 131 tokens"));
         assert!(!rendered.contains("tok 131"));
+    }
+
+    #[test]
+    fn statusline_renders_cache_hit_rate_when_available() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 2)).expect("terminal");
+        terminal
+            .draw(|f| {
+                render_statusline(
+                    f,
+                    f.area(),
+                    StatuslineProps {
+                        mode: AppMode::Run,
+                        provider: "deepseek",
+                        model: "deepseek-v4-flash",
+                        status: "working",
+                        tokens: 5_700,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        agent_tokens: 0,
+                        cost: 0.001,
+                        cache: Some(&CacheUsage {
+                            prompt_cache_hit_tokens: 800,
+                            prompt_cache_miss_tokens: 200,
+                        }),
+                        permissions: "permissions ask",
+                        context_limit: None,
+                        chinese: false,
+                    },
+                );
+            })
+            .expect("draw");
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(rendered.contains("Hit 80%"));
+    }
+
+    #[test]
+    fn statusline_localizes_cache_hit_rate_label() {
+        let mut terminal = Terminal::new(TestBackend::new(160, 2)).expect("terminal");
+        terminal
+            .draw(|f| {
+                render_statusline(
+                    f,
+                    f.area(),
+                    StatuslineProps {
+                        mode: AppMode::Run,
+                        provider: "deepseek",
+                        model: "deepseek-v4-flash",
+                        status: "working",
+                        tokens: 5_700,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        agent_tokens: 0,
+                        cost: 0.001,
+                        cache: Some(&CacheUsage {
+                            prompt_cache_hit_tokens: 900,
+                            prompt_cache_miss_tokens: 100,
+                        }),
+                        permissions: "permissions ask",
+                        context_limit: None,
+                        chinese: true,
+                    },
+                );
+            })
+            .expect("draw");
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(rendered.contains("命 中 率"));
+        assert!(rendered.contains("90%"));
     }
 
     #[test]

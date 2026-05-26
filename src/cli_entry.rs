@@ -894,6 +894,9 @@ enum AgentCommands {
         /// Model override (pro, flash)
         #[arg(long)]
         model: Option<String>,
+        /// Preview the agent run without resolving API keys or calling the model
+        #[arg(long)]
+        dry_run: bool,
         /// Print machine-readable JSON
         #[arg(long)]
         json: bool,
@@ -1684,6 +1687,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
                     focus,
                     max_turns,
                     model,
+                    dry_run,
                     json,
                 } => cli::agent::AgentCommand::Run {
                     name,
@@ -1691,6 +1695,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
                     focus,
                     max_turns,
                     model,
+                    dry_run,
                     json,
                 },
                 AgentCommands::Create { name, template } => cli::agent::AgentCommand::Create {

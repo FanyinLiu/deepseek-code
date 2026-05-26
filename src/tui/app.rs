@@ -5486,21 +5486,37 @@ fn tui_terminal(
     let backend = CrosstermBackend::new(std::io::stdout());
     if renderer.uses_inline_viewport() {
         if TerminalEnvironment::current().skips_cursor_position_probe() {
-            let (width, height) = crossterm::terminal::size().unwrap_or((100, 24));
             return Ok(Terminal::with_options(
                 backend,
                 TerminalOptions {
-                    viewport: Viewport::Fixed(Rect::new(0, 0, width.max(1), height.max(1))),
+                    viewport: Viewport::Fixed(full_terminal_viewport_area()),
                 },
             )?);
         }
-        if let Some(area) = classic_fixed_viewport_area() {
-            return Ok(Terminal::with_options(
-                backend,
-                TerminalOptions {
-                    viewport: Viewport::Fixed(area),
-                },
-            )?);
+        let (width, height) = crossterm::terminal::size().unwrap_or((100, 24));
+        match cursor_position() {
+            Ok((_, cursor_y)) => {
+                if let Some(area) =
+                    classic_fixed_viewport_area_for_terminal(width, height, cursor_y)
+                {
+                    return Ok(Terminal::with_options(
+                        backend,
+                        TerminalOptions {
+                            viewport: Viewport::Fixed(area),
+                        },
+                    )?);
+                }
+            }
+            Err(_) => {
+                return Ok(Terminal::with_options(
+                    backend,
+                    TerminalOptions {
+                        viewport: Viewport::Fixed(full_terminal_viewport_area_for_terminal(
+                            width, height,
+                        )),
+                    },
+                )?);
+            }
         }
         Ok(Terminal::with_options(
             backend,
@@ -5513,13 +5529,13 @@ fn tui_terminal(
     }
 }
 
-fn classic_fixed_viewport_area() -> Option<Rect> {
-    if TerminalEnvironment::current().skips_cursor_position_probe() {
-        return None;
-    }
-    let (width, height) = crossterm::terminal::size().ok()?;
-    let (_, cursor_y) = cursor_position().ok()?;
-    classic_fixed_viewport_area_for_terminal(width, height, cursor_y)
+fn full_terminal_viewport_area() -> Rect {
+    let (width, height) = crossterm::terminal::size().unwrap_or((100, 24));
+    full_terminal_viewport_area_for_terminal(width, height)
+}
+
+fn full_terminal_viewport_area_for_terminal(width: u16, height: u16) -> Rect {
+    Rect::new(0, 0, width.max(1), height.max(1))
 }
 
 fn classic_fixed_viewport_area_for_terminal(
@@ -8151,6 +8167,7 @@ mod tests {
                 total_tokens: 123,
                 prompt_cache_hit_tokens: None,
                 prompt_cache_miss_tokens: None,
+                prompt_tokens_details: None,
             }),
             cache: None,
         });
@@ -8187,6 +8204,7 @@ mod tests {
                 total_tokens: 213,
                 prompt_cache_hit_tokens: None,
                 prompt_cache_miss_tokens: None,
+                prompt_tokens_details: None,
             }),
             cache: None,
         });
@@ -8579,6 +8597,7 @@ mod tests {
                 total_tokens: 123,
                 prompt_cache_hit_tokens: None,
                 prompt_cache_miss_tokens: None,
+                prompt_tokens_details: None,
             }),
             cache: None,
         });

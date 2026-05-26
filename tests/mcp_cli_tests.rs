@@ -1,7 +1,7 @@
 use std::process::Command;
 
-fn octocode_command(project_root: &std::path::Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_octocode"));
+fn octo_command(project_root: &std::path::Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_octo"));
     command.arg("-C").arg(project_root);
     command
 }
@@ -9,7 +9,7 @@ fn octocode_command(project_root: &std::path::Path) -> Command {
 #[test]
 fn mcp_add_list_remove_updates_project_local_config() {
     let root = tempfile::tempdir().expect("tempdir");
-    let output = octocode_command(root.path())
+    let output = octo_command(root.path())
         .args([
             "mcp",
             "add",
@@ -24,14 +24,14 @@ fn mcp_add_list_remove_updates_project_local_config() {
             "1000",
         ])
         .output()
-        .expect("run octocode mcp add");
+        .expect("run octo mcp add");
 
     assert!(output.status.success(), "stderr={}", stderr(&output));
 
-    let output = octocode_command(root.path())
+    let output = octo_command(root.path())
         .args(["mcp", "list", "--json"])
         .output()
-        .expect("run octocode mcp list");
+        .expect("run octo mcp list");
     assert!(output.status.success(), "stderr={}", stderr(&output));
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("mcp list json parses");
@@ -44,30 +44,30 @@ fn mcp_add_list_remove_updates_project_local_config() {
     assert_eq!(server["transport"], "stdio");
     assert_eq!(server["timeout_ms"], 1000);
 
-    let output = octocode_command(root.path())
+    let output = octo_command(root.path())
         .args(["mcp", "get", "localfs", "--json"])
         .output()
-        .expect("run octocode mcp get");
+        .expect("run octo mcp get");
     assert!(output.status.success(), "stderr={}", stderr(&output));
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("mcp get json parses");
     assert_eq!(json["name"], "localfs");
     assert_eq!(json["transport"], "stdio");
 
-    let output = octocode_command(root.path())
+    let output = octo_command(root.path())
         .args(["mcp", "remove", "localfs"])
         .output()
-        .expect("run octocode mcp remove");
+        .expect("run octo mcp remove");
     assert!(output.status.success(), "stderr={}", stderr(&output));
 }
 
 #[test]
 fn mcp_status_json_does_not_connect_by_default() {
     let root = tempfile::tempdir().expect("tempdir");
-    let output = octocode_command(root.path())
+    let output = octo_command(root.path())
         .args(["mcp", "status", "--json"])
         .output()
-        .expect("run octocode mcp status");
+        .expect("run octo mcp status");
 
     assert!(output.status.success(), "stderr={}", stderr(&output));
     let json: serde_json::Value =
@@ -75,6 +75,23 @@ fn mcp_status_json_does_not_connect_by_default() {
     assert_eq!(json["enabled"], false);
     assert_eq!(json["connected"], false);
     assert!(json["servers"].as_array().expect("servers").is_empty());
+}
+
+#[test]
+fn mcp_status_text_uses_primary_octo_command_hint() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let output = octo_command(root.path())
+        .args(["mcp", "status"])
+        .output()
+        .expect("run octo mcp status");
+
+    assert!(output.status.success(), "stderr={}", stderr(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("octo mcp status --connect"), "{stdout}");
+    assert!(
+        !stdout.contains("octocode mcp status --connect"),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -87,17 +104,17 @@ fn mcp_tools_list_and_call_fixture_server() {
     let script = write_fixture_server(root.path());
     write_fixture_config(root.path(), &python, &script);
 
-    let output = octocode_command(root.path())
+    let output = octo_command(root.path())
         .args(["mcp", "tools", "list", "fixture", "--json"])
         .output()
-        .expect("run octocode mcp tools list");
+        .expect("run octo mcp tools list");
     assert!(output.status.success(), "stderr={}", stderr(&output));
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("mcp tools list json parses");
     assert_eq!(json["server"], "fixture");
     assert_eq!(json["tools"][0]["name"], "echo");
 
-    let output = octocode_command(root.path())
+    let output = octo_command(root.path())
         .args([
             "mcp",
             "tools",
@@ -109,7 +126,7 @@ fn mcp_tools_list_and_call_fixture_server() {
             "--json",
         ])
         .output()
-        .expect("run octocode mcp tools call");
+        .expect("run octo mcp tools call");
     assert!(output.status.success(), "stderr={}", stderr(&output));
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("mcp tools call json parses");
@@ -128,17 +145,17 @@ fn mcp_resources_list_and_read_fixture_server() {
     let script = write_fixture_server(root.path());
     write_fixture_config(root.path(), &python, &script);
 
-    let output = octocode_command(root.path())
+    let output = octo_command(root.path())
         .args(["mcp", "resources", "list", "fixture", "--json"])
         .output()
-        .expect("run octocode mcp resources list");
+        .expect("run octo mcp resources list");
     assert!(output.status.success(), "stderr={}", stderr(&output));
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("mcp resources list json parses");
     assert_eq!(json["server"], "fixture");
     assert_eq!(json["resources"][0]["uri"], "fixture://guide");
 
-    let output = octocode_command(root.path())
+    let output = octo_command(root.path())
         .args([
             "mcp",
             "resources",
@@ -148,13 +165,40 @@ fn mcp_resources_list_and_read_fixture_server() {
             "--json",
         ])
         .output()
-        .expect("run octocode mcp resources read");
+        .expect("run octo mcp resources read");
     assert!(output.status.success(), "stderr={}", stderr(&output));
     let json: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("mcp resources read json parses");
     assert_eq!(json["server"], "fixture");
     assert_eq!(json["uri"], "fixture://guide");
     assert_eq!(json["result"]["contents"][0]["text"], "fixture guide");
+}
+
+#[test]
+fn mcp_stdio_launches_from_project_root_for_relative_args() {
+    let Some(python) = python_command() else {
+        eprintln!("skipping MCP fixture test because python is unavailable");
+        return;
+    };
+    let root = tempfile::tempdir().expect("tempdir");
+    let other = tempfile::tempdir().expect("other cwd");
+    let script = write_fixture_server(root.path());
+    assert_eq!(
+        script.file_name().and_then(|name| name.to_str()),
+        Some("mcp_fixture.py")
+    );
+    write_fixture_config_with_arg(root.path(), &python, "mcp_fixture.py");
+
+    let output = octo_command(root.path())
+        .current_dir(other.path())
+        .args(["mcp", "tools", "list", "fixture", "--json"])
+        .output()
+        .expect("run octo mcp tools list from another cwd");
+
+    assert!(output.status.success(), "stderr={}", stderr(&output));
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("mcp tools list json parses");
+    assert_eq!(json["tools"][0]["name"], "echo");
 }
 
 fn python_command() -> Option<String> {
@@ -171,6 +215,10 @@ fn python_command() -> Option<String> {
 }
 
 fn write_fixture_config(root: &std::path::Path, python: &str, script: &std::path::Path) {
+    write_fixture_config_with_arg(root, python, &script.display().to_string());
+}
+
+fn write_fixture_config_with_arg(root: &std::path::Path, python: &str, script_arg: &str) {
     let config_dir = root.join(".octocode");
     std::fs::create_dir_all(&config_dir).expect("create .octocode");
     std::fs::write(
@@ -187,11 +235,7 @@ args = ["{}"]
 timeout_ms = 5000
 "#,
             python.replace('\\', "\\\\").replace('"', "\\\""),
-            script
-                .display()
-                .to_string()
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"")
+            script_arg.replace('\\', "\\\\").replace('"', "\\\"")
         ),
     )
     .expect("write MCP config");

@@ -39,8 +39,6 @@ pub async fn run_command_with_sandbox(
 
     let start = Instant::now();
 
-    // Safety checks
-    const MAX_COMMAND_LEN: usize = 4096;
     if command.len() > MAX_COMMAND_LEN {
         return Ok(CommandResult {
             stdout: String::new(),
@@ -55,26 +53,18 @@ pub async fn run_command_with_sandbox(
         });
     }
 
-    let dangerous = crate::policy::commands::contains_dangerous_pattern(command);
-    // Test code may legitimately need to construct payloads that look
-    // dangerous (e.g. PowerShell EncodedCommand for cross-shell test fixtures).
-    // We let it opt out via an env var that only test runners set, and which
-    // is never read by the production CLI.
-    let bypass = std::env::var_os("OCTO_TEST_BYPASS_DANGER_LINT").is_some();
-    if let Some(reason) = dangerous {
-        if !bypass {
-            return Ok(CommandResult {
-                stdout: String::new(),
-                stderr: format!("dangerous command blocked: {reason}"),
-                exit_code: -1,
-                duration_ms: 0,
-                timed_out: false,
-                stdout_truncated: false,
-                stderr_truncated: false,
-                stdout_original_bytes: 0,
-                stderr_original_bytes: 0,
-            });
-        }
+    if let Some(reason) = command_policy_violation(command) {
+        return Ok(CommandResult {
+            stdout: String::new(),
+            stderr: reason,
+            exit_code: -1,
+            duration_ms: 0,
+            timed_out: false,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            stdout_original_bytes: 0,
+            stderr_original_bytes: 0,
+        });
     }
 
     // Use shell to execute (cross-platform)
@@ -104,15 +94,7 @@ pub async fn run_command_with_sandbox(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    #[cfg(unix)]
-    {
-        command_builder.process_group(0);
-    }
-    #[cfg(windows)]
-    {
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        command_builder.creation_flags(CREATE_NEW_PROCESS_GROUP);
-    }
+    isolate_command_process_tree(&mut command_builder);
 
     let mut child = match command_builder.spawn() {
         Ok(c) => c,
@@ -148,10 +130,10 @@ pub async fn run_command_with_sandbox(
     tokio::select! {
         status = child.wait() => {
             let status = status?;
-            process_guard.disarm();
             let (stdout, stdout_truncated, stdout_original_bytes) = match stdout_handle.take() {
-                Some(handle) => {
-                    let output = collect_output(handle).await;
+                Some(mut handle) => {
+                    let output =
+                        collect_output_after_process_exit(&mut handle, &mut process_guard).await;
                     (
                         String::from_utf8_lossy(&output.bytes).to_string(),
                         output.truncated,
@@ -161,8 +143,9 @@ pub async fn run_command_with_sandbox(
                 None => (String::new(), false, 0),
             };
             let (stderr, stderr_truncated, stderr_original_bytes) = match stderr_handle.take() {
-                Some(handle) => {
-                    let output = collect_output(handle).await;
+                Some(mut handle) => {
+                    let output =
+                        collect_output_after_process_exit(&mut handle, &mut process_guard).await;
                     (
                         String::from_utf8_lossy(&output.bytes).to_string(),
                         output.truncated,
@@ -171,6 +154,7 @@ pub async fn run_command_with_sandbox(
                 }
                 None => (String::new(), false, 0),
             };
+            process_guard.disarm();
             Ok(CommandResult {
                 stdout,
                 stderr,
@@ -292,11 +276,16 @@ async fn await_output_with_timeout(handle: &mut OutputCaptureHandle) -> OutputCa
     output
 }
 
-async fn collect_output(handle: OutputCaptureHandle) -> OutputCapture {
-    let state = handle.state;
-    let _ = handle.task.await;
-    let output = state.lock().await.clone();
-    output
+async fn collect_output_after_process_exit(
+    handle: &mut OutputCaptureHandle,
+    process_guard: &mut ProcessTreeGuard,
+) -> OutputCapture {
+    let output = await_output_with_timeout(handle).await;
+    if handle.task.is_finished() {
+        return output;
+    }
+    process_guard.terminate();
+    await_output_with_timeout(handle).await
 }
 
 fn append_timeout_marker(stderr: &mut String, timeout_seconds: u64) {
@@ -304,6 +293,37 @@ fn append_timeout_marker(stderr: &mut String, timeout_seconds: u64) {
         stderr.push('\n');
     }
     stderr.push_str(&format!("[timed out after {timeout_seconds}s]"));
+}
+
+pub(crate) const MAX_COMMAND_LEN: usize = 4096;
+
+pub(crate) fn command_policy_violation(command: &str) -> Option<String> {
+    if command.len() > MAX_COMMAND_LEN {
+        return Some(format!(
+            "command exceeds maximum length of {MAX_COMMAND_LEN} characters"
+        ));
+    }
+
+    // Test code may legitimately need to construct payloads that look
+    // dangerous (e.g. PowerShell EncodedCommand for cross-shell test fixtures).
+    // We let it opt out via an env var that only test runners set, and which
+    // is never read by the production CLI.
+    let bypass = std::env::var_os("OCTO_TEST_BYPASS_DANGER_LINT").is_some();
+    crate::policy::commands::contains_dangerous_pattern(command)
+        .filter(|_| !bypass)
+        .map(|reason| format!("dangerous command blocked: {reason}"))
+}
+
+pub(crate) fn isolate_command_process_tree(command_builder: &mut Command) {
+    #[cfg(unix)]
+    {
+        command_builder.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command_builder.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
 }
 
 struct ProcessTreeGuard {
@@ -331,7 +351,7 @@ impl Drop for ProcessTreeGuard {
 }
 
 #[cfg(unix)]
-fn terminate_process_tree(pid: Option<u32>) {
+pub(crate) fn terminate_process_tree(pid: Option<u32>) {
     let Some(pid) = pid else {
         return;
     };
@@ -345,7 +365,7 @@ fn terminate_process_tree(pid: Option<u32>) {
 }
 
 #[cfg(windows)]
-fn terminate_process_tree(pid: Option<u32>) {
+pub(crate) fn terminate_process_tree(pid: Option<u32>) {
     let Some(pid) = pid else {
         return;
     };
@@ -358,9 +378,9 @@ fn terminate_process_tree(pid: Option<u32>) {
 }
 
 #[cfg(all(not(unix), not(windows)))]
-fn terminate_process_tree(_pid: Option<u32>) {}
+pub(crate) fn terminate_process_tree(_pid: Option<u32>) {}
 
-fn sanitized_command_env() -> Vec<(String, String)> {
+pub(crate) fn sanitized_command_env() -> Vec<(String, String)> {
     sanitized_command_env_from(std::env::vars())
 }
 
@@ -381,6 +401,18 @@ where
 
 fn is_sensitive_command_env_key(key: &str) -> bool {
     let normalized = key.to_ascii_uppercase();
+    const SAFE_EXCEPTIONS: &[&str] = &[
+        "SSH_AUTH_SOCK",
+        "SDKROOT",
+        "DEVELOPER_DIR",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+    ];
+    if SAFE_EXCEPTIONS.contains(&normalized.as_str()) {
+        return false;
+    }
     const SENSITIVE_PATTERNS: &[&str] = &[
         "API_KEY",
         "TOKEN",
@@ -533,6 +565,27 @@ mod tests {
         assert!(!status.success(), "child process {pid} should be gone");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn completed_shell_with_inherited_pipe_does_not_hang() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let started = std::time::Instant::now();
+
+        let result = run_command(root.path(), "sleep 20 & printf 'done\\n'", None, 2)
+            .await
+            .unwrap();
+
+        assert!(
+            result.is_success(),
+            "expected shell success, got {result:?}"
+        );
+        assert!(result.stdout.contains("done"), "{result:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "run_command should not wait for background pipe holders"
+        );
+    }
+
     /// RAII drop guard that unsets an env var on drop.
     #[cfg(windows)]
     struct EnvGuard(&'static str);
@@ -630,6 +683,7 @@ mod tests {
             ("SDKROOT", "/Applications/Xcode.app/SDKs/MacOSX.sdk"),
             ("PKG_CONFIG_PATH", "/opt/homebrew/lib/pkgconfig"),
             ("HTTPS_PROXY", "http://proxy.local:8080"),
+            ("SSH_AUTH_SOCK", "/private/tmp/com.apple.launchd/socket"),
         ]);
 
         assert!(env.iter().any(|(key, _)| key == "PATH"));
@@ -637,6 +691,7 @@ mod tests {
         assert!(env.iter().any(|(key, _)| key == "SDKROOT"));
         assert!(env.iter().any(|(key, _)| key == "PKG_CONFIG_PATH"));
         assert!(env.iter().any(|(key, _)| key == "HTTPS_PROXY"));
+        assert!(env.iter().any(|(key, _)| key == "SSH_AUTH_SOCK"));
         assert!(!env.iter().any(|(key, _)| key.contains("TOKEN")));
         assert!(!env.iter().any(|(key, _)| key.contains("API_KEY")));
     }

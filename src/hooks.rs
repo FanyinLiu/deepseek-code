@@ -187,7 +187,12 @@ async fn run_hook_command(
         .env("DS_HOOK_EVENT", event.as_str())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        child.process_group(0);
+    }
 
     let mut child = match child.spawn() {
         Ok(child) => child,
@@ -210,6 +215,7 @@ async fn run_hook_command(
         let _ = stdin.write_all(b"\n").await;
     }
 
+    let child_pid = child.id();
     let timeout = Duration::from_secs(timeout_seconds.max(1));
     let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(Ok(output)) => output,
@@ -225,6 +231,7 @@ async fn run_hook_command(
             };
         }
         Err(_) => {
+            terminate_hook_process_tree(child_pid);
             return HookCommandOutcome {
                 command: command.to_string(),
                 success: false,
@@ -265,6 +272,36 @@ fn shell_command(command: &str) -> Command {
     cmd.arg("/C").arg(command);
     cmd
 }
+
+#[cfg(unix)]
+fn terminate_hook_process_tree(pid: Option<u32>) {
+    let Some(pid) = pid else {
+        return;
+    };
+    let pgid = -(pid as libc::pid_t);
+    // SAFETY: the hook shell is started as a new process group, so a negative
+    // pid targets only that hook group and does not dereference memory.
+    unsafe {
+        libc::kill(pgid, libc::SIGTERM);
+        libc::kill(pgid, libc::SIGKILL);
+    }
+}
+
+#[cfg(windows)]
+fn terminate_hook_process_tree(pid: Option<u32>) {
+    let Some(pid) = pid else {
+        return;
+    };
+
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/T", "/PID", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn terminate_hook_process_tree(_pid: Option<u32>) {}
 
 #[cfg(test)]
 mod tests {
@@ -308,6 +345,35 @@ mod tests {
 
         assert!(!summary.success());
         assert_eq!(summary.outcomes[0].exit_code, Some(7));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timed_out_hook_kills_child_process_group() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let payload = HookPayload::new(HookEvent::PreToolUse, "session-1", temp.path());
+        let pid_file = temp.path().join("child.pid");
+        let command = format!(
+            "sleep 20 & printf '%s' \"$!\" > '{}'; wait",
+            pid_file.display()
+        );
+
+        let summary =
+            run_hook_commands(HookEvent::PreToolUse, &[command], &payload, temp.path(), 1).await;
+
+        assert!(!summary.success());
+        assert!(summary.outcomes[0].timed_out);
+        let pid = std::fs::read_to_string(&pid_file)
+            .expect("pid file")
+            .trim()
+            .to_string();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let status = std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("kill -0");
+        assert!(!status.success(), "hook child process {pid} should be gone");
     }
 
     #[test]

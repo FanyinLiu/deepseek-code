@@ -1,7 +1,7 @@
 use std::process::Command;
 
-fn octocode_command(project_root: &std::path::Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_octocode"));
+fn octo_command(project_root: &std::path::Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_octo"));
     command.arg("-C").arg(project_root);
     command
 }
@@ -9,7 +9,7 @@ fn octocode_command(project_root: &std::path::Path) -> Command {
 #[test]
 fn mission_new_dry_run_json_creates_record() {
     let root = tempfile::tempdir().expect("tempdir");
-    let output = octocode_command(root.path())
+    let output = octo_command(root.path())
         .args([
             "mission",
             "new",
@@ -38,20 +38,20 @@ fn mission_new_dry_run_json_creates_record() {
 #[test]
 fn mission_status_inspect_and_replay_latest_work() {
     let root = tempfile::tempdir().expect("tempdir");
-    let create = octocode_command(root.path())
+    let create = octo_command(root.path())
         .args(["mission", "new", "refactor src/agent safely", "--dry-run"])
         .output()
         .expect("run mission new");
     assert!(create.status.success(), "stderr={}", stderr(&create));
 
-    let status = octocode_command(root.path())
+    let status = octo_command(root.path())
         .args(["mission", "status", "latest"])
         .output()
         .expect("run mission status");
     assert!(status.status.success(), "stderr={}", stderr(&status));
     assert!(stdout(&status).contains("status  completed"));
 
-    let inspect = octocode_command(root.path())
+    let inspect = octo_command(root.path())
         .args(["mission", "inspect", "latest", "--json", "--events"])
         .output()
         .expect("run mission inspect");
@@ -60,7 +60,7 @@ fn mission_status_inspect_and_replay_latest_work() {
         serde_json::from_slice(&inspect.stdout).expect("inspect json parses");
     assert_eq!(json["events"].as_array().expect("events").len(), 3);
 
-    let replay = octocode_command(root.path())
+    let replay = octo_command(root.path())
         .args(["mission", "replay", "latest"])
         .output()
         .expect("run mission replay");
@@ -71,13 +71,13 @@ fn mission_status_inspect_and_replay_latest_work() {
 #[test]
 fn mission_list_json_parses() {
     let root = tempfile::tempdir().expect("tempdir");
-    let create = octocode_command(root.path())
+    let create = octo_command(root.path())
         .args(["mission", "new", "review src/agent for safety", "--dry-run"])
         .output()
         .expect("run mission new");
     assert!(create.status.success(), "stderr={}", stderr(&create));
 
-    let list = octocode_command(root.path())
+    let list = octo_command(root.path())
         .args(["mission", "list", "--json"])
         .output()
         .expect("run mission list");
@@ -89,13 +89,13 @@ fn mission_list_json_parses() {
 #[test]
 fn mission_lifecycle_commands_update_state_and_replay_json() {
     let root = tempfile::tempdir().expect("tempdir");
-    let create = octocode_command(root.path())
+    let create = octo_command(root.path())
         .args(["mission", "new", "refactor src/cli safely", "--dry-run"])
         .output()
         .expect("run mission new");
     assert!(create.status.success(), "stderr={}", stderr(&create));
 
-    let start = octocode_command(root.path())
+    let start = octo_command(root.path())
         .args(["mission", "start", "latest", "--json"])
         .output()
         .expect("run mission start");
@@ -103,7 +103,7 @@ fn mission_lifecycle_commands_update_state_and_replay_json() {
     let json: serde_json::Value = serde_json::from_slice(&start.stdout).expect("start json parses");
     assert_eq!(json["state"]["status"], "running");
 
-    let pause = octocode_command(root.path())
+    let pause = octo_command(root.path())
         .args(["mission", "pause", "latest", "--json"])
         .output()
         .expect("run mission pause");
@@ -111,7 +111,7 @@ fn mission_lifecycle_commands_update_state_and_replay_json() {
     let json: serde_json::Value = serde_json::from_slice(&pause.stdout).expect("pause json parses");
     assert_eq!(json["state"]["status"], "paused");
 
-    let note = octocode_command(root.path())
+    let note = octo_command(root.path())
         .args([
             "mission",
             "note",
@@ -124,7 +124,7 @@ fn mission_lifecycle_commands_update_state_and_replay_json() {
         .expect("run mission note");
     assert!(note.status.success(), "stderr={}", stderr(&note));
 
-    let list = octocode_command(root.path())
+    let list = octo_command(root.path())
         .args([
             "mission", "list", "--status", "paused", "--limit", "1", "--json",
         ])
@@ -135,7 +135,7 @@ fn mission_lifecycle_commands_update_state_and_replay_json() {
     assert_eq!(json["missions"].as_array().expect("missions").len(), 1);
     assert_eq!(json["missions"][0]["status"], "paused");
 
-    let replay = octocode_command(root.path())
+    let replay = octo_command(root.path())
         .args(["mission", "replay", "latest", "--json"])
         .output()
         .expect("run mission replay");
