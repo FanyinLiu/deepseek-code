@@ -806,7 +806,9 @@ fn markdown_body(content: &str) -> &str {
 
 fn render_custom_command_prompt(template: &str, args: &[String]) -> String {
     let arguments = args.join(" ");
-    let mut prompt = template.replace("$ARGUMENTS", &arguments);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut prompt = crate::commands::apply_positional_args(template, &arg_refs);
+    prompt = prompt.replace("$ARGUMENTS", &arguments);
     prompt = prompt.replace("{{args}}", &arguments);
     prompt = prompt.replace("{{arguments}}", &arguments);
     if arguments.is_empty() || prompt.contains(&arguments) {

@@ -184,11 +184,37 @@ impl<'a> CommandEntry<'a> {
 }
 
 impl PromptCommand {
-    /// Render the body with `$ARGUMENTS` replaced by the user's args (possibly empty).
+    /// Render the body with `$1`–`$9` replaced by whitespace-split args and
+    /// `$ARGUMENTS` replaced by the full arg string. Missing positional args
+    /// substitute the empty string.
     #[must_use]
     pub fn render(&self, args: &str) -> String {
-        self.body.replace("$ARGUMENTS", args.trim())
+        let trimmed = args.trim();
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        let positional = apply_positional_args(&self.body, &parts);
+        positional.replace("$ARGUMENTS", trimmed)
     }
+}
+
+/// Replace `$1`..`$9` placeholders with the corresponding positional argument.
+/// Missing positions become the empty string. `$ARGUMENTS` is left untouched
+/// for the caller to substitute (it captures the full, untokenized arg string).
+#[must_use]
+pub fn apply_positional_args(template: &str, args: &[&str]) -> String {
+    let re = positional_arg_regex();
+    re.replace_all(template, |caps: &regex::Captures<'_>| {
+        let idx: usize = caps[1].parse().unwrap_or(0);
+        if idx == 0 || idx > 9 {
+            return caps[0].to_string();
+        }
+        args.get(idx - 1).copied().unwrap_or("").to_string()
+    })
+    .to_string()
+}
+
+fn positional_arg_regex() -> &'static regex::Regex {
+    static REGEX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    REGEX.get_or_init(|| regex::Regex::new(r"\$([1-9])").expect("static regex"))
 }
 
 /// Registry of all slash commands.
@@ -3449,6 +3475,48 @@ mod tests {
             source_path: std::path::PathBuf::from("test.md"),
         };
         assert_eq!(cmd.render("src/main.rs"), "Look at src/main.rs carefully.");
+    }
+
+    #[test]
+    fn render_substitutes_positional_args_then_arguments() {
+        let cmd = PromptCommand {
+            name: "/diff".to_string(),
+            description: "diff".to_string(),
+            body: "Compare $1 with $2 (full args: $ARGUMENTS).".to_string(),
+            argument_hint: None,
+            source_path: std::path::PathBuf::from("test.md"),
+        };
+        let rendered = cmd.render("HEAD~1 HEAD");
+        assert_eq!(
+            rendered,
+            "Compare HEAD~1 with HEAD (full args: HEAD~1 HEAD)."
+        );
+    }
+
+    #[test]
+    fn render_missing_positional_is_empty() {
+        let cmd = PromptCommand {
+            name: "/diff".to_string(),
+            description: "diff".to_string(),
+            body: "first=$1 second=$2".to_string(),
+            argument_hint: None,
+            source_path: std::path::PathBuf::from("test.md"),
+        };
+        assert_eq!(cmd.render("only"), "first=only second=");
+    }
+
+    #[test]
+    fn apply_positional_args_replaces_one_through_nine() {
+        let args = ["a", "b", "c"];
+        let out = apply_positional_args("$1 $2 $3 $4", &args);
+        assert_eq!(out, "a b c ");
+    }
+
+    #[test]
+    fn apply_positional_args_leaves_dollar_zero_alone() {
+        // Only $1..$9 are positional placeholders; $0 is not touched.
+        let out = apply_positional_args("$0 $1", &["a"]);
+        assert_eq!(out, "$0 a");
     }
 
     #[test]
