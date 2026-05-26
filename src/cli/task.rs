@@ -77,6 +77,7 @@ pub async fn task(
                 Some(task.project_root.clone()),
                 output_format,
                 ToolApprovalPolicy::Deny,
+                None,
             )
             .await;
             match result {

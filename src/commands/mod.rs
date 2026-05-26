@@ -121,6 +121,7 @@ pub struct PromptCommand {
     pub description: String,
     pub body: String,
     pub argument_hint: Option<String>,
+    pub model: Option<String>,
     pub source_path: std::path::PathBuf,
 }
 
@@ -129,6 +130,7 @@ pub struct ParsedPrompt {
     pub description: String,
     pub body: String,
     pub argument_hint: Option<String>,
+    pub model: Option<String>,
 }
 
 /// Borrowed view over a slash command, whether built-in or user-defined.
@@ -309,6 +311,7 @@ impl CommandRegistry {
                     description: parsed.description,
                     body: parsed.body,
                     argument_hint: parsed.argument_hint,
+                    model: parsed.model,
                     source_path: path,
                 },
             );
@@ -467,6 +470,7 @@ fn parse_prompt_command(content: &str) -> ParsedPrompt {
             let body = stripped[end + 4..].trim_start_matches('\n').to_string();
             let mut description = String::new();
             let mut argument_hint = None;
+            let mut model = None;
             for line in frontmatter.lines() {
                 let line = line.trim();
                 if let Some(rest) = line.strip_prefix("description:") {
@@ -479,6 +483,11 @@ fn parse_prompt_command(content: &str) -> ParsedPrompt {
                     if !value.is_empty() {
                         argument_hint = Some(value);
                     }
+                } else if let Some(rest) = line.strip_prefix("model:") {
+                    let value = rest.trim().trim_matches('"').to_string();
+                    if !value.is_empty() {
+                        model = Some(value);
+                    }
                 }
             }
             if description.is_empty() {
@@ -488,6 +497,7 @@ fn parse_prompt_command(content: &str) -> ParsedPrompt {
                 description,
                 body,
                 argument_hint,
+                model,
             };
         }
     }
@@ -506,6 +516,7 @@ fn parse_prompt_command(content: &str) -> ParsedPrompt {
         description,
         body,
         argument_hint: None,
+        model: None,
     }
 }
 
@@ -3449,11 +3460,12 @@ mod tests {
 
     #[test]
     fn parse_prompt_command_with_frontmatter() {
-        let content = "---\ndescription: \"review the PR\"\nargument-hint: \"<branch>\"\n---\nReview these changes: $ARGUMENTS";
+        let content = "---\ndescription: \"review the PR\"\nargument-hint: \"<branch>\"\nmodel: pro\n---\nReview these changes: $ARGUMENTS";
         let parsed = parse_prompt_command(content);
         assert_eq!(parsed.description, "review the PR");
         assert_eq!(parsed.body, "Review these changes: $ARGUMENTS");
         assert_eq!(parsed.argument_hint.as_deref(), Some("<branch>"));
+        assert_eq!(parsed.model.as_deref(), Some("pro"));
     }
 
     #[test]
@@ -3472,6 +3484,7 @@ mod tests {
             description: "review".to_string(),
             body: "Look at $ARGUMENTS carefully.".to_string(),
             argument_hint: None,
+            model: None,
             source_path: std::path::PathBuf::from("test.md"),
         };
         assert_eq!(cmd.render("src/main.rs"), "Look at src/main.rs carefully.");
@@ -3484,6 +3497,7 @@ mod tests {
             description: "diff".to_string(),
             body: "Compare $1 with $2 (full args: $ARGUMENTS).".to_string(),
             argument_hint: None,
+            model: None,
             source_path: std::path::PathBuf::from("test.md"),
         };
         let rendered = cmd.render("HEAD~1 HEAD");
@@ -3500,6 +3514,7 @@ mod tests {
             description: "diff".to_string(),
             body: "first=$1 second=$2".to_string(),
             argument_hint: None,
+            model: None,
             source_path: std::path::PathBuf::from("test.md"),
         };
         assert_eq!(cmd.render("only"), "first=only second=");

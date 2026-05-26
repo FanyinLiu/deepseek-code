@@ -18,6 +18,7 @@ pub async fn run(
     project_root: Option<PathBuf>,
     output_format: TurnOutputFormat,
     tool_approval: ToolApprovalPolicy,
+    model_override: Option<String>,
 ) -> Result<(), anyhow::Error> {
     let root = match resolve_project_root(project_root, "run") {
         Ok(root) => root,
@@ -37,10 +38,11 @@ pub async fn run(
     };
     let provider = build_provider(&config.provider, api_key);
     let client = provider.create_deepseek_client();
-    let model = match ModelSelection::resolve(&config.provider, &config.model, None) {
-        Ok(selection) => selection.model,
-        Err(error) => return json_error_result(output_format, error.into()),
-    };
+    let model =
+        match ModelSelection::resolve(&config.provider, &config.model, model_override.as_deref()) {
+            Ok(selection) => selection.model,
+            Err(error) => return json_error_result(output_format, error.into()),
+        };
 
     let session = Session {
         id: SessionId::new_v4(),

@@ -55,6 +55,7 @@ struct CustomCommandPayload {
     source: &'static str,
     path: String,
     argument_hint: Option<String>,
+    model: Option<String>,
     conflicts_builtin: bool,
 }
 
@@ -65,6 +66,7 @@ struct CustomCommandRunPayload {
     source: &'static str,
     path: String,
     argument_hint: Option<String>,
+    model: Option<String>,
     args: Vec<String>,
     prompt: String,
     dry_run: bool,
@@ -77,6 +79,7 @@ struct CustomCommandDocument {
     source: &'static str,
     path: PathBuf,
     argument_hint: Option<String>,
+    model: Option<String>,
     prompt_template: String,
 }
 
@@ -167,6 +170,7 @@ fn show(root: &Path, name: &str, json: bool) -> Result<(), anyhow::Error> {
         source: command.source,
         path: command.path.display().to_string(),
         argument_hint: command.argument_hint.clone(),
+        model: command.model.clone(),
         args: Vec::new(),
         prompt: command.prompt_template.clone(),
         dry_run: true,
@@ -196,6 +200,7 @@ async fn run_custom_command(
         source: command.source,
         path: command.path.display().to_string(),
         argument_hint: command.argument_hint,
+        model: command.model.clone(),
         args,
         prompt,
         dry_run,
@@ -227,6 +232,7 @@ async fn run_custom_command(
         Some(root.to_path_buf()),
         output_format,
         crate::cli::ToolApprovalPolicy::Deny,
+        payload.model.clone(),
     )
     .await
 }
@@ -239,6 +245,9 @@ fn print_custom_command(payload: &CustomCommandRunPayload, title: &str) {
     }
     if let Some(argument_hint) = &payload.argument_hint {
         println!("Arguments: {argument_hint}");
+    }
+    if let Some(model) = &payload.model {
+        println!("Model: {model}");
     }
     if !payload.args.is_empty() {
         println!("Input args: {}", payload.args.join(" "));
@@ -445,11 +454,13 @@ fn collect_custom_commands(
         };
         let description = read_custom_description(&path).ok().flatten();
         let argument_hint = read_custom_argument_hint(&path).ok().flatten();
+        let model = read_custom_model(&path).ok().flatten();
         out.push(CustomCommandPayload {
             conflicts_builtin: builtin_names.contains(&name),
             name,
             description,
             argument_hint,
+            model,
             source,
             path: path.display().to_string(),
         });
@@ -640,7 +651,7 @@ fn read_custom_command_document(
 ) -> Result<CustomCommandDocument, anyhow::Error> {
     let content =
         std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let (description, argument_hint, prompt_template) = if matches!(
+    let parsed = if matches!(
         path.extension().and_then(|value| value.to_str()),
         Some("toml")
     ) {
@@ -648,7 +659,7 @@ fn read_custom_command_document(
     } else {
         custom_command_from_markdown(&content)
     };
-    if prompt_template.trim().is_empty() {
+    if parsed.prompt_template.trim().is_empty() {
         bail!(
             "custom command {name} has no prompt body: {}",
             path.display()
@@ -657,17 +668,23 @@ fn read_custom_command_document(
 
     Ok(CustomCommandDocument {
         name: name.to_string(),
-        description,
+        description: parsed.description,
         source,
         path: path.to_path_buf(),
-        argument_hint,
-        prompt_template,
+        argument_hint: parsed.argument_hint,
+        model: parsed.model,
+        prompt_template: parsed.prompt_template,
     })
 }
 
-fn custom_command_from_toml(
-    content: &str,
-) -> Result<(Option<String>, Option<String>, String), anyhow::Error> {
+struct ParsedCustomCommand {
+    description: Option<String>,
+    argument_hint: Option<String>,
+    model: Option<String>,
+    prompt_template: String,
+}
+
+fn custom_command_from_toml(content: &str) -> Result<ParsedCustomCommand, anyhow::Error> {
     let value: toml::Value = content.parse()?;
     let description = value
         .get("description")
@@ -680,6 +697,11 @@ fn custom_command_from_toml(
         .and_then(toml::Value::as_str)
         .map(trim_description)
         .filter(|value| !value.is_empty());
+    let model = value
+        .get("model")
+        .and_then(toml::Value::as_str)
+        .map(trim_description)
+        .filter(|value| !value.is_empty());
     let prompt = value
         .get("prompt")
         .or_else(|| value.get("template"))
@@ -688,14 +710,37 @@ fn custom_command_from_toml(
         .map(str::trim)
         .unwrap_or_default()
         .to_string();
-    Ok((description, argument_hint, prompt))
+    Ok(ParsedCustomCommand {
+        description,
+        argument_hint,
+        model,
+        prompt_template: prompt,
+    })
 }
 
-fn custom_command_from_markdown(content: &str) -> (Option<String>, Option<String>, String) {
-    let description = description_from_markdown(content);
-    let argument_hint = argument_hint_from_markdown(content);
-    let body = markdown_body(content).trim().to_string();
-    (description, argument_hint, body)
+fn custom_command_from_markdown(content: &str) -> ParsedCustomCommand {
+    ParsedCustomCommand {
+        description: description_from_markdown(content),
+        argument_hint: argument_hint_from_markdown(content),
+        model: model_from_markdown(content),
+        prompt_template: markdown_body(content).trim().to_string(),
+    }
+}
+
+fn model_from_markdown(content: &str) -> Option<String> {
+    let frontmatter = markdown_frontmatter(content)?;
+    for line in frontmatter.lines() {
+        let line = line.trim();
+        for key in ["model:", "model ="] {
+            if let Some(value) = line.strip_prefix(key) {
+                let model = trim_description(value);
+                if !model.is_empty() {
+                    return Some(model);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn read_custom_argument_hint(path: &Path) -> Result<Option<String>, anyhow::Error> {
@@ -713,6 +758,22 @@ fn read_custom_argument_hint(path: &Path) -> Result<Option<String>, anyhow::Erro
             .filter(|value| !value.is_empty()));
     }
     Ok(argument_hint_from_markdown(&content))
+}
+
+fn read_custom_model(path: &Path) -> Result<Option<String>, anyhow::Error> {
+    let content = std::fs::read_to_string(path)?;
+    if matches!(
+        path.extension().and_then(|value| value.to_str()),
+        Some("toml")
+    ) {
+        let value: toml::Value = content.parse()?;
+        return Ok(value
+            .get("model")
+            .and_then(toml::Value::as_str)
+            .map(trim_description)
+            .filter(|value| !value.is_empty()));
+    }
+    Ok(model_from_markdown(&content))
 }
 
 fn read_custom_description(path: &Path) -> Result<Option<String>, anyhow::Error> {
