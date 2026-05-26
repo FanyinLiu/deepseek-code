@@ -179,6 +179,12 @@ enum Commands {
         json: bool,
     },
 
+    /// Inspect local token usage and provider balance
+    Usage {
+        #[command(subcommand)]
+        command: UsageCommands,
+    },
+
     /// Read, write, and run persistent Octocode goals
     Goal {
         #[command(subcommand)]
@@ -479,6 +485,25 @@ enum FeaturesCommands {
     Recommend {
         /// Task description
         task: String,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum UsageCommands {
+    /// Summarize locally recorded model response usage
+    Summary {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+        /// Limit summary to the last N days
+        #[arg(long)]
+        days: Option<u32>,
+    },
+    /// Fetch provider-reported balance or quota snapshot
+    Balance {
         /// Print machine-readable JSON
         #[arg(long)]
         json: bool,
@@ -1424,6 +1449,15 @@ pub async fn run() -> Result<(), anyhow::Error> {
             cli::features(command, cli.project_root).await
         }
         Some(Commands::Models { json }) => cli::models(json, cli.project_root).await,
+        Some(Commands::Usage { command }) => {
+            let command = match command {
+                UsageCommands::Summary { json, days } => {
+                    cli::usage::UsageCommand::Summary { json, days }
+                }
+                UsageCommands::Balance { json } => cli::usage::UsageCommand::Balance { json },
+            };
+            cli::usage(command, cli.project_root).await
+        }
         Some(Commands::Goal { command }) => {
             let command = match command {
                 GoalCommands::Init { overwrite, json } => {

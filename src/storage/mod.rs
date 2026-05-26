@@ -8,6 +8,7 @@ pub mod missions;
 pub mod scheduled_tasks;
 pub mod sessions;
 pub mod transcripts;
+pub mod usage;
 
 use std::path::{Path, PathBuf};
 
@@ -25,6 +26,7 @@ pub use scheduled_tasks::{
 };
 pub use sessions::SessionStore;
 pub use transcripts::{export_transcript, TranscriptFormat};
+pub use usage::{record_usage_event, UsageEvent, UsageStore, UsageSummary, UsageTotals};
 
 #[must_use]
 pub fn user_home_dir() -> Option<PathBuf> {

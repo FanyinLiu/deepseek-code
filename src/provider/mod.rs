@@ -7,6 +7,8 @@ use std::{future::Future, pin::Pin};
 
 use serde::{Deserialize, Serialize};
 
+pub mod usage;
+
 use crate::deepseek::{
     client::DeepSeekClient,
     errors::DeepSeekError,

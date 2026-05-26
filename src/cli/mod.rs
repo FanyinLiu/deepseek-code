@@ -30,6 +30,7 @@ pub mod settings;
 pub mod skill;
 pub mod stream_json;
 pub mod task;
+pub mod usage;
 pub mod welcome;
 
 pub use agent::agent;
@@ -61,6 +62,7 @@ pub use settings::settings;
 pub use skill::skill;
 pub use stream_json::TurnOutputFormat;
 pub use task::task;
+pub use usage::usage;
 pub use welcome::welcome;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
