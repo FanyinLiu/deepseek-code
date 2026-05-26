@@ -261,7 +261,11 @@ impl CommandRegistry {
         self.prompt_commands.clear();
         let mut count = 0;
         // User-global first (lower precedence), then project (overrides on conflict).
-        if let Some(home) = dirs::home_dir() {
+        // Honor OCTOCODE_HOME/DEEPSEEK_CODE_HOME via storage::user_home_dir so
+        // `octo commands list` and the TUI loader see the same custom command
+        // surface — important for tests and for users who relocate their data
+        // directory.
+        if let Some(home) = crate::storage::user_home_dir() {
             count += self.load_prompt_dir(&home.join(".octocode").join("commands"));
         }
         count += self.load_prompt_dir(&project_root.join(".octocode").join("commands"));

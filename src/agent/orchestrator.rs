@@ -1491,20 +1491,37 @@ impl Orchestrator {
         // Load project rules once and reuse throughout the turn. We also
         // pull any skill bodies whose `keywords:` frontmatter matches the
         // user's input and append them to the rules — auto-injection of
-        // saved workflows. Misses are silent.
+        // saved workflows. Project skills are tried first; if there's room
+        // under the cap, user-global skills under `~/.octocode/skills`
+        // fill the rest, matching the discovery surface of `octo commands`.
         let mut project_rules = load_project_rules(&self.project_root);
-        let skill_store = crate::skill::SkillStore::for_project(&self.project_root);
-        if let Ok(hits) = skill_store.triggered_for_input(user_input, 3) {
-            if !hits.is_empty() {
-                let mut combined = project_rules.unwrap_or_default();
-                for (id, body) in hits {
-                    if !combined.is_empty() {
-                        combined.push_str("\n\n");
+        let mut skill_hits: Vec<(String, String)> = Vec::new();
+        let project_store = crate::skill::SkillStore::for_project(&self.project_root);
+        if let Ok(hits) = project_store.triggered_for_input(user_input, 3) {
+            skill_hits.extend(hits);
+        }
+        if skill_hits.len() < 3 {
+            if let Some(home) = crate::storage::user_home_dir() {
+                let user_store = crate::skill::SkillStore::for_project(home);
+                let remaining = 3 - skill_hits.len();
+                if let Ok(hits) = user_store.triggered_for_input(user_input, remaining) {
+                    for (id, body) in hits {
+                        if !skill_hits.iter().any(|(existing, _)| existing == &id) {
+                            skill_hits.push((id, body));
+                        }
                     }
-                    combined.push_str(&format!("### Triggered skill: {id}\n\n{body}"));
                 }
-                project_rules = Some(combined);
             }
+        }
+        if !skill_hits.is_empty() {
+            let mut combined = project_rules.unwrap_or_default();
+            for (id, body) in skill_hits {
+                if !combined.is_empty() {
+                    combined.push_str("\n\n");
+                }
+                combined.push_str(&format!("### Triggered skill: {id}\n\n{body}"));
+            }
+            project_rules = Some(combined);
         }
         let force_swarm = should_force_swarm(user_input) || should_force_swarm(routing_input);
 

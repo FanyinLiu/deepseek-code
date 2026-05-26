@@ -428,7 +428,7 @@ fn print_catalog(payload: &CommandCatalogPayload, filter: Option<&str>) {
 
 fn command_locations(root: &Path) -> Vec<CommandLocationPayload> {
     let project = root.join(".octocode").join("commands");
-    let user = dirs::home_dir()
+    let user = crate::storage::user_home_dir()
         .map(|home| home.join(".octocode").join("commands"))
         .unwrap_or_else(|| PathBuf::from("~/.octocode/commands"));
     vec![location("project", project), location("user", user)]
@@ -527,7 +527,7 @@ fn collect_skills(root: &Path) -> Result<Vec<SkillCommandPayload>, anyhow::Error
 
 fn skill_locations(root: &Path) -> Vec<(&'static str, PathBuf)> {
     let project = root.join(".octocode").join("skills");
-    let user = dirs::home_dir()
+    let user = crate::storage::user_home_dir()
         .map(|home| home.join(".octocode").join("skills"))
         .unwrap_or_else(|| PathBuf::from("~/.octocode/skills"));
     vec![("project", project), ("user", user)]
