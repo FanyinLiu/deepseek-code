@@ -47,7 +47,7 @@ jobs:
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
       - name: Build
-        run: cargo build --release --bin octo --target ${{ matrix.target }}
+        run: cargo build --release --bins --target ${{ matrix.target }}
 
       - name: Package (Unix)
         if: matrix.ext == 'tar.gz'
@@ -56,8 +56,9 @@ jobs:
           name="octo-${{ steps.ver.outputs.tag }}-${{ matrix.target }}"
           mkdir -p "dist/${name}"
           cp "target/${{ matrix.target }}/release/octo" "dist/${name}/"
+          cp "target/${{ matrix.target }}/release/octocode" "dist/${name}/"
           cp README.md LICENSE* "dist/${name}/" 2>/dev/null || true
-          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          tar -C "dist/${name}" -czf "dist/${name}.tar.gz" .
           (cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
 
       - name: Package (Windows)
@@ -67,9 +68,10 @@ jobs:
           $name = "octo-${{ steps.ver.outputs.tag }}-${{ matrix.target }}"
           New-Item -ItemType Directory -Path "dist/$name" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/octo.exe" "dist/$name/"
+          Copy-Item "target/${{ matrix.target }}/release/octocode.exe" "dist/$name/"
           if (Test-Path README.md) { Copy-Item README.md "dist/$name/" }
           Get-ChildItem LICENSE* -ErrorAction SilentlyContinue | Copy-Item -Destination "dist/$name/"
-          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+          Compress-Archive -Path "dist/$name/*" -DestinationPath "dist/$name.zip"
           $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $name.zip" | Set-Content "dist/$name.zip.sha256"
 

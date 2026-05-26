@@ -6,7 +6,12 @@ const { spawnSync } = require("child_process");
 const { ensureCliBinary } = require("../scripts/npm-bootstrap");
 
 (async () => {
-  const binaryPath = await ensureCliBinary({ required: true });
+  const result = await ensureCliBinary({ required: true });
+  const binaryPath = result.path;
+  if (!binaryPath) {
+    console.error("[octo] No CLI binary is available");
+    process.exit(1);
+  }
   const args = process.argv.slice(2);
 
   const child = spawnSync(binaryPath, args, {

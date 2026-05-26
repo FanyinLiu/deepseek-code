@@ -32,6 +32,7 @@
     "octocode": "bin/octo.js"
   },
   "scripts": {
+    "test": "node --test scripts/npm-bootstrap.test.js",
     "postinstall": "node scripts/npm-bootstrap.js --postinstall",
     "bootstrap:dry-run": "node scripts/npm-bootstrap.js --dry-run",
     "pack:dry-run": "npm pack --dry-run"

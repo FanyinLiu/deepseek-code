@@ -1,6 +1,6 @@
 # Mission Dry-Run Runtime
 
-`octocode mission` records a local dry-run plan for long-running work. The current
+`octo mission` records a local dry-run plan for long-running work. The current
 runtime is intentionally minimal: it does not execute model calls or edit files.
 It creates a durable mission record, writes a local-rule plan, appends events,
 and can replay those events into state.
@@ -8,16 +8,16 @@ and can replay those events into state.
 ## Commands
 
 ```bash
-octocode mission new "refactor src/agent safely" --dry-run
-octocode mission new "refactor src/agent safely" --dry-run --json
-octocode mission status latest
-octocode mission status <mission-id> --json
-octocode mission inspect latest
-octocode mission inspect latest --json
-octocode mission inspect latest --events
-octocode mission replay latest
-octocode mission list
-octocode mission list --json
+octo mission new "refactor src/agent safely" --dry-run
+octo mission new "refactor src/agent safely" --dry-run --json
+octo mission status latest
+octo mission status <mission-id> --json
+octo mission inspect latest
+octo mission inspect latest --json
+octo mission inspect latest --events
+octo mission replay latest
+octo mission list
+octo mission list --json
 ```
 
 Mission targets accept `latest`, a full mission id, or a unique id prefix.
@@ -84,9 +84,9 @@ Use mission dry-runs before broad changes to preserve a durable plan and event
 timeline:
 
 ```bash
-octocode mission new "review src/agent and storage for release safety" --dry-run
-octocode mission inspect latest --events
-octocode mission replay latest
+octo mission new "review src/agent and storage for release safety" --dry-run
+octo mission inspect latest --events
+octo mission replay latest
 ```
 
 This is a foundation for future long-running execution. The current release only

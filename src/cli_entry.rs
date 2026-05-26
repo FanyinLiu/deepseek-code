@@ -998,7 +998,7 @@ enum McpCommands {
         /// Server name
         name: String,
     },
-    /// Start octocode as an MCP server, exposing local tools to external agents.
+    /// Start Octo as an MCP server, exposing local tools to external agents.
     /// Read-only tools are exposed by default; pass --allow-destructive to also
     /// expose write_file/edit_file/run_command.
     Serve {

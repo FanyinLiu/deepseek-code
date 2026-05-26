@@ -19,8 +19,13 @@ jobs:
       - run: cargo check --all-targets --all-features
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-features
+      - run: node --test scripts/npm-bootstrap.test.js
       - run: cargo run --bin octocode -- --help
       - run: cargo run --bin octo -- --help
+      - run: cargo run --bin octo -- onboard --json
+        env:
+          DEEPSEEK_API_KEY: ci-placeholder
+          OCTOCODE_HOME: ${{ runner.temp }}/octocode-home
       - run: cargo run --bin octocode -- preview-tui --api ready --scenario welcome --width 80 --height 24
 
   windows-parity:
@@ -213,7 +218,7 @@ jobs:
           if (-not (Test-Path $package)) {
             throw "missing package: $package"
           }
-          $out = Join-Path dist "checksums-$env:TARGET_NAME.txt"
+          $out = Join-Path dist "$env:PACKAGE_NAME.sha256"
           if (Test-Path $out) { Remove-Item $out }
           $hash = (Get-FileHash $package -Algorithm SHA256).Hash.ToLowerInvariant()
           "{0}  {1}" -f $hash, (Split-Path $package -Leaf) | Add-Content -Path $out -Encoding UTF8

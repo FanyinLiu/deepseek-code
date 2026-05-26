@@ -42,7 +42,7 @@
 3. 等待 tag-trigger 的 GitHub Actions 运行完成。
 4. 在 Release 页面核对四个平台 assets：
    - `octo-vX.Y.Z-<target>.tar.gz` / `.zip`
-   - `checksums-<target>.txt`
+   - `octo-vX.Y.Z-<target>.tar.gz.sha256` / `.zip.sha256`
 5. 抽检一个校验文件里的 SHA256 是否与下载文件对应。
 
 ### npm 分发（可选）
@@ -95,12 +95,12 @@ octo --help
 2. 每个平台需上传：
    - `octo-vX.Y.Z-<target>.tar.gz`（Linux/macOS）
    - `octo-vX.Y.Z-<target>.zip`（Windows）
-   - `checksums-<target>.txt`
+   - `octo-vX.Y.Z-<target>.tar.gz.sha256` / `.zip.sha256`
 3. Archive 中必须包含：
    - `octo`
    - `octocode`（兼容入口，可选；npm bootstrap 只要求 `octo`）
    - 说明文件（当前为 `README.md`）
-4. `checksums-<target>.txt` 必须包含每个发布文件的 SHA256。
+4. `.sha256` 文件必须包含对应发布文件的 SHA256。
 
 ## 6. 变更记录要求
 

@@ -26,7 +26,7 @@ cargo build --release
 发布前请按 [发布上传清单](docs/release_upload_checklist.md) 执行。当前发布流程会在打 tag 时自动输出：
 - Linux/macOS：`octo-vX.Y.Z-<target>.tar.gz`
 - Windows：`octo-vX.Y.Z-<target>.zip`
-- `checksums-<target>.txt`
+- 每个 asset 对应的 `.sha256` 文件
 
 本地也支持一键发布脚本：
 
@@ -45,6 +45,9 @@ cargo build --release
 ```bash
 # 登录，也可以首次打开 TUI 后直接粘贴 API key
 octo login --api-key sk-xxx
+
+# 首次本地就绪检查（不联网、不写配置）
+octo onboard
 
 # 诊断
 octo doctor
