@@ -289,12 +289,8 @@ fn catalog_payload(
         if !location.exists {
             continue;
         }
-        collect_custom_commands(
-            Path::new(&location.path),
-            location.source,
-            &builtin_names,
-            &mut custom,
-        )?;
+        let base = PathBuf::from(&location.path);
+        collect_custom_commands(&base, &base, location.source, &builtin_names, &mut custom)?;
     }
     custom.retain(|cmd| custom_matches_filter(cmd, filter.as_deref()));
     custom.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
@@ -427,6 +423,7 @@ fn location(source: &'static str, path: PathBuf) -> CommandLocationPayload {
 }
 
 fn collect_custom_commands(
+    base: &Path,
     dir: &Path,
     source: &'static str,
     builtin_names: &std::collections::HashSet<String>,
@@ -437,16 +434,15 @@ fn collect_custom_commands(
         let path = entry.path();
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
-            collect_custom_commands(&path, source, builtin_names, out)?;
+            collect_custom_commands(base, &path, source, builtin_names, out)?;
             continue;
         }
         if !file_type.is_file() || !is_command_file(&path) {
             continue;
         }
-        let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+        let Some(name) = command_name_for(base, &path) else {
             continue;
         };
-        let name = format!("/{}", stem.trim_start_matches('/'));
         let description = read_custom_description(&path).ok().flatten();
         let argument_hint = read_custom_argument_hint(&path).ok().flatten();
         out.push(CustomCommandPayload {
@@ -459,6 +455,20 @@ fn collect_custom_commands(
         });
     }
     Ok(())
+}
+
+/// `git/status.md` under `~/.octocode/commands/` becomes `/git:status` for
+/// markdown files, matching the TUI loader. `.toml` files are kept as bare
+/// `/<stem>` because the legacy TOML loader does not implement namespacing.
+fn command_name_for(base: &Path, file: &Path) -> Option<String> {
+    let extension = file.extension().and_then(|value| value.to_str());
+    if matches!(extension, Some("md")) {
+        if let Some(name) = crate::commands::prompt_command_name(base, file) {
+            return Some(name);
+        }
+    }
+    let stem = file.file_stem().and_then(|value| value.to_str())?;
+    Some(format!("/{}", stem.trim_start_matches('/')))
 }
 
 fn collect_skills(root: &Path) -> Result<Vec<SkillCommandPayload>, anyhow::Error> {
@@ -577,12 +587,8 @@ fn find_custom_command(root: &Path, name: &str) -> Result<CustomCommandDocument,
         if !location.exists {
             continue;
         }
-        collect_matching_command_documents(
-            Path::new(&location.path),
-            location.source,
-            &name,
-            &mut matches,
-        )?;
+        let base = PathBuf::from(&location.path);
+        collect_matching_command_documents(&base, &base, location.source, &name, &mut matches)?;
     }
     match matches.len() {
         0 => bail!("unknown custom command {name}"),
@@ -599,6 +605,7 @@ fn find_custom_command(root: &Path, name: &str) -> Result<CustomCommandDocument,
 }
 
 fn collect_matching_command_documents(
+    base: &Path,
     dir: &Path,
     source: &'static str,
     name: &str,
@@ -609,16 +616,16 @@ fn collect_matching_command_documents(
         let path = entry.path();
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
-            collect_matching_command_documents(&path, source, name, out)?;
+            collect_matching_command_documents(base, &path, source, name, out)?;
             continue;
         }
         if !file_type.is_file() || !is_command_file(&path) {
             continue;
         }
-        let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+        let Some(candidate) = command_name_for(base, &path) else {
             continue;
         };
-        if format!("/{}", stem.trim_start_matches('/')) != name {
+        if candidate != name {
             continue;
         }
         out.push(read_custom_command_document(&path, source, name)?);

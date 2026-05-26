@@ -2239,30 +2239,37 @@ impl TuiApp {
         let mut registry = crate::commands::CommandRegistry::new();
         registry.load_prompt_commands(&self.file_tree.root);
         let suggestions = registry
-            .match_prefix(trimmed)
+            .match_prefix_all(trimmed)
             .into_iter()
-            .map(|cmd| {
-                let display_name = if cmd.name.starts_with(trimmed) {
-                    cmd.name
-                } else {
-                    cmd.aliases
-                        .iter()
-                        .copied()
-                        .find(|alias| alias.starts_with(trimmed))
-                        .unwrap_or(cmd.name)
-                };
-                (
-                    display_name.to_string(),
-                    format!(
-                        "{} · {}",
-                        crate::commands::localized_command_description(
-                            cmd.name,
-                            cmd.description,
-                            &language
+            .map(|entry| match entry {
+                crate::commands::CommandEntry::Builtin(cmd) => {
+                    let display_name = if cmd.name.starts_with(trimmed) {
+                        cmd.name.to_string()
+                    } else {
+                        cmd.aliases
+                            .iter()
+                            .copied()
+                            .find(|alias| alias.starts_with(trimmed))
+                            .map(str::to_string)
+                            .unwrap_or_else(|| cmd.name.to_string())
+                    };
+                    (
+                        display_name,
+                        format!(
+                            "{} · {}",
+                            crate::commands::localized_command_description(
+                                cmd.name,
+                                cmd.description,
+                                &language,
+                            ),
+                            crate::commands::localized_command_usage(cmd.usage, &language),
                         ),
-                        crate::commands::localized_command_usage(cmd.usage, &language)
-                    ),
-                )
+                    )
+                }
+                crate::commands::CommandEntry::Prompt(cmd) => (
+                    cmd.name.clone(),
+                    format!("{} · {}", cmd.description, entry.usage()),
+                ),
             })
             .collect::<Vec<_>>();
         {
@@ -2708,20 +2715,24 @@ impl TuiApp {
 
         let mut registry = crate::commands::CommandRegistry::new();
         registry.load_prompt_commands(&self.file_tree.root);
-        let matches = registry.match_prefix(trimmed);
+        let matches = registry.match_prefix_all(trimmed);
         match matches.as_slice() {
-            [cmd] => {
-                self.input_text = format!("{} ", cmd.name);
+            [entry] => {
+                let name = entry.name();
+                self.input_text = format!("{name} ");
                 self.cursor_pos = self.input_text.chars().count();
-                self.status_message = format!(
-                    "{} — {}",
-                    cmd.name,
-                    crate::commands::localized_command_description(
-                        cmd.name,
-                        cmd.description,
-                        &self.config.ui.language
-                    )
-                );
+                let description = match entry {
+                    crate::commands::CommandEntry::Builtin(cmd) => {
+                        crate::commands::localized_command_description(
+                            cmd.name,
+                            cmd.description,
+                            &self.config.ui.language,
+                        )
+                        .to_string()
+                    }
+                    crate::commands::CommandEntry::Prompt(cmd) => cmd.description.clone(),
+                };
+                self.status_message = format!("{name} — {description}");
             }
             [] => {
                 self.status_message = if self.is_chinese_ui() {
@@ -2733,7 +2744,7 @@ impl TuiApp {
             many => {
                 let names = many
                     .iter()
-                    .map(|cmd| cmd.name)
+                    .map(|entry| entry.name())
                     .collect::<Vec<_>>()
                     .join(" ");
                 self.status_message = if self.is_chinese_ui() {

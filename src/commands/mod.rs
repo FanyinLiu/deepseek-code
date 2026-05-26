@@ -111,12 +111,76 @@ pub fn localized_command_usage(usage: &str, language: &str) -> String {
 /// When invoked, the body is rendered (with `$ARGUMENTS` substitution) and
 /// queued as the next user input — exactly as if the user had typed the
 /// rendered text into the prompt.
+///
+/// Files in subdirectories are namespaced with `:`. For example,
+/// `commands/git/status.md` is loaded as `/git:status` — matching the
+/// Claude Code convention so user command repos port over unchanged.
 #[derive(Debug, Clone)]
 pub struct PromptCommand {
     pub name: String,
     pub description: String,
     pub body: String,
+    pub argument_hint: Option<String>,
     pub source_path: std::path::PathBuf,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ParsedPrompt {
+    pub description: String,
+    pub body: String,
+    pub argument_hint: Option<String>,
+}
+
+/// Borrowed view over a slash command, whether built-in or user-defined.
+/// Returned by `CommandRegistry::list_all` / `match_prefix_all` so callers
+/// (TUI autocomplete, `octo commands` catalog) see prompt commands alongside
+/// built-ins without duplicating discovery logic.
+#[derive(Clone, Copy)]
+pub enum CommandEntry<'a> {
+    Builtin(&'a SlashCommand),
+    Prompt(&'a PromptCommand),
+}
+
+impl<'a> CommandEntry<'a> {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        match self {
+            CommandEntry::Builtin(cmd) => cmd.name,
+            CommandEntry::Prompt(cmd) => cmd.name.as_str(),
+        }
+    }
+
+    #[must_use]
+    pub fn description(&self) -> &str {
+        match self {
+            CommandEntry::Builtin(cmd) => cmd.description,
+            CommandEntry::Prompt(cmd) => cmd.description.as_str(),
+        }
+    }
+
+    #[must_use]
+    pub fn usage(&self) -> String {
+        match self {
+            CommandEntry::Builtin(cmd) => cmd.usage.to_string(),
+            CommandEntry::Prompt(cmd) => match cmd.argument_hint.as_deref() {
+                Some(hint) => format!("{} {hint}", cmd.name),
+                None => cmd.name.clone(),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn aliases(&self) -> &'a [&'static str] {
+        match self {
+            CommandEntry::Builtin(cmd) => cmd.aliases,
+            CommandEntry::Prompt(_) => &[],
+        }
+    }
+
+    #[must_use]
+    pub fn is_builtin(&self) -> bool {
+        matches!(self, CommandEntry::Builtin(_))
+    }
 }
 
 impl PromptCommand {
@@ -160,6 +224,8 @@ impl CommandRegistry {
     /// Load user-defined prompt commands from project + user directories.
     /// Project commands take precedence over user commands on name collision.
     /// Built-in commands always win (we don't allow shadowing).
+    /// Subdirectories namespace commands with `:` (e.g. `git/status.md` →
+    /// `/git:status`).
     /// Returns the number of prompt commands loaded.
     pub fn load_prompt_commands(&mut self, project_root: &std::path::Path) -> usize {
         self.prompt_commands.clear();
@@ -172,40 +238,56 @@ impl CommandRegistry {
         count
     }
 
-    fn load_prompt_dir(&mut self, dir: &std::path::Path) -> usize {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return 0;
-        };
+    fn load_prompt_dir(&mut self, root: &std::path::Path) -> usize {
         let mut count = 0;
+        self.load_prompt_dir_rec(root, root, &mut count);
+        count
+    }
+
+    fn load_prompt_dir_rec(
+        &mut self,
+        root: &std::path::Path,
+        dir: &std::path::Path,
+        count: &mut usize,
+    ) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                self.load_prompt_dir_rec(root, &path, count);
+                continue;
+            }
             if path.extension().and_then(|s| s.to_str()) != Some("md") {
                 continue;
             }
-            let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            let Some(slash_name) = prompt_command_name(root, &path) else {
                 continue;
             };
             // Skip names that collide with built-in commands.
-            let slash_name = format!("/{name}");
             if self.commands.contains_key(slash_name.as_str()) {
                 continue;
             }
             let Ok(content) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            let (description, body) = parse_prompt_command(&content);
+            let parsed = parse_prompt_command(&content);
             self.prompt_commands.insert(
                 slash_name.clone(),
                 PromptCommand {
                     name: slash_name,
-                    description,
-                    body,
+                    description: parsed.description,
+                    body: parsed.body,
+                    argument_hint: parsed.argument_hint,
                     source_path: path,
                 },
             );
-            count += 1;
+            *count += 1;
         }
-        count
     }
 
     /// List all loaded prompt commands (for /commands listing).
@@ -279,6 +361,44 @@ impl CommandRegistry {
         list.sort_by_key(|cmd| (slash_priority(cmd.name), cmd.name));
         list
     }
+
+    /// Unified listing across built-in and user prompt commands.
+    #[must_use]
+    pub fn list_all(&self) -> Vec<CommandEntry<'_>> {
+        let mut entries: Vec<CommandEntry<'_>> = self
+            .list_commands()
+            .into_iter()
+            .map(|cmd| CommandEntry::Builtin(cmd))
+            .collect();
+        entries.extend(self.prompt_commands().into_iter().map(CommandEntry::Prompt));
+        entries.sort_by(|a, b| {
+            slash_priority(a.name())
+                .cmp(&slash_priority(b.name()))
+                .then_with(|| a.name().cmp(b.name()))
+        });
+        entries
+    }
+
+    /// Unified prefix match across built-in and user prompt commands.
+    #[must_use]
+    pub fn match_prefix_all(&self, prefix: &str) -> Vec<CommandEntry<'_>> {
+        let mut entries: Vec<CommandEntry<'_>> = self
+            .match_prefix(prefix)
+            .into_iter()
+            .map(|cmd| CommandEntry::Builtin(cmd))
+            .collect();
+        for prompt in self.prompt_commands.values() {
+            if prompt.name.starts_with(prefix) {
+                entries.push(CommandEntry::Prompt(prompt));
+            }
+        }
+        entries.sort_by(|a, b| {
+            slash_priority(a.name())
+                .cmp(&slash_priority(b.name()))
+                .then_with(|| a.name().cmp(b.name()))
+        });
+        entries
+    }
 }
 
 fn slash_priority(name: &str) -> u8 {
@@ -295,12 +415,16 @@ fn slash_priority(name: &str) -> u8 {
 // Prompt-command parser
 // ---------------------------------------------------------------------------
 
-/// Parse a prompt-command markdown file into (description, body).
+/// Parse a prompt-command markdown file into description / body /
+/// argument hint. All frontmatter fields are optional; missing pieces fall
+/// back to "user-defined prompt" for the description, and `None` for the
+/// argument hint.
 ///
-/// Format (all parts optional except body):
+/// Format:
 /// ```text
 /// ---
 /// description: short summary
+/// argument-hint: <branch>
 /// ---
 /// Body text with $ARGUMENTS placeholder.
 /// ```
@@ -308,25 +432,37 @@ fn slash_priority(name: &str) -> u8 {
 /// If no frontmatter is present we treat the first non-empty line as the
 /// description and the rest as body. This makes it easy to write a one-file
 /// command without ceremony.
-fn parse_prompt_command(content: &str) -> (String, String) {
+fn parse_prompt_command(content: &str) -> ParsedPrompt {
     let text = content.trim_start();
     if let Some(stripped) = text.strip_prefix("---") {
         // Frontmatter form. Find the closing `---`.
         if let Some(end) = stripped.find("\n---") {
             let frontmatter = &stripped[..end];
             let body = stripped[end + 4..].trim_start_matches('\n').to_string();
-            let mut desc = String::new();
+            let mut description = String::new();
+            let mut argument_hint = None;
             for line in frontmatter.lines() {
                 let line = line.trim();
                 if let Some(rest) = line.strip_prefix("description:") {
-                    desc = rest.trim().trim_matches('"').to_string();
-                    break;
+                    description = rest.trim().trim_matches('"').to_string();
+                } else if let Some(rest) = line
+                    .strip_prefix("argument-hint:")
+                    .or_else(|| line.strip_prefix("argument_hint:"))
+                {
+                    let value = rest.trim().trim_matches('"').to_string();
+                    if !value.is_empty() {
+                        argument_hint = Some(value);
+                    }
                 }
             }
-            if desc.is_empty() {
-                desc = "user-defined prompt".to_string();
+            if description.is_empty() {
+                description = "user-defined prompt".to_string();
             }
-            return (desc, body);
+            return ParsedPrompt {
+                description,
+                body,
+                argument_hint,
+            };
         }
     }
     // No frontmatter: first non-empty line is the description, rest is body.
@@ -340,7 +476,34 @@ fn parse_prompt_command(content: &str) -> (String, String) {
         .trim()
         .to_string();
     let body: String = lines.collect::<Vec<_>>().join("\n").trim().to_string();
-    (description, body)
+    ParsedPrompt {
+        description,
+        body,
+        argument_hint: None,
+    }
+}
+
+/// Compute the slash-command name for a prompt-command file living under
+/// a `commands/` root directory. Subdirectories are joined with `:` to match
+/// Claude Code's namespacing convention.
+///
+/// Returns `None` if the file is not under `root` or has no usable stem.
+pub fn prompt_command_name(root: &std::path::Path, file: &std::path::Path) -> Option<String> {
+    let stem = file.file_stem().and_then(|s| s.to_str())?;
+    let parent = file.parent()?;
+    let relative = parent.strip_prefix(root).ok()?;
+    let prefix: Vec<&str> = relative
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => value.to_str(),
+            _ => None,
+        })
+        .collect();
+    if prefix.is_empty() {
+        Some(format!("/{stem}"))
+    } else {
+        Some(format!("/{}:{stem}", prefix.join(":")))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3260,18 +3423,20 @@ mod tests {
 
     #[test]
     fn parse_prompt_command_with_frontmatter() {
-        let content = "---\ndescription: \"review the PR\"\n---\nReview these changes: $ARGUMENTS";
-        let (desc, body) = parse_prompt_command(content);
-        assert_eq!(desc, "review the PR");
-        assert_eq!(body, "Review these changes: $ARGUMENTS");
+        let content = "---\ndescription: \"review the PR\"\nargument-hint: \"<branch>\"\n---\nReview these changes: $ARGUMENTS";
+        let parsed = parse_prompt_command(content);
+        assert_eq!(parsed.description, "review the PR");
+        assert_eq!(parsed.body, "Review these changes: $ARGUMENTS");
+        assert_eq!(parsed.argument_hint.as_deref(), Some("<branch>"));
     }
 
     #[test]
     fn parse_prompt_command_no_frontmatter_uses_first_line() {
         let content = "# Review code\nPlease review $ARGUMENTS.";
-        let (desc, body) = parse_prompt_command(content);
-        assert_eq!(desc, "Review code");
-        assert_eq!(body, "Please review $ARGUMENTS.");
+        let parsed = parse_prompt_command(content);
+        assert_eq!(parsed.description, "Review code");
+        assert_eq!(parsed.body, "Please review $ARGUMENTS.");
+        assert!(parsed.argument_hint.is_none());
     }
 
     #[test]
@@ -3280,9 +3445,53 @@ mod tests {
             name: "/review".to_string(),
             description: "review".to_string(),
             body: "Look at $ARGUMENTS carefully.".to_string(),
+            argument_hint: None,
             source_path: std::path::PathBuf::from("test.md"),
         };
         assert_eq!(cmd.render("src/main.rs"), "Look at src/main.rs carefully.");
+    }
+
+    #[test]
+    fn nested_prompt_commands_use_colon_namespace() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let nested = temp.path().join(".octocode").join("commands").join("git");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        std::fs::write(
+            nested.join("status.md"),
+            "---\ndescription: show git status\n---\nGit status please.",
+        )
+        .expect("write");
+
+        let mut reg = CommandRegistry::new();
+        reg.load_prompt_commands(temp.path());
+        let cmd = reg
+            .prompt_commands
+            .get("/git:status")
+            .expect("/git:status should load");
+        assert_eq!(cmd.description, "show git status");
+    }
+
+    #[test]
+    fn list_all_and_match_prefix_all_include_prompt_commands() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cmd_dir = temp.path().join(".octocode").join("commands");
+        std::fs::create_dir_all(&cmd_dir).expect("mkdir");
+        std::fs::write(
+            cmd_dir.join("zzz-debug.md"),
+            "---\ndescription: debug helper\n---\nDebug $ARGUMENTS",
+        )
+        .expect("write");
+
+        let mut reg = CommandRegistry::new();
+        reg.load_prompt_commands(temp.path());
+
+        assert!(reg
+            .list_all()
+            .iter()
+            .any(|entry| entry.name() == "/zzz-debug" && !entry.is_builtin()));
+
+        let prefix_hits = reg.match_prefix_all("/zzz");
+        assert!(prefix_hits.iter().any(|entry| entry.name() == "/zzz-debug"));
     }
 
     #[test]
