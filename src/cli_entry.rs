@@ -32,6 +32,16 @@ enum Commands {
         no_network: bool,
     },
 
+    /// Run terminal-first setup and readiness checks
+    Onboard {
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+        /// Preview macOS daemon readiness without installing a service
+        #[arg(long)]
+        daemon_preview: bool,
+    },
+
     /// Store provider API key in system keyring
     Login {
         /// Provider API key
@@ -1313,6 +1323,19 @@ pub async fn run() -> Result<(), anyhow::Error> {
             cli::doctor(
                 cli.project_root,
                 cli::doctor::DoctorOptions { smoke, no_network },
+            )
+            .await
+        }
+        Some(Commands::Onboard {
+            json,
+            daemon_preview,
+        }) => {
+            cli::onboard(
+                cli.project_root,
+                cli::onboard::OnboardOptions {
+                    json,
+                    daemon_preview,
+                },
             )
             .await
         }
