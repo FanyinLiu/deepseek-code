@@ -2177,14 +2177,18 @@ fn cmd_mode(args: &str, ctx: &mut CommandContext) -> CommandResult {
             )));
         }
         "ask" | "default" | "permissions" => crate::tui::app::InteractionMode::Ask,
-        "plan" => crate::tui::app::InteractionMode::Plan,
-        "review" | "auto-review" | "auto_review" => crate::tui::app::InteractionMode::AutoReview,
-        "full" | "full-access" | "full_access" | "yolo" => {
+        "plan" | "read-only" | "read_only" | "readonly" => {
+            crate::tui::app::InteractionMode::Plan
+        }
+        "review" | "auto-review" | "auto_review" | "accept-edits" | "accept_edits" => {
+            crate::tui::app::InteractionMode::AutoReview
+        }
+        "full" | "full-access" | "full_access" | "yolo" | "auto" | "bypass" => {
             crate::tui::app::InteractionMode::FullAccess
         }
         other => {
             return Err(format!(
-                "Unknown mode: {other}. Use /mode ask, /mode plan, /mode review, or /mode full."
+                "Unknown mode: {other}. Use /mode ask | plan | accept-edits | full (CLI aliases: default, read-only, auto, bypass)."
             ));
         }
     };
