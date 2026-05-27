@@ -79,6 +79,7 @@ pub async fn task(
                 ToolApprovalPolicy::Deny,
                 None,
                 None,
+                None,
             )
             .await;
             match result {

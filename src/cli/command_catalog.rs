@@ -241,6 +241,7 @@ async fn run_custom_command(
         crate::cli::ToolApprovalPolicy::Deny,
         payload.model.clone(),
         payload.allowed_tools.clone(),
+        None,
     )
     .await
 }

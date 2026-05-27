@@ -12,6 +12,7 @@ use crate::deepseek::{
 use crate::provider::{build_provider, ModelSelection, Provider};
 
 /// Run the run command: execute a task with tool access and approval.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     task: String,
     thinking: bool,
@@ -20,6 +21,7 @@ pub async fn run(
     tool_approval: ToolApprovalPolicy,
     model_override: Option<String>,
     allowed_tools: Option<Vec<String>>,
+    approval_mode: Option<crate::policy::PermissionMode>,
 ) -> Result<(), anyhow::Error> {
     let root = match resolve_project_root(project_root, "run") {
         Ok(root) => root,
@@ -70,6 +72,15 @@ pub async fn run(
     };
 
     let mut orchestrator = Orchestrator::new(client, root, session);
+    if let Some(mode) = approval_mode {
+        orchestrator.permission_mode = mode;
+        if matches!(
+            mode,
+            crate::policy::PermissionMode::Bypass | crate::policy::PermissionMode::Auto
+        ) {
+            orchestrator.yolo_mode = true;
+        }
+    }
     orchestrator.init_mcp(&config.mcp).await;
     let mut final_json = output_format
         .is_json()

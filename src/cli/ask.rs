@@ -16,6 +16,7 @@ pub async fn ask(
     project_root: Option<PathBuf>,
     output_format: TurnOutputFormat,
     tool_approval: ToolApprovalPolicy,
+    approval_mode: Option<crate::policy::PermissionMode>,
 ) -> Result<(), anyhow::Error> {
     let root = match resolve_project_root(project_root, "ask") {
         Ok(root) => root,
@@ -84,6 +85,15 @@ pub async fn ask(
     }
 
     let mut orchestrator = Orchestrator::new(client, root, session);
+    if let Some(mode) = approval_mode {
+        orchestrator.permission_mode = mode;
+        if matches!(
+            mode,
+            crate::policy::PermissionMode::Bypass | crate::policy::PermissionMode::Auto
+        ) {
+            orchestrator.yolo_mode = true;
+        }
+    }
     orchestrator.init_mcp(&config.mcp).await;
     let mut final_json = output_format
         .is_json()

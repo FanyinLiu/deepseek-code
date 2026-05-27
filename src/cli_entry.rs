@@ -105,6 +105,10 @@ enum Commands {
         #[arg(long, value_enum)]
         tool_approval: Option<ToolApprovalArg>,
 
+        /// Approval mode (Claude Code-style). See `octo chat --help`.
+        #[arg(long = "approval-mode", value_enum)]
+        approval_mode: Option<ApprovalModeArg>,
+
         /// Enable tool approval for every request without prompts
         #[arg(short = 'y', long = "auto-approve")]
         auto_approve: bool,
@@ -142,6 +146,10 @@ enum Commands {
         /// Tool approval policy: ask (prompt), allow, or deny
         #[arg(long, value_enum)]
         tool_approval: Option<ToolApprovalArg>,
+
+        /// Approval mode (Claude Code-style). See `octo chat --help`.
+        #[arg(long = "approval-mode", value_enum)]
+        approval_mode: Option<ApprovalModeArg>,
 
         /// Enable tool approval for every request without prompts
         #[arg(short = 'y', long = "auto-approve")]
@@ -1456,6 +1464,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
             question,
             output_format,
             tool_approval,
+            approval_mode,
             auto_approve,
         }) => {
             let tool_approval =
@@ -1465,6 +1474,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
                 cli.project_root,
                 output_format.turn_output_format(),
                 tool_approval,
+                approval_mode.map(Into::into),
             )
             .await
         }
@@ -1478,6 +1488,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
             task,
             thinking,
             tool_approval,
+            approval_mode,
             auto_approve,
             output_format,
         }) => {
@@ -1491,6 +1502,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
                 tool_approval,
                 None,
                 None,
+                approval_mode.map(Into::into),
             )
             .await
         }
