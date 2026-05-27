@@ -923,6 +923,11 @@ enum AgentCommands {
         /// `git worktree` and surfaces any changes back to you.
         #[arg(long, value_enum, default_value_t = AgentIsolationArg::None)]
         isolation: AgentIsolationArg,
+        /// Override the subagent's permission mode. `plan`/`read-only`
+        /// collapse to ReadOnly, `auto`/`bypass` collapse to Bypass (the
+        /// subagent enum only has 4 modes).
+        #[arg(long = "approval-mode", value_enum)]
+        approval_mode: Option<ApprovalModeArg>,
         /// Print machine-readable JSON
         #[arg(long)]
         json: bool,
@@ -987,6 +992,25 @@ impl From<ApprovalModeArg> for crate::policy::PermissionMode {
             ApprovalModeArg::ReadOnly => crate::policy::PermissionMode::ReadOnly,
             ApprovalModeArg::Auto => crate::policy::PermissionMode::Auto,
             ApprovalModeArg::Bypass => crate::policy::PermissionMode::Bypass,
+        }
+    }
+}
+
+/// Lossy mapping into `subagent::PermissionMode` (4 modes). `Plan` collapses
+/// to `ReadOnly`, `Auto` collapses to `Bypass` — the subagent enum doesn't
+/// distinguish "safe-auto" from "approve everything", so callers asking for
+/// `auto` on a subagent get the strongest interpretation.
+impl From<ApprovalModeArg> for crate::agent::subagent::PermissionMode {
+    fn from(value: ApprovalModeArg) -> Self {
+        match value {
+            ApprovalModeArg::Default => crate::agent::subagent::PermissionMode::Default,
+            ApprovalModeArg::AcceptEdits => crate::agent::subagent::PermissionMode::AcceptEdits,
+            ApprovalModeArg::Plan | ApprovalModeArg::ReadOnly => {
+                crate::agent::subagent::PermissionMode::ReadOnly
+            }
+            ApprovalModeArg::Auto | ApprovalModeArg::Bypass => {
+                crate::agent::subagent::PermissionMode::Bypass
+            }
         }
     }
 }
@@ -1787,6 +1811,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
                     model,
                     dry_run,
                     isolation,
+                    approval_mode,
                     json,
                 } => cli::agent::AgentCommand::Run {
                     name,
@@ -1796,6 +1821,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
                     model,
                     dry_run,
                     isolation: isolation.into(),
+                    approval_mode: approval_mode.map(Into::into),
                     json,
                 },
                 AgentCommands::Create { name, template } => cli::agent::AgentCommand::Create {

@@ -42,6 +42,7 @@ pub enum AgentCommand {
         model: Option<String>,
         dry_run: bool,
         isolation: crate::agent::subagent::SubagentIsolation,
+        approval_mode: Option<crate::agent::subagent::PermissionMode>,
         json: bool,
     },
     Create {
@@ -99,13 +100,31 @@ pub async fn agent(
             model,
             dry_run,
             isolation,
+            approval_mode,
             json,
         } => {
             let result = if dry_run {
-                run_agent_dry_run(&root, &name, &task, focus, max_turns, model, isolation)?
+                run_agent_dry_run(
+                    &root,
+                    &name,
+                    &task,
+                    focus,
+                    max_turns,
+                    model,
+                    isolation,
+                    approval_mode,
+                )?
             } else {
                 run_agent(
-                    &root, &name, &task, focus, max_turns, model, isolation, !json,
+                    &root,
+                    &name,
+                    &task,
+                    focus,
+                    max_turns,
+                    model,
+                    isolation,
+                    approval_mode,
+                    !json,
                 )
                 .await?
             };
@@ -458,10 +477,14 @@ async fn run_agent(
     max_turns: Option<u32>,
     model: Option<String>,
     isolation: crate::agent::subagent::SubagentIsolation,
+    approval_mode: Option<crate::agent::subagent::PermissionMode>,
     show_events: bool,
 ) -> Result<AgentRunPayload, anyhow::Error> {
     let mut config = resolve_run_config(project_root, name, max_turns, model)?;
     config.isolation = isolation;
+    if let Some(mode) = approval_mode {
+        config.permission_mode = mode;
+    }
     let configured_max_turns = config.max_turns;
 
     let app_config = storage::Config::load(Some(project_root))?;
@@ -540,6 +563,7 @@ async fn run_agent(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_agent_dry_run(
     project_root: &Path,
     name: &str,
@@ -548,9 +572,13 @@ fn run_agent_dry_run(
     max_turns: Option<u32>,
     model: Option<String>,
     isolation: crate::agent::subagent::SubagentIsolation,
+    approval_mode: Option<crate::agent::subagent::PermissionMode>,
 ) -> Result<AgentRunPayload, anyhow::Error> {
     let mut config = resolve_run_config(project_root, name, max_turns, model)?;
     config.isolation = isolation;
+    if let Some(mode) = approval_mode {
+        config.permission_mode = mode;
+    }
     let focus_files = focus
         .map(|path| vec![path.display().to_string()])
         .unwrap_or_default();
