@@ -2199,7 +2199,11 @@ fn cmd_permissions(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     let lines = [
         manager_header("permissions", "ready"),
         format!("mode: {visible_mode}"),
-        "modes: ask | accept-edits | plan | yolo".to_string(),
+        format!(
+            "approval-mode: {} (use --approval-mode on CLI, /mode in TUI)",
+            ctx.app.permission_mode.as_str()
+        ),
+        "modes: default | accept-edits | plan | read-only | auto | bypass".to_string(),
         "scope: config policy plus current TUI session bypass".to_string(),
         format!("auto mode: {}", on_off(policy.auto_mode)),
         format!(
