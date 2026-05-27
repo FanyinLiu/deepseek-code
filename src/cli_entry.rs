@@ -9,7 +9,18 @@ use crate::{cli, tui};
     name = "octo",
     version,
     about = "Multi-model, multi-agent coding CLI",
-    long_about = None
+    long_about = None,
+    after_help = "\
+Examples:
+  octo chat \"explain src/main.rs\"               # one-shot question
+  octo chat --continue                          # resume the most recent session
+  octo chat --approval-mode plan                # read-only planning session
+  octo agent run code-reviewer \"audit src/cli\"   # spawn a custom subagent
+  octo agent run code-explorer \"...\" --isolation worktree
+                                                # run a subagent in a git worktree
+  octo features status                          # local capabilities snapshot
+  octo doctor                                   # provider + capability check
+"
 )]
 struct Cli {
     #[command(subcommand)]
