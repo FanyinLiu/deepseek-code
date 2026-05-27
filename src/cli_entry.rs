@@ -79,6 +79,14 @@ enum Commands {
         #[arg(long, value_enum)]
         tool_approval: Option<ToolApprovalArg>,
 
+        /// Approval mode (Claude Code-style). Layers on top of
+        /// --tool-approval: default asks for mutations, accept-edits
+        /// auto-approves edits, plan/read-only block all mutations, auto
+        /// approves everything safe, bypass approves all (= dangerously
+        /// skip permissions).
+        #[arg(long = "approval-mode", value_enum)]
+        approval_mode: Option<ApprovalModeArg>,
+
         /// Enable tool approval for every request without prompts
         #[arg(short = 'y', long = "auto-approve")]
         auto_approve: bool,
@@ -949,6 +957,32 @@ enum AgentIsolationArg {
     Worktree,
 }
 
+/// User-facing approval mode names mirroring Claude Code's `--permission-mode`.
+/// `read-only` is octocode's extra (subset of plan) — same semantics as Plan
+/// but spelled differently for callers who want a literal "no writes" stance.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ApprovalModeArg {
+    Default,
+    AcceptEdits,
+    Plan,
+    ReadOnly,
+    Auto,
+    Bypass,
+}
+
+impl From<ApprovalModeArg> for crate::policy::PermissionMode {
+    fn from(value: ApprovalModeArg) -> Self {
+        match value {
+            ApprovalModeArg::Default => crate::policy::PermissionMode::Default,
+            ApprovalModeArg::AcceptEdits => crate::policy::PermissionMode::AcceptEdits,
+            ApprovalModeArg::Plan => crate::policy::PermissionMode::Plan,
+            ApprovalModeArg::ReadOnly => crate::policy::PermissionMode::ReadOnly,
+            ApprovalModeArg::Auto => crate::policy::PermissionMode::Auto,
+            ApprovalModeArg::Bypass => crate::policy::PermissionMode::Bypass,
+        }
+    }
+}
+
 impl From<AgentIsolationArg> for crate::agent::subagent::SubagentIsolation {
     fn from(value: AgentIsolationArg) -> Self {
         match value {
@@ -1380,6 +1414,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
             continue_session,
             output_format,
             tool_approval,
+            approval_mode,
             auto_approve,
         }) => {
             let tool_approval =
@@ -1413,6 +1448,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
                 session,
                 output_format.turn_output_format(),
                 tool_approval,
+                approval_mode.map(Into::into),
             )
             .await
         }

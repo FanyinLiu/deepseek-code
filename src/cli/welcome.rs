@@ -88,6 +88,7 @@ pub async fn welcome(
         session,
         crate::cli::TurnOutputFormat::Text,
         crate::cli::ToolApprovalPolicy::Ask,
+        None,
     )
     .await
 }

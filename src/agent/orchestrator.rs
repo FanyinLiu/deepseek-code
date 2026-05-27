@@ -473,6 +473,11 @@ pub struct Orchestrator {
     pub session: Session,
     pub background_queue: BackgroundQueue,
     pub yolo_mode: bool,
+    /// Session-scoped approval mode (Claude Code-style). Layers on top of
+    /// `yolo_mode`: Bypass/Auto behave like yolo, AcceptEdits auto-approves
+    /// edit tools but still asks for shell/subagent, Plan/ReadOnly hard-block
+    /// mutating tools. Default = ask every mutating tool (legacy behavior).
+    pub permission_mode: crate::policy::PermissionMode,
     plan_execution: Option<PlanExecutionState>,
     mcp_registry: Option<crate::mcp::McpRegistry>,
     mcp_initialized: bool,
@@ -501,6 +506,7 @@ impl Orchestrator {
             session,
             background_queue: BackgroundQueue::new(),
             yolo_mode: false,
+            permission_mode: crate::policy::PermissionMode::Default,
             plan_execution: None,
             mcp_registry: None,
             mcp_initialized: false,
@@ -2587,6 +2593,7 @@ impl Orchestrator {
                     let mut resolver = OrchestratorApprovalResolver {
                         event_tx,
                         yolo_mode: self.yolo_mode,
+                        permission_mode: self.permission_mode,
                     };
                     let mut backend = McpRegistryRuntimeBackend { registry };
                     let outcome = runtime
@@ -2990,6 +2997,12 @@ fn send_event(tx: &mpsc::UnboundedSender<AgentEvent>, event: AgentEvent) {
 struct OrchestratorApprovalResolver<'a> {
     event_tx: &'a mpsc::UnboundedSender<AgentEvent>,
     yolo_mode: bool,
+    /// PermissionMode-driven auto-approval (e.g. AcceptEdits auto-approves
+    /// edit tools; Auto/Bypass auto-approve everything). Layers on top of
+    /// the legacy `yolo_mode` flag so both can coexist during the
+    /// transition: Bypass / Auto already imply yolo, the new modes
+    /// (AcceptEdits / Plan / ReadOnly) refine policy without bypassing it.
+    permission_mode: policy::PermissionMode,
 }
 
 impl ApprovalResolver for OrchestratorApprovalResolver<'_> {
@@ -2999,7 +3012,16 @@ impl ApprovalResolver for OrchestratorApprovalResolver<'_> {
         decision: &'a policy::PolicyDecision,
     ) -> ApprovalFuture<'a> {
         Box::pin(async move {
-            if self.yolo_mode || matches!(decision.action, policy::PolicyAction::Allow) {
+            if self.permission_mode.blocks_tool(&call.tool) {
+                return ApprovalOutcome::denied(format!(
+                    "Blocked by permission mode {}",
+                    self.permission_mode.as_str()
+                ));
+            }
+            if self.yolo_mode
+                || matches!(decision.action, policy::PolicyAction::Allow)
+                || self.permission_mode.auto_approves(&call.tool, decision)
+            {
                 return ApprovalOutcome::Approved;
             }
             let (tx, rx) = tokio::sync::oneshot::channel();

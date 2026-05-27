@@ -9,6 +9,7 @@ use crate::provider::{build_provider, ModelSelection, Provider};
 use crate::storage;
 
 /// Run the chat command: one-shot or interactive conversation.
+#[allow(clippy::too_many_arguments)]
 pub async fn chat(
     prompt: Option<String>,
     thinking: bool,
@@ -17,6 +18,7 @@ pub async fn chat(
     session_id: Option<String>,
     output_format: TurnOutputFormat,
     tool_approval: ToolApprovalPolicy,
+    approval_mode: Option<crate::policy::PermissionMode>,
 ) -> Result<(), anyhow::Error> {
     let root = match resolve_project_root(project_root, "chat") {
         Ok(root) => root,
@@ -120,6 +122,19 @@ pub async fn chat(
     let policy_root = root.clone();
     let mut orchestrator = Some(Orchestrator::new(client, root, session));
     if let Some(ref mut orch) = orchestrator {
+        if let Some(mode) = approval_mode {
+            orch.permission_mode = mode;
+            // Bypass / Auto both imply "approve everything"; mirror that
+            // into the legacy yolo_mode flag so any code path that still
+            // reads yolo_mode (subagent dispatch, hooks-only branches, …)
+            // behaves consistently with the new mode.
+            if matches!(
+                mode,
+                crate::policy::PermissionMode::Bypass | crate::policy::PermissionMode::Auto
+            ) {
+                orch.yolo_mode = true;
+            }
+        }
         orch.init_mcp(&config.mcp).await;
     }
 
