@@ -124,6 +124,27 @@ pub fn doctor_no_network_lines(
             yes_no(capabilities.requires_model_override)
         ));
     }
+    if let Some(ref root) = root {
+        let status = crate::cli::features::status_payload(root);
+        lines.push(String::new());
+        lines.push("Local capabilities".to_string());
+        lines.push(format!(
+            "  Custom slash commands: {}",
+            status.custom_slash_commands_count
+        ));
+        lines.push(format!("  Skills loaded: {}", status.skills_count));
+        lines.push(format!(
+            "  Worktree isolation: {}",
+            yes_no(status.worktree_isolation_available)
+        ));
+        lines.push(format!(
+            "  Configured hook events: {}",
+            status.configured_hook_events
+        ));
+        if status.custom_agents_count > 0 {
+            lines.push(format!("  Custom agents: {}", status.custom_agents_count));
+        }
+    }
     Ok(lines)
 }
 
