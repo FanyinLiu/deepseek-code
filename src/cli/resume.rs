@@ -1,7 +1,29 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::cli::resolve_project_root;
 use crate::storage::{self, EventLogStore, SessionStore, TranscriptFormat};
+
+/// Return the most recently updated session's ID for the given project, or
+/// `None` if no sessions have been saved. Used by `--continue` flags to skip
+/// the explicit `--session <id>` lookup. Sessions live under
+/// `~/.octocode/<project-key>/sessions/` and `SessionStore::list` already
+/// sorts by `updated_at` descending, so the head of the list is the latest.
+pub fn resolve_latest_session_id(project_root: &Path) -> Result<Option<String>, anyhow::Error> {
+    let home = storage::user_home_dir()
+        .ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?;
+    let store = SessionStore::new(home.join(".octocode"));
+    latest_session_id_from_store(&store, project_root)
+}
+
+/// Pure helper around `SessionStore::list` — exposed for tests so we don't
+/// have to mutate process-global env vars to substitute the home dir.
+fn latest_session_id_from_store(
+    store: &SessionStore,
+    project_root: &Path,
+) -> Result<Option<String>, anyhow::Error> {
+    let summaries = store.list(project_root)?;
+    Ok(summaries.first().map(|summary| summary.id.to_string()))
+}
 
 /// Run the resume command: list and restore saved sessions.
 pub async fn resume(
@@ -184,6 +206,51 @@ fn list_and_print(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::deepseek::{ReasoningState, Session, SessionId, SessionMetadata};
+
+    fn fresh_session(project_root: &Path, updated_at: chrono::DateTime<chrono::Utc>) -> Session {
+        let id = SessionId::new_v4();
+        Session {
+            id,
+            name: None,
+            project_root: project_root.to_path_buf(),
+            messages: Vec::new(),
+            reasoning_state: ReasoningState::default(),
+            tool_call_history: Vec::new(),
+            checkpoints: Vec::new(),
+            created_at: updated_at,
+            updated_at,
+            metadata: SessionMetadata::default(),
+        }
+    }
+
+    #[test]
+    fn latest_session_id_is_none_when_no_sessions() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let project = tempfile::tempdir().expect("project");
+        let store = SessionStore::new(home.path().join(".octocode"));
+        let latest =
+            latest_session_id_from_store(&store, project.path()).expect("list empty store");
+        assert!(latest.is_none());
+    }
+
+    #[test]
+    fn latest_session_id_picks_most_recent_by_updated_at() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let project = tempfile::tempdir().expect("project");
+        let store = SessionStore::new(home.path().join(".octocode"));
+
+        let now = chrono::Utc::now();
+        let older = fresh_session(project.path(), now - chrono::Duration::hours(2));
+        let newer = fresh_session(project.path(), now);
+        store.save(&older).expect("save older");
+        store.save(&newer).expect("save newer");
+
+        let latest = latest_session_id_from_store(&store, project.path())
+            .expect("list store")
+            .expect("expected a latest session");
+        assert_eq!(latest, newer.id.to_string());
+    }
 
     #[test]
     fn transcript_format_and_extension_follow_requested_output() {

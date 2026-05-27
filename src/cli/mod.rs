@@ -54,7 +54,7 @@ pub use models::models;
 pub use onboard::onboard;
 pub use plan::plan;
 pub use repair::repair;
-pub use resume::{export, resume};
+pub use resume::{export, resolve_latest_session_id, resume};
 pub use review::review;
 pub use root::{resolve_project_root, resolve_project_root_or_cwd};
 pub use run::run;

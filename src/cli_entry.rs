@@ -66,6 +66,11 @@ enum Commands {
         #[arg(long)]
         session: Option<String>,
 
+        /// Resume the most recently updated session for this project.
+        /// Equivalent to `--session <latest>` and conflicts with `--session`.
+        #[arg(long = "continue", conflicts_with = "session")]
+        continue_session: bool,
+
         /// Output format: text, json, stream-json
         #[arg(long, value_enum, default_value_t = OutputFormatArg::Text)]
         output_format: OutputFormatArg,
@@ -1372,12 +1377,34 @@ pub async fn run() -> Result<(), anyhow::Error> {
             thinking,
             model,
             session,
+            continue_session,
             output_format,
             tool_approval,
             auto_approve,
         }) => {
             let tool_approval =
                 effective_turn_tool_approval(output_format, tool_approval, auto_approve);
+            let session = if continue_session {
+                // clap's `conflicts_with = "session"` already rules out
+                // `--continue --session <id>` together, so `session` is
+                // guaranteed `None` here. Resolve the most recently
+                // updated session for this project; if there are none,
+                // start fresh (same behavior as bare `octo chat`).
+                let root = cli
+                    .project_root
+                    .clone()
+                    .or_else(crate::storage::find_project_root);
+                let root = root.as_deref().unwrap_or_else(|| std::path::Path::new("."));
+                match cli::resolve_latest_session_id(root) {
+                    Ok(latest) => latest,
+                    Err(error) => {
+                        eprintln!("warning: --continue could not locate a recent session ({error}); starting fresh");
+                        None
+                    }
+                }
+            } else {
+                session
+            };
             cli::chat(
                 prompt,
                 thinking,
