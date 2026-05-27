@@ -163,6 +163,10 @@ pub struct TuiApp {
     pub messages: Vec<ProtocolMessage>,
     pub model: DeepSeekModel,
     pub thinking_mode: ThinkingMode,
+    /// Session-scoped approval mode (Claude Code-style). Mirrored to the
+    /// orchestrator via Submit handler diff detection, mirroring how
+    /// `model` is synced. `/mode` slash command reads and writes this.
+    pub permission_mode: crate::policy::PermissionMode,
     pub cache: Option<CacheUsage>,
     pub total_tokens: u64,
     pub current_turn_tokens: u64,
@@ -744,6 +748,7 @@ impl TuiApp {
             messages: Vec::new(),
             model,
             thinking_mode,
+            permission_mode: crate::policy::PermissionMode::Default,
             cache: None,
             total_tokens: 0,
             current_turn_tokens: 0,
@@ -861,6 +866,16 @@ impl TuiApp {
     pub fn set_interaction_mode(&mut self, mode: InteractionMode) {
         self.interaction_mode = mode;
         self.session_auto_approve = mode == InteractionMode::FullAccess;
+        // Mirror the 4-mode TUI selector into the 6-mode approval pipeline.
+        // The Submit handler diffs `permission_mode` and forwards changes to
+        // the orchestrator, so `/mode plan` actually starts blocking
+        // mutating tool calls instead of just relabelling the status line.
+        self.permission_mode = match mode {
+            InteractionMode::Ask => crate::policy::PermissionMode::Default,
+            InteractionMode::Plan => crate::policy::PermissionMode::Plan,
+            InteractionMode::AutoReview => crate::policy::PermissionMode::AcceptEdits,
+            InteractionMode::FullAccess => crate::policy::PermissionMode::Bypass,
+        };
         self.status_message = format!("Mode: {}", mode.label());
         self.push_activity(format!("mode: {}", mode.label()));
     }
@@ -7233,6 +7248,7 @@ pub async fn run_tui(
                         .map(Orchestrator::background_tasks)
                         .unwrap_or_default();
                     let model_before = app.model.clone();
+                    let permission_mode_before = app.permission_mode;
                     let mut ctx = crate::commands::CommandContext {
                         app: &mut app,
                         project_root: &root,
@@ -7247,6 +7263,20 @@ pub async fn run_tui(
                                 if app.model != model_before {
                                     if let Some(orchestrator) = orchestrator.as_mut() {
                                         orchestrator.set_active_model(app.model.clone());
+                                    }
+                                }
+                                if app.permission_mode != permission_mode_before {
+                                    if let Some(orchestrator) = orchestrator.as_mut() {
+                                        orchestrator.permission_mode = app.permission_mode;
+                                        // Bypass/Auto imply legacy yolo;
+                                        // any other mode resets yolo so the
+                                        // user can dial back from bypass.
+                                        orchestrator.yolo_mode = matches!(
+                                            app.permission_mode,
+                                            crate::policy::PermissionMode::Bypass
+                                                | crate::policy::PermissionMode::Auto
+                                        );
+                                        yolo_mode = orchestrator.yolo_mode;
                                     }
                                 }
                                 if matches!(
@@ -7506,6 +7536,26 @@ mod tests {
 
     fn test_app() -> TuiApp {
         test_app_with_root(PathBuf::from("D:/octocode"))
+    }
+
+    #[test]
+    fn set_interaction_mode_maps_to_policy_permission_mode() {
+        let mut app = test_app();
+
+        app.set_interaction_mode(InteractionMode::Plan);
+        assert_eq!(app.permission_mode, crate::policy::PermissionMode::Plan);
+
+        app.set_interaction_mode(InteractionMode::AutoReview);
+        assert_eq!(
+            app.permission_mode,
+            crate::policy::PermissionMode::AcceptEdits
+        );
+
+        app.set_interaction_mode(InteractionMode::FullAccess);
+        assert_eq!(app.permission_mode, crate::policy::PermissionMode::Bypass);
+
+        app.set_interaction_mode(InteractionMode::Ask);
+        assert_eq!(app.permission_mode, crate::policy::PermissionMode::Default);
     }
 
     fn test_app_with_root(project_root: PathBuf) -> TuiApp {
