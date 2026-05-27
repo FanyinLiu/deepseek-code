@@ -3686,7 +3686,9 @@ impl TuiApp {
             }
             AgentEvent::Error(e) => {
                 self.push_activity(format!("error: {e}"));
-                self.status_message = format!("Error: {e}");
+                // Lead softly — "snag" instead of "Error" keeps the status
+                // bar from yelling at the user mid-flow.
+                self.status_message = format!("Hit a snag: {e}");
             }
             AgentEvent::TurnComplete { total_tokens, .. } => {
                 let turn_duration_ms = self

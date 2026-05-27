@@ -3014,7 +3014,7 @@ impl ApprovalResolver for OrchestratorApprovalResolver<'_> {
         Box::pin(async move {
             if self.permission_mode.blocks_tool(&call.tool) {
                 return ApprovalOutcome::denied(format!(
-                    "Blocked by permission mode {}",
+                    "Skipped — `{}` mode keeps this kind of tool out of reach for now",
                     self.permission_mode.as_str()
                 ));
             }
@@ -3035,9 +3035,13 @@ impl ApprovalResolver for OrchestratorApprovalResolver<'_> {
             );
             match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
                 Ok(Ok(true)) => ApprovalOutcome::Approved,
-                Ok(Ok(false)) => ApprovalOutcome::denied("Denied by user"),
-                Ok(Err(_)) => ApprovalOutcome::denied("Approval channel closed"),
-                Err(_) => ApprovalOutcome::denied("Denied by user or timeout"),
+                Ok(Ok(false)) => ApprovalOutcome::denied("Not this one — please pick another approach"),
+                Ok(Err(_)) => ApprovalOutcome::denied(
+                    "Approval flow ended before a response arrived",
+                ),
+                Err(_) => ApprovalOutcome::denied(
+                    "No approval came in within 60s — moving on without this call",
+                ),
             }
         })
     }
