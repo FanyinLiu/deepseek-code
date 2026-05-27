@@ -30,7 +30,9 @@ fn preview_tui_works_with_dumb_non_tty_stdio() {
     let stdout = stdout(&output);
     assert!(stdout.contains("Octocode") || stdout.contains("OCTOCODE"));
     assert!(stdout.contains("octo"));
-    assert!(stdout.contains("今天要改什么？") || stdout.contains("Describe your next step"));
+    assert!(
+        stdout.contains("今天想从哪开始？") || stdout.contains("Where do you want to start")
+    );
     assert!(stdout.contains("Context") || stdout.contains("上下文"));
     assert!(stdout.contains("ready"));
     assert!(stdout.contains("confirm"));

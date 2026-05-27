@@ -686,15 +686,11 @@ fn render_invitation_and_footer(f: &mut Frame, area: Rect, data: &WelcomeDashboa
         )
     } else {
         (
+            tr(lang, "Where do you want to start?", "今天想从哪开始？"),
             tr(
                 lang,
-                "Get started: Describe your next step",
-                "今天要改什么？",
-            ),
-            tr(
-                lang,
-                "Type the work directly, then press Enter.",
-                "直接输入要做的事，按 Enter 发送。",
+                "Write a sentence below — Enter sends it.",
+                "下面随手写一句，按 Enter 发送就行。",
             ),
             tr(
                 lang,
@@ -946,18 +942,14 @@ fn render_compact_brand_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboa
     f.render_widget(
         Paragraph::new(Text::from(vec![
             Line::from(vec![Span::styled(
-                tr(
-                    lang,
-                    "Get started: Describe your next step",
-                    "今天要改什么？",
-                ),
+                tr(lang, "Where do you want to start?", "今天想从哪开始？"),
                 welcome_muted(),
             )]),
             Line::from(vec![Span::styled(
                 tr(
                     lang,
-                    "Type the work directly, then press Enter.",
-                    "直接输入要做的事，按 Enter 发送。",
+                    "Write a sentence below — Enter sends it.",
+                    "下面随手写一句，按 Enter 发送就行。",
                 ),
                 welcome_muted(),
             )]),
@@ -1300,12 +1292,12 @@ fn render_octopus_pet(f: &mut Frame, area: Rect) {
 }
 
 fn render_product_mark(f: &mut Frame, area: Rect, lang: UiLanguage) {
-    let workspace_line = tr(lang, "Octocode Workbench", "Octocode 工作台");
-    let subtitle = tr(
-        lang,
-        "Run with `octo` from this workspace.",
-        "使用主命令 octo。",
-    );
+    // Softer brand line: drop the "Workbench" / "工作台" framing and the
+    // imperative "Run with `octo`" subtitle. The product name + a quiet
+    // greeting feels less like a tool poster and more like "open the
+    // editor and sit down".
+    let workspace_line = tr(lang, "ready when you are", "随时可以开始");
+    let subtitle = tr(lang, "type below to begin", "下面输入想做的事");
     let mut lines = vec![Line::from(vec![
         Span::styled("OCTOCODE", welcome_accent().add_modifier(Modifier::BOLD)),
         Span::styled(" · ", welcome_muted()),
@@ -1505,7 +1497,7 @@ mod tests {
             .expect("draw welcome");
         let rendered = buffer_text(terminal.backend());
         assert!(rendered.contains("OCTO"));
-        assert!(rendered.contains("Describe your next step"));
+        assert!(rendered.contains("Where do you want to start"));
         assert!(rendered.contains("/help"));
         assert!(rendered.contains("workspace"));
         assert!(rendered.contains("memory"));
@@ -1535,7 +1527,7 @@ mod tests {
             .expect("draw welcome");
         let rendered = buffer_text(terminal.backend());
         assert!(rendered.contains("OCTO"));
-        assert!(rendered.contains("Get started"));
+        assert!(rendered.contains("Where do you want to start"));
         assert!(rendered.contains("workspace"));
         assert!(rendered.contains("/help"));
     }

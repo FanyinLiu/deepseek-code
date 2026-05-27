@@ -10204,8 +10204,8 @@ exit = "ctrl+q"
         )
         .expect("render snapshot");
 
-        assert!(snapshot.contains("今天要改什么？"));
-        assert!(snapshot.contains("直接输入要做的事"));
+        assert!(snapshot.contains("今天想从哪开始？"));
+        assert!(snapshot.contains("下面随手写一句"));
         assert!(!snapshot.contains("按 1-3"));
         assert!(snapshot.contains(">"));
         assert!(snapshot.contains("上下文") || snapshot.contains("Context"));
@@ -10227,7 +10227,7 @@ exit = "ctrl+q"
         )
         .expect("render snapshot");
 
-        assert!(snapshot.contains("Octocode 工作台"));
+        assert!(snapshot.contains("Octocode") || snapshot.contains("OCTOCODE"));
         assert!(snapshot.contains("Context") || snapshot.contains("上下文"));
     }
 
