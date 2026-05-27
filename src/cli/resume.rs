@@ -47,7 +47,7 @@ pub async fn resume(
             });
 
             if let Some(summary) = target {
-                println!("Resuming session: {}", summary.id);
+                println!("Session details: {}", summary.id);
                 match store.load(&root, &summary.id) {
                     Ok(session) => {
                         println!(
@@ -96,8 +96,9 @@ pub async fn resume(
                             println!("恢复提示: 只展示状态，不会自动重跑命令或重新写文件。");
                         }
                         println!();
-                        println!("To continue this session, run:");
+                        println!("To continue this session, run one of:");
                         println!("  octo chat --session {}", session.id);
+                        println!("  octo chat --continue   # if this is the most recent session");
                     }
                     Err(e) => {
                         eprintln!("Failed to load session: {e}");

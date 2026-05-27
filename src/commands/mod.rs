@@ -2342,7 +2342,7 @@ fn cmd_sessions(_args: &str, ctx: &mut CommandContext) -> CommandResult {
         ));
     }
     lines.push(String::new());
-    lines.push("next      use `octo resume <id-prefix>` outside TUI to resume".to_string());
+    lines.push("next      `octo chat --continue` 接最近 session；`octo chat --session <id-prefix>` 选指定 session".to_string());
     Ok(Some(lines.join("\n")))
 }
 
