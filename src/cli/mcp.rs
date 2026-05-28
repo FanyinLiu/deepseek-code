@@ -574,7 +574,7 @@ fn write_toml_value(path: &Path, value: &toml::Value) -> Result<(), anyhow::Erro
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, toml::to_string_pretty(value)?)?;
+    crate::storage::atomic::write_text_atomic(path, &toml::to_string_pretty(value)?)?;
     Ok(())
 }
 

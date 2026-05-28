@@ -180,7 +180,8 @@ fn write_project_swarm_override(
     subagent_table.insert("swarm_enabled".to_string(), toml::Value::Boolean(enabled));
     let rendered = toml::to_string_pretty(&toml::Value::Table(table))
         .map_err(|e| format!("Failed to render local.toml: {e}"))?;
-    std::fs::write(&path, rendered).map_err(|e| format!("Failed to write local.toml: {e}"))?;
+    crate::storage::atomic::write_text_atomic(&path, &rendered)
+        .map_err(|e| format!("Failed to write local.toml: {e}"))?;
     Ok(())
 }
 

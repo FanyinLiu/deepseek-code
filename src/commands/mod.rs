@@ -1854,12 +1854,10 @@ fn cmd_output_style(args: &str, ctx: &mut CommandContext) -> CommandResult {
         "updated_at": chrono::Utc::now(),
         "prompt_policy": prompt_policy
     });
-    std::fs::write(
-        &path,
-        serde_json::to_string_pretty(&payload)
-            .map_err(|e| format!("Failed to render output style: {e}"))?,
-    )
-    .map_err(|e| format!("Failed to write output style: {e}"))?;
+    let rendered = serde_json::to_string_pretty(&payload)
+        .map_err(|e| format!("Failed to render output style: {e}"))?;
+    crate::storage::atomic::write_text_atomic(&path, &rendered)
+        .map_err(|e| format!("Failed to write output style: {e}"))?;
     ctx.app.push_activity(format!("output-style: {style}"));
     Ok(Some(format!("Output style set to {style}.")))
 }
@@ -1894,7 +1892,8 @@ complete = "补全"
 open_settings = "设置"
 open_history_search = "搜索历史"
 "#;
-        std::fs::write(&path, content).map_err(|e| format!("Failed to write keybindings: {e}"))?;
+        crate::storage::atomic::write_text_atomic(&path, content)
+            .map_err(|e| format!("Failed to write keybindings: {e}"))?;
     }
 
     let mut lines = vec![manager_header("keybindings", "ready")];
@@ -2176,7 +2175,8 @@ fn cmd_init(_args: &str, ctx: &mut CommandContext) -> CommandResult {
 - Use tools for local file questions instead of guessing.
 - Ask before risky writes outside the workspace.
 "#;
-    std::fs::write(&path, content).map_err(|e| format!("Failed to write AGENTS.md: {e}"))?;
+    crate::storage::atomic::write_text_atomic(&path, content)
+        .map_err(|e| format!("Failed to write AGENTS.md: {e}"))?;
     Ok(Some(format!(
         "{}\ncreated   {}\nnext      edit AGENTS.md with project-specific rules",
         manager_header("init", "done"),
@@ -2400,7 +2400,8 @@ fn write_project_ui_string_override(
     ui_table.insert(key.to_string(), toml::Value::String(value.to_string()));
     let rendered = toml::to_string_pretty(&toml::Value::Table(table))
         .map_err(|e| format!("Failed to render local.toml: {e}"))?;
-    std::fs::write(&path, rendered).map_err(|e| format!("Failed to write local.toml: {e}"))?;
+    crate::storage::atomic::write_text_atomic(&path, &rendered)
+        .map_err(|e| format!("Failed to write local.toml: {e}"))?;
     Ok(())
 }
 
