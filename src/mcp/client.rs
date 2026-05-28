@@ -2,6 +2,7 @@
 use std::{collections::HashMap, path::PathBuf, process::Stdio, time::Duration};
 
 use anyhow::Context;
+use futures::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -556,25 +557,21 @@ impl RemoteMcpClient {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_string();
-        let text = time::timeout(self.timeout, response.text())
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "MCP response for '{method}' timed out after {} ms",
-                    self.timeout.as_millis()
-                )
-            })?
-            .map_err(|e| anyhow::anyhow!("failed to read MCP response for '{method}': {e}"))?;
+        let text = time::timeout(
+            self.timeout,
+            read_limited_response_text(method, response, MAX_MCP_CONTENT_LENGTH),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "MCP response for '{method}' timed out after {} ms",
+                self.timeout.as_millis()
+            )
+        })?
+        .map_err(|e| anyhow::anyhow!("failed to read MCP response for '{method}': {e}"))?;
 
         if !status.is_success() {
             anyhow::bail!("MCP request '{method}' failed with HTTP {status}: {text}");
-        }
-        if text.len() > MAX_MCP_CONTENT_LENGTH {
-            anyhow::bail!(
-                "MCP response for '{method}' too large: {} bytes exceeds {}",
-                text.len(),
-                MAX_MCP_CONTENT_LENGTH
-            );
         }
         if !expect_response {
             return Ok(String::new());
@@ -585,6 +582,35 @@ impl RemoteMcpClient {
             Ok(text)
         }
     }
+}
+
+async fn read_limited_response_text(
+    method: &str,
+    response: reqwest::Response,
+    max_content_length: usize,
+) -> Result<String, anyhow::Error> {
+    if let Some(content_length) = response.content_length() {
+        if content_length > max_content_length as u64 {
+            anyhow::bail!(
+                "MCP response for '{method}' too large: {content_length} bytes exceeds {max_content_length}"
+            );
+        }
+    }
+
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| anyhow::anyhow!("failed to read MCP response chunk: {e}"))?;
+        if body.len().saturating_add(chunk.len()) > max_content_length {
+            anyhow::bail!(
+                "MCP response for '{method}' too large: exceeds {max_content_length} bytes"
+            );
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    String::from_utf8(body)
+        .map_err(|error| anyhow::anyhow!("invalid UTF-8 in MCP response body: {error}"))
 }
 
 fn build_header_map(headers: Option<&HashMap<String, String>>) -> Result<HeaderMap, anyhow::Error> {
@@ -790,6 +816,27 @@ mod tests {
         .await
         .expect_err("empty stream should time out");
         assert!(err.to_string().contains("MCP read timed out"));
+    }
+
+    #[tokio::test]
+    async fn remote_response_reader_rejects_oversized_body_before_returning_text() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("123456789"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let response = reqwest::Client::new()
+            .post(server.uri())
+            .send()
+            .await
+            .expect("mock response");
+        let error = read_limited_response_text("tools/list", response, 8)
+            .await
+            .expect_err("oversized response should fail");
+
+        assert!(error.to_string().contains("too large"));
     }
 
     #[tokio::test]
