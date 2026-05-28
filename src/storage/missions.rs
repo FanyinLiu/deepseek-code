@@ -148,7 +148,9 @@ impl MissionStore {
     pub fn list(&self) -> Result<Vec<MissionSummary>, anyhow::Error> {
         let path = self.index_path();
         let mut summaries = if path.exists() {
-            match serde_json::from_str::<Vec<MissionSummary>>(&std::fs::read_to_string(&path)?) {
+            match serde_json::from_str::<Vec<MissionSummary>>(
+                &crate::storage::read_text_file_capped(&path)?,
+            ) {
                 Ok(summaries) => summaries,
                 Err(error) => {
                     tracing::warn!("rebuilding mission index after parse failure: {error}");
@@ -197,7 +199,7 @@ impl MissionStore {
                 skipped_malformed_lines: 0,
             });
         }
-        let content = std::fs::read_to_string(&path)?;
+        let content = crate::storage::read_text_file_capped(&path)?;
         let non_empty_lines: Vec<_> = content
             .lines()
             .filter(|line| !line.trim().is_empty())
@@ -377,7 +379,7 @@ impl MissionStore {
 
         let index_path = self.index_path();
         let mut summaries: Vec<MissionSummary> = if index_path.exists() {
-            serde_json::from_str(&std::fs::read_to_string(&index_path)?)?
+            serde_json::from_str(&crate::storage::read_text_file_capped(&index_path)?)?
         } else {
             Vec::new()
         };
@@ -464,8 +466,8 @@ fn write_pretty_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), 
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, anyhow::Error> {
-    let content =
-        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let content = crate::storage::read_text_file_capped(path)
+        .with_context(|| format!("read {}", path.display()))?;
     Ok(serde_json::from_str(&content)?)
 }
 

@@ -116,7 +116,7 @@ fn fallback_search(
             }
         }
 
-        if let Ok(content) = std::fs::read_to_string(path) {
+        if let Ok(content) = crate::storage::read_text_file_capped(path) {
             for (line_num, line) in content.lines().enumerate() {
                 let matches = match &pattern_lower {
                     Some(pl) => line.to_lowercase().contains(pl.as_str()),

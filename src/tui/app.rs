@@ -634,7 +634,7 @@ fn welcome_agents_md(root: &Path) -> welcome::AgentsMdInfo {
         };
     }
 
-    match std::fs::read_to_string(&path) {
+    match crate::storage::read_text_file_capped(&path) {
         Ok(content) => {
             let rule_count = content
                 .lines()

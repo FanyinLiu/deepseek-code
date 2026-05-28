@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs, path::Path};
+use std::{collections::HashMap, path::Path};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -111,7 +111,7 @@ impl Keymap {
     pub fn load_project(project_root: &Path) -> Self {
         let mut keymap = Self::default();
         let path = project_root.join(".octocode").join("keybindings.toml");
-        if let Ok(content) = fs::read_to_string(path) {
+        if let Ok(content) = crate::storage::read_text_file_capped(path) {
             keymap.apply_toml_overrides(&content);
         }
         keymap

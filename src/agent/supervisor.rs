@@ -403,7 +403,7 @@ fn configured_max_parallel_subagents(project_root: &Path) -> usize {
 }
 
 fn read_configured_subagent_max_parallel(path: &Path) -> Option<usize> {
-    let content = std::fs::read_to_string(path).ok()?;
+    let content = crate::storage::read_text_file_capped(path).ok()?;
     let value = content.parse::<toml::Value>().ok()?;
     let max_parallel = value.get("subagent")?.get("max_parallel")?.as_integer()?;
     usize::try_from(max_parallel).ok()

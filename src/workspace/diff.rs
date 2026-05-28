@@ -15,7 +15,7 @@ pub fn unified_diff(original: &str, modified: &str, file_path: &str) -> String {
 /// Generate a diff for a file against its current on-disk content.
 pub fn diff_against_disk(file_path: &Path, new_content: &str) -> Result<String, anyhow::Error> {
     let original = if file_path.exists() {
-        std::fs::read_to_string(file_path)?
+        crate::storage::read_text_file_capped(file_path)?
     } else {
         String::new()
     };

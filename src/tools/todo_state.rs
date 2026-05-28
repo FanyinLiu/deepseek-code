@@ -94,7 +94,7 @@ pub fn read_todo_items(project_root: &Path) -> Result<Vec<Value>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let content = std::fs::read_to_string(&path)?;
+    let content = crate::storage::read_text_file_capped(&path)?;
     let value: Value = serde_json::from_str(&content)?;
     Ok(value
         .get("todos")

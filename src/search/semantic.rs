@@ -116,7 +116,7 @@ pub fn build_project_index(project_root: &Path) -> Result<SearchIndex, anyhow::E
             continue;
         }
 
-        let content = match std::fs::read_to_string(path) {
+        let content = match crate::storage::read_text_file_capped(path) {
             Ok(c) => c,
             Err(_) => continue,
         };

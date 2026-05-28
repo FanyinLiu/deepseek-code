@@ -9,7 +9,7 @@ pub fn load_history() -> Vec<String> {
     if !path.exists() {
         return Vec::new();
     }
-    match std::fs::read_to_string(&path) {
+    match crate::storage::read_text_file_capped(&path) {
         Ok(content) => content
             .lines()
             .filter(|l| !l.trim().is_empty())

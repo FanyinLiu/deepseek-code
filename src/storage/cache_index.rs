@@ -46,7 +46,7 @@ impl CacheIndex {
             }
         }
 
-        std::fs::read_to_string(&path).ok()
+        crate::storage::read_text_file_capped(&path).ok()
     }
 
     /// Invalidate a specific cache entry.

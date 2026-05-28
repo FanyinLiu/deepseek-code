@@ -306,7 +306,7 @@ impl CommandRegistry {
             if self.commands.contains_key(slash_name.as_str()) {
                 continue;
             }
-            let Ok(content) = std::fs::read_to_string(&path) else {
+            let Ok(content) = crate::storage::read_text_file_capped(&path) else {
                 continue;
             };
             let parsed = parse_prompt_command(&content);
@@ -2015,7 +2015,7 @@ fn cmd_output_style(args: &str, ctx: &mut CommandContext) -> CommandResult {
     let requested = args.trim().to_ascii_lowercase();
     let path = output_style_path(ctx.project_root);
     if requested.is_empty() {
-        let current = std::fs::read_to_string(&path)
+        let current = crate::storage::read_text_file_capped(&path)
             .ok()
             .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
             .and_then(|value| {
@@ -2097,7 +2097,7 @@ open_history_search = "搜索历史"
     let mut lines = vec![manager_header("keybindings", "ready")];
     if path.exists() {
         lines.push(format!("config    {}", path.display()));
-        if let Ok(content) = std::fs::read_to_string(&path) {
+        if let Ok(content) = crate::storage::read_text_file_capped(&path) {
             for line in content
                 .lines()
                 .filter(|line| !line.trim().is_empty())
@@ -2306,7 +2306,7 @@ fn cmd_memory(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     let mut lines = vec!["Memory files".to_string(), "".to_string()];
     for path in crate::agent::prompt_builder::project_rule_candidates(ctx.project_root) {
         if path.exists() {
-            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            let content = crate::storage::read_text_file_capped(&path).unwrap_or_default();
             lines.push(format!("{} — {} bytes", path.display(), content.len()));
         } else {
             lines.push(format!("{} — missing", path.display()));
@@ -3023,7 +3023,7 @@ fn write_project_swarm_override(
     let path = dir.join("local.toml");
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create config dir: {e}"))?;
     let mut table = if path.exists() {
-        let content = std::fs::read_to_string(&path)
+        let content = crate::storage::read_text_file_capped(&path)
             .map_err(|e| format!("Failed to read local.toml: {e}"))?;
         toml::from_str::<toml::Value>(&content)
             .ok()
@@ -3054,7 +3054,7 @@ fn write_project_ui_string_override(
     let path = dir.join("local.toml");
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create config dir: {e}"))?;
     let mut table = if path.exists() {
-        let content = std::fs::read_to_string(&path)
+        let content = crate::storage::read_text_file_capped(&path)
             .map_err(|e| format!("Failed to read local.toml: {e}"))?;
         toml::from_str::<toml::Value>(&content)
             .ok()

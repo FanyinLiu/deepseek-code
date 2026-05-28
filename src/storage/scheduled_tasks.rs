@@ -155,7 +155,7 @@ impl ScheduledTaskStore {
             if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
                 continue;
             }
-            let content = std::fs::read_to_string(path)?;
+            let content = crate::storage::read_text_file_capped(&path)?;
             tasks.push(toml::from_str::<ScheduledTask>(&content)?);
         }
         tasks.sort_by_key(|a| a.created_at);

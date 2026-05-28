@@ -58,7 +58,7 @@ impl SessionStore {
             self.legacy_session_dir(project_root, session_id)
                 .join("session.json")
         };
-        let content = std::fs::read_to_string(&path)?;
+        let content = crate::storage::read_text_file_capped(&path)?;
         let session: Session = serde_json::from_str(&content)?;
         Ok(session)
     }
@@ -151,7 +151,7 @@ impl SessionStore {
 
             let index_path = project_dir.join("index.json");
             let mut summaries: Vec<SessionSummary> = if index_path.exists() {
-                serde_json::from_str(&std::fs::read_to_string(&index_path)?)?
+                serde_json::from_str(&crate::storage::read_text_file_capped(&index_path)?)?
             } else {
                 Vec::new()
             };
@@ -180,9 +180,9 @@ impl SessionStore {
     ) -> Result<Vec<SessionSummary>, anyhow::Error> {
         let index_path = project_dir.join("index.json");
         if index_path.exists() {
-            match serde_json::from_str::<Vec<SessionSummary>>(&std::fs::read_to_string(
-                &index_path,
-            )?) {
+            match serde_json::from_str::<Vec<SessionSummary>>(
+                &crate::storage::read_text_file_capped(&index_path)?,
+            ) {
                 Ok(summaries) => return Ok(summaries),
                 Err(error) => {
                     tracing::warn!(
@@ -213,7 +213,7 @@ impl SessionStore {
             if !session_path.exists() {
                 continue;
             }
-            let content = match std::fs::read_to_string(&session_path) {
+            let content = match crate::storage::read_text_file_capped(&session_path) {
                 Ok(content) => content,
                 Err(error) => {
                     tracing::warn!(

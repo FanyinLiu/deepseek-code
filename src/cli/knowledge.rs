@@ -36,7 +36,7 @@ pub async fn knowledge(command: KnowledgeCommand, project_root: Option<PathBuf>)
         KnowledgeCommand::Show { topic, json } => match topic {
             KnowledgeTopic::Project => {
                 let update = store.update_project_knowledge()?;
-                let content = std::fs::read_to_string(&update.project_path)?;
+                let content = crate::storage::read_text_file_capped(&update.project_path)?;
                 if json {
                     print_json(&serde_json::json!({
                         "path": update.project_path,

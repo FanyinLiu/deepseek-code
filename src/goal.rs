@@ -146,7 +146,7 @@ impl GoalStore {
         if !self.path.exists() {
             return Ok(GoalConfig::default());
         }
-        let data = fs::read_to_string(&self.path)
+        let data = crate::storage::read_text_file_capped(&self.path)
             .with_context(|| format!("failed to read {}", self.path.display()))?;
         toml::from_str(&data).with_context(|| format!("invalid {}", self.path.display()))
     }
@@ -239,7 +239,7 @@ impl GoalStore {
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
             }
-            let data = fs::read_to_string(&path)
+            let data = crate::storage::read_text_file_capped(&path)
                 .with_context(|| format!("failed to read task graph {}", path.display()))?;
             graphs.push(
                 serde_json::from_str(&data)

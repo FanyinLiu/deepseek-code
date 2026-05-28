@@ -439,7 +439,7 @@ pub fn load_project_rules(project_root: &Path) -> Option<String> {
     let mut loaded = Vec::new();
     for path in project_rule_candidates(project_root) {
         if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(content) = crate::storage::read_text_file_capped(&path) {
                 if !content.trim().is_empty() {
                     let label = path
                         .strip_prefix(project_root)
@@ -460,7 +460,7 @@ pub fn load_project_rules(project_root: &Path) -> Option<String> {
 
 fn load_output_style_policy(project_root: &Path) -> Option<String> {
     let path = project_root.join(".octocode").join("output_style.json");
-    let content = std::fs::read_to_string(path).ok()?;
+    let content = crate::storage::read_text_file_capped(path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&content).ok()?;
     let style = value
         .get("style")

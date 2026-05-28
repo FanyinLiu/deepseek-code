@@ -663,8 +663,8 @@ fn read_custom_command_document(
     source: &'static str,
     name: &str,
 ) -> Result<CustomCommandDocument, anyhow::Error> {
-    let content =
-        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let content = crate::storage::read_text_file_capped(path)
+        .with_context(|| format!("read {}", path.display()))?;
     let parsed = if matches!(
         path.extension().and_then(|value| value.to_str()),
         Some("toml")
@@ -805,7 +805,7 @@ fn model_from_markdown(content: &str) -> Option<String> {
 }
 
 fn read_custom_argument_hint(path: &Path) -> Result<Option<String>, anyhow::Error> {
-    let content = std::fs::read_to_string(path)?;
+    let content = crate::storage::read_text_file_capped(path)?;
     if matches!(
         path.extension().and_then(|value| value.to_str()),
         Some("toml")
@@ -822,7 +822,7 @@ fn read_custom_argument_hint(path: &Path) -> Result<Option<String>, anyhow::Erro
 }
 
 fn read_custom_allowed_tools(path: &Path) -> Result<Option<Vec<String>>, anyhow::Error> {
-    let content = std::fs::read_to_string(path)?;
+    let content = crate::storage::read_text_file_capped(path)?;
     if matches!(
         path.extension().and_then(|value| value.to_str()),
         Some("toml")
@@ -834,7 +834,7 @@ fn read_custom_allowed_tools(path: &Path) -> Result<Option<Vec<String>>, anyhow:
 }
 
 fn read_custom_model(path: &Path) -> Result<Option<String>, anyhow::Error> {
-    let content = std::fs::read_to_string(path)?;
+    let content = crate::storage::read_text_file_capped(path)?;
     if matches!(
         path.extension().and_then(|value| value.to_str()),
         Some("toml")
@@ -850,7 +850,7 @@ fn read_custom_model(path: &Path) -> Result<Option<String>, anyhow::Error> {
 }
 
 fn read_custom_description(path: &Path) -> Result<Option<String>, anyhow::Error> {
-    let content = std::fs::read_to_string(path)?;
+    let content = crate::storage::read_text_file_capped(path)?;
     if matches!(
         path.extension().and_then(|value| value.to_str()),
         Some("toml")

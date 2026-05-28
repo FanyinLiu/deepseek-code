@@ -156,15 +156,18 @@ impl std::fmt::Display for RecommendedMode {
 
 pub fn matrix_payload(project_root: &Path) -> Result<FeatureMatrix, anyhow::Error> {
     let source_path = project_root.join(MATRIX_RELATIVE_PATH);
-    let (source_path, content) = match std::fs::read_to_string(&source_path) {
-        Ok(content) => (source_path.display().to_string(), content),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
+    let (source_path, content) = if source_path.exists() {
+        match crate::storage::read_text_file_capped(&source_path) {
+            Ok(content) => (source_path.display().to_string(), content),
+            Err(error) => {
+                return Err(error).with_context(|| format!("read {}", source_path.display()));
+            }
+        }
+    } else {
+        (
             format!("embedded:{MATRIX_RELATIVE_PATH}"),
             EMBEDDED_MATRIX.to_string(),
-        ),
-        Err(error) => {
-            return Err(error).with_context(|| format!("read {}", source_path.display()));
-        }
+        )
     };
     let rows = parse_matrix_rows(&content);
     let mut action_counts = BTreeMap::new();

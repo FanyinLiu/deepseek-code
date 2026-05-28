@@ -552,7 +552,7 @@ Patch requirements:
             Err(err) => return format!("## {target}\ninvalid target path: {err}"),
         };
         let path = self.project_root.join(&relative);
-        match fs::read_to_string(&path) {
+        match crate::storage::read_text_file_capped(&path) {
             Ok(content) => format!(
                 "## {relative}\n```text\n{}\n```",
                 excerpt_for_target(&relative, &content)
@@ -563,7 +563,8 @@ Patch requirements:
 
     pub fn load_report(&self, run_id: &str) -> Result<String> {
         let path = self.run_dir(run_id)?.join("report.md");
-        fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))
+        crate::storage::read_text_file_capped(&path)
+            .with_context(|| format!("read {}", path.display()))
     }
 
     pub fn status(&self) -> Result<RepairStatus> {
@@ -593,7 +594,7 @@ Patch requirements:
             let entry = entry?;
             let path = entry.path().join("run.json");
             if path.exists() {
-                let data = fs::read_to_string(&path)
+                let data = crate::storage::read_text_file_capped(&path)
                     .with_context(|| format!("read {}", path.display()))?;
                 runs.push(serde_json::from_str(&data)?);
             }
@@ -603,7 +604,7 @@ Patch requirements:
     }
 
     fn load_proposal(&self, proposal_id: &str) -> Result<RepairProposal> {
-        let data = fs::read_to_string(self.proposal_json_path(proposal_id)?)
+        let data = crate::storage::read_text_file_capped(self.proposal_json_path(proposal_id)?)
             .with_context(|| format!("read proposal {proposal_id}"))?;
         Ok(serde_json::from_str(&data)?)
     }
@@ -1206,8 +1207,8 @@ fn read_json_dir<T: for<'de> Deserialize<'de>>(dir: PathBuf) -> Result<Vec<T>> {
         let entry = entry?;
         let path = entry.path();
         if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
-            let data =
-                fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+            let data = crate::storage::read_text_file_capped(&path)
+                .with_context(|| format!("read {}", path.display()))?;
             values.push(serde_json::from_str(&data)?);
         }
     }

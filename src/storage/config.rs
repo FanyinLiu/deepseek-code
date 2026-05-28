@@ -624,7 +624,7 @@ impl Config {
         if let Some(user_dir) = crate::storage::user_config_dir() {
             let global_path = user_dir.join("config.toml");
             if global_path.exists() {
-                let content = std::fs::read_to_string(&global_path)?;
+                let content = crate::storage::read_text_file_capped(&global_path)?;
                 let patch = parse_config_patch(&content)?;
                 config = config.merge_with_config_patch(patch);
             }
@@ -634,14 +634,14 @@ impl Config {
         if let Some(root) = project_root.map(normalize_project_root) {
             let project_config = root.join(".octocode").join("config.toml");
             if project_config.exists() {
-                let content = std::fs::read_to_string(&project_config)?;
+                let content = crate::storage::read_text_file_capped(&project_config)?;
                 let patch = parse_config_patch(&content)?;
                 config = config.merge_with_config_patch(patch);
             }
 
             let local_config = root.join(".octocode").join("local.toml");
             if local_config.exists() {
-                let content = std::fs::read_to_string(&local_config)?;
+                let content = crate::storage::read_text_file_capped(&local_config)?;
                 let patch = parse_config_patch(&content)?;
                 config = config.merge_with_config_patch(patch);
             }
@@ -665,7 +665,7 @@ impl Config {
         let path = config_dir.join("local.toml");
 
         let mut value = if path.exists() {
-            std::fs::read_to_string(&path)?
+            crate::storage::read_text_file_capped(&path)?
                 .parse::<toml::Value>()
                 .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()))
         } else {

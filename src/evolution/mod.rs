@@ -470,7 +470,7 @@ impl EvolutionStore {
         if !path.exists() {
             return Ok(Vec::new());
         }
-        let data = fs::read_to_string(&path)
+        let data = crate::storage::read_text_file_capped(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
         data.lines()
             .filter(|line| !line.trim().is_empty())
@@ -480,7 +480,7 @@ impl EvolutionStore {
 
     pub fn load_proposal(&self, proposal_id: &str) -> Result<EvolutionProposal> {
         let path = self.proposals_dir().join(format!("{proposal_id}.json"));
-        let data = fs::read_to_string(&path)
+        let data = crate::storage::read_text_file_capped(&path)
             .with_context(|| format!("failed to read proposal {}", path.display()))?;
         serde_json::from_str(&data).with_context(|| format!("invalid proposal {}", path.display()))
     }
@@ -498,7 +498,7 @@ impl EvolutionStore {
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
             }
-            let data = fs::read_to_string(&path)
+            let data = crate::storage::read_text_file_capped(&path)
                 .with_context(|| format!("failed to read proposal {}", path.display()))?;
             proposals.push(
                 serde_json::from_str(&data)
@@ -573,7 +573,7 @@ impl EvolutionStore {
 
     pub fn load_run(&self, run_id: &str) -> Result<EvolutionRun> {
         let path = self.run_dir(run_id).join("run.json");
-        let data = fs::read_to_string(&path)
+        let data = crate::storage::read_text_file_capped(&path)
             .with_context(|| format!("failed to read run {}", path.display()))?;
         serde_json::from_str(&data).with_context(|| format!("invalid run {}", path.display()))
     }
@@ -592,7 +592,7 @@ impl EvolutionStore {
             if !run_path.exists() {
                 continue;
             }
-            let data = fs::read_to_string(&run_path)
+            let data = crate::storage::read_text_file_capped(&run_path)
                 .with_context(|| format!("failed to read run {}", run_path.display()))?;
             runs.push(
                 serde_json::from_str(&data)
@@ -616,7 +616,7 @@ impl EvolutionStore {
             if !path.exists() {
                 continue;
             }
-            let data = fs::read_to_string(&path)
+            let data = crate::storage::read_text_file_capped(&path)
                 .with_context(|| format!("failed to read apply {}", path.display()))?;
             applies.push(
                 serde_json::from_str(&data)
@@ -640,7 +640,7 @@ impl EvolutionStore {
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
             }
-            let data = fs::read_to_string(&path)
+            let data = crate::storage::read_text_file_capped(&path)
                 .with_context(|| format!("failed to read rollback {}", path.display()))?;
             rollbacks.push(
                 serde_json::from_str(&data)
@@ -653,7 +653,7 @@ impl EvolutionStore {
 
     pub fn load_apply(&self, apply_id: &str) -> Result<EvolutionApply> {
         let path = self.apply_dir(apply_id).join("apply.json");
-        let data = fs::read_to_string(&path)
+        let data = crate::storage::read_text_file_capped(&path)
             .with_context(|| format!("failed to read apply {}", path.display()))?;
         serde_json::from_str(&data).with_context(|| format!("invalid apply {}", path.display()))
     }
@@ -662,7 +662,7 @@ impl EvolutionStore {
         let mut run = self.load_run(run_id)?;
         let run_dir = self.run_dir(run_id);
         let patch_path = run_dir.join("patch.diff");
-        let patch = fs::read_to_string(&patch_path)
+        let patch = crate::storage::read_text_file_capped(&patch_path)
             .with_context(|| format!("failed to read patch {}", patch_path.display()))?;
         let touched_files = changed_files_from_patch(&patch);
         let high_risk_files: Vec<String> = touched_files
@@ -738,7 +738,7 @@ impl EvolutionStore {
             );
         }
         let patch_path = self.run_dir(run_id).join("patch.diff");
-        let patch = fs::read_to_string(&patch_path)
+        let patch = crate::storage::read_text_file_capped(&patch_path)
             .with_context(|| format!("failed to read patch {}", patch_path.display()))?;
         let touched_files = if report.touched_files.is_empty() {
             changed_files_from_patch(&patch)
@@ -800,7 +800,7 @@ impl EvolutionStore {
             .apply_dir(apply_id)
             .join("checkpoint")
             .join("manifest.json");
-        let data = fs::read_to_string(&manifest_path)
+        let data = crate::storage::read_text_file_capped(&manifest_path)
             .with_context(|| format!("failed to read checkpoint {}", manifest_path.display()))?;
         let manifest: CheckpointManifest = serde_json::from_str(&data)
             .with_context(|| format!("invalid checkpoint {}", manifest_path.display()))?;
@@ -1051,7 +1051,7 @@ impl EvolutionStore {
         if path.is_dir() {
             return format!("## {target}\ndirectory target");
         }
-        match fs::read_to_string(&path) {
+        match crate::storage::read_text_file_capped(&path) {
             Ok(content) => {
                 let excerpt = truncate_for_prompt(&content, 6000);
                 format!("## {target}\n```text\n{excerpt}\n```")
@@ -1077,7 +1077,7 @@ impl EvolutionStore {
         let active_path = self.project_root.join(&relative);
         let content = candidate_patch_content(proposal, candidate);
         if active_path.exists() && active_path.is_file() {
-            let original = fs::read_to_string(&active_path)
+            let original = crate::storage::read_text_file_capped(&active_path)
                 .with_context(|| format!("failed to read target {}", active_path.display()))?;
             let modified = format!(
                 "{}{}",
@@ -1101,7 +1101,7 @@ impl EvolutionStore {
         }
         let metadata = fs::metadata(&path)
             .with_context(|| format!("failed to inspect target {}", path.display()))?;
-        let line_count = fs::read_to_string(&path)
+        let line_count = crate::storage::read_text_file_capped(&path)
             .map(|content| content.lines().count())
             .unwrap_or(0);
         Ok(format!(
@@ -1113,7 +1113,7 @@ impl EvolutionStore {
 
     fn load_gate_report(&self, run_id: &str) -> Result<EvolutionGateReport> {
         let path = self.run_dir(run_id).join("gates.json");
-        let data = fs::read_to_string(&path)
+        let data = crate::storage::read_text_file_capped(&path)
             .with_context(|| format!("failed to read gates {}", path.display()))?;
         serde_json::from_str(&data).with_context(|| format!("invalid gates {}", path.display()))
     }

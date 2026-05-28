@@ -373,7 +373,7 @@ fn validate_built_in(name: &str) -> AgentValidationReport {
 fn validate_agent_file(name: &str, path: &Path) -> AgentValidationReport {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
-    let content = match std::fs::read_to_string(path) {
+    let content = match crate::storage::read_text_file_capped(path) {
         Ok(content) => content,
         Err(error) => {
             errors.push(issue(

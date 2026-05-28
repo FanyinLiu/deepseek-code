@@ -7,7 +7,6 @@ use crate::evolution::{
 use crate::goal::GoalStore;
 use crate::repair::{NewRepairProposal, RepairStore};
 use anyhow::Result;
-use std::fs;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -313,7 +312,7 @@ fn load_evolution_proposal(root: &std::path::Path, proposal_id: &str) -> Result<
         .join(EVOLUTION_DIR)
         .join("proposals")
         .join(format!("{proposal_id}.json"));
-    let data = fs::read_to_string(&path)?;
+    let data = crate::storage::read_text_file_capped(&path)?;
     Ok(serde_json::from_str(&data)?)
 }
 

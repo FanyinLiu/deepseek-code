@@ -62,7 +62,7 @@ pub fn resolve_mentions(project_root: &Path, text: &str) -> String {
         if let Some(full_path) =
             crate::workspace::paths::resolve_workspace_path(project_root, &path)
         {
-            match std::fs::read_to_string(&full_path) {
+            match crate::storage::read_text_file_capped(&full_path) {
                 Ok(content) => {
                     context.push_str(&format!("\n--- {} ---\n{}", path, content));
                 }

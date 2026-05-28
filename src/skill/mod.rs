@@ -174,7 +174,8 @@ impl SkillStore {
 
     pub fn show(&self, skill_id: &str) -> Result<String> {
         let path = self.skill_dir(skill_id)?.join("SKILL.md");
-        fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))
+        crate::storage::read_text_file_capped(&path)
+            .with_context(|| format!("read {}", path.display()))
     }
 
     /// Find skills whose SKILL.md frontmatter declares a `keywords:` or
@@ -206,7 +207,7 @@ impl SkillStore {
                 Some(name) => name.to_string(),
                 None => continue,
             };
-            let raw = match fs::read_to_string(&md_path) {
+            let raw = match crate::storage::read_text_file_capped(&md_path) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
@@ -274,12 +275,14 @@ impl SkillStore {
             .join("runs")
             .join(run_id)
             .join("run.json");
-        let data = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let data = crate::storage::read_text_file_capped(&path)
+            .with_context(|| format!("read {}", path.display()))?;
         serde_json::from_str(&data).with_context(|| format!("parse {}", path.display()))
     }
 
     fn load_metadata_from_path(&self, path: &Path) -> Result<SkillMetadata> {
-        let data = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        let data = crate::storage::read_text_file_capped(path)
+            .with_context(|| format!("read {}", path.display()))?;
         serde_json::from_str(&data).with_context(|| format!("parse {}", path.display()))
     }
 

@@ -77,7 +77,7 @@ impl UsageStore {
         if !path.exists() {
             return Ok(Vec::new());
         }
-        let content = std::fs::read_to_string(&path)?;
+        let content = crate::storage::read_text_file_capped(&path)?;
         let mut events = Vec::new();
         for (index, line) in content.lines().enumerate() {
             let trimmed = line.trim();

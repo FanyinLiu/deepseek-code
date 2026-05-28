@@ -147,14 +147,14 @@ impl SubagentRegistry {
                 .unwrap_or("unknown");
 
             if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(content) = crate::storage::read_text_file_capped(&path) {
                     if let Ok(config) = toml::from_str::<SubagentConfig>(&content) {
                         self.agents.insert(name.to_string(), config);
                     }
                 }
             } else if path.extension().and_then(|s| s.to_str()) == Some("md") {
                 // Markdown files with TOML frontmatter
-                if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(content) = crate::storage::read_text_file_capped(&path) {
                     if let Ok(config) = Self::parse_markdown_agent(&content) {
                         self.agents.insert(name.to_string(), config);
                     }
@@ -169,7 +169,7 @@ impl SubagentRegistry {
     }
 
     pub fn load_markdown_agent_file(path: &Path) -> Result<SubagentConfig, AgentParseError> {
-        let content = std::fs::read_to_string(path).map_err(|error| {
+        let content = crate::storage::read_text_file_capped(path).map_err(|error| {
             AgentParseError::new(format!("failed to read {}: {error}", path.display()))
         })?;
         Self::parse_markdown_agent(&content)

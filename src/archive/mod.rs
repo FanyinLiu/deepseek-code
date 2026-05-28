@@ -184,7 +184,8 @@ impl ArchiveStore {
     pub fn load_candidate_view(&self, candidate_id: &str) -> Result<ArchiveCandidateView> {
         validate_candidate_id(candidate_id)?;
         let path = self.candidates_dir().join(format!("{candidate_id}.json"));
-        let data = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let data = crate::storage::read_text_file_capped(&path)
+            .with_context(|| format!("read {}", path.display()))?;
         let candidate =
             serde_json::from_str(&data).with_context(|| format!("parse {}", path.display()))?;
         Ok(candidate_view(candidate))
@@ -196,7 +197,8 @@ impl ArchiveStore {
         if !path.exists() {
             return Ok(Vec::new());
         }
-        let data = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let data = crate::storage::read_text_file_capped(&path)
+            .with_context(|| format!("read {}", path.display()))?;
         let mut events = Vec::new();
         for line in data.lines().filter(|line| !line.trim().is_empty()) {
             events.push(serde_json::from_str(line).context("parse lineage event")?);
@@ -215,7 +217,7 @@ impl ArchiveStore {
             let entry = entry?;
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
-                let data = fs::read_to_string(&path)
+                let data = crate::storage::read_text_file_capped(&path)
                     .with_context(|| format!("read {}", path.display()))?;
                 candidates.push(
                     serde_json::from_str(&data)

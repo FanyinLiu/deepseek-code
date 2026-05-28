@@ -220,7 +220,7 @@ impl EventLogStore {
         if !path.exists() {
             return Ok(Vec::new());
         }
-        let content = std::fs::read_to_string(path)?;
+        let content = crate::storage::read_text_file_capped(path)?;
         let non_empty_lines: Vec<_> = content
             .lines()
             .filter(|line| !line.trim().is_empty())

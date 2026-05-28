@@ -262,7 +262,7 @@ pub fn store_api_key_in_user_global_config(key: &str) -> Result<Option<PathBuf>,
     let path = config_dir.join("config.toml");
 
     let mut table = if path.exists() {
-        let content = std::fs::read_to_string(&path)?;
+        let content = crate::storage::read_text_file_capped(&path)?;
         let value: toml::Value = toml::from_str(&content)?;
         value
             .as_table()
@@ -310,7 +310,7 @@ pub fn store_api_key_in_project_local_config(
     let path = config_dir.join("local.toml");
 
     let mut table = if path.exists() {
-        let content = std::fs::read_to_string(&path)?;
+        let content = crate::storage::read_text_file_capped(&path)?;
         let value: toml::Value = toml::from_str(&content)?;
         value
             .as_table()

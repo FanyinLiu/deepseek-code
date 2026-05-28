@@ -118,8 +118,8 @@ impl KnowledgeStore {
         self.ensure_dirs()?;
         let path = self.risk_map_path();
         if path.exists() {
-            let data =
-                fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+            let data = crate::storage::read_text_file_capped(&path)
+                .with_context(|| format!("read {}", path.display()))?;
             return serde_json::from_str(&data)
                 .with_context(|| format!("parse {}", path.display()));
         }
@@ -182,7 +182,8 @@ impl KnowledgeStore {
         if !path.exists() {
             return Ok(Vec::new());
         }
-        let data = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let data = crate::storage::read_text_file_capped(&path)
+            .with_context(|| format!("read {}", path.display()))?;
         let mut entries = Vec::new();
         for line in data.lines().filter(|line| !line.trim().is_empty()) {
             entries.push(serde_json::from_str(line).context("parse failure-memory entry")?);

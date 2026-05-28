@@ -174,7 +174,7 @@ pub fn apply_edit(
 
     // Read original
     let original = if file_path.exists() {
-        std::fs::read_to_string(&file_path)?
+        crate::storage::read_text_file_capped(&file_path)?
     } else {
         String::new()
     };
@@ -219,7 +219,7 @@ pub fn apply_write(
     let file_path = resolve_for_write(project_root, relative_path)?;
 
     let original = if file_path.exists() {
-        std::fs::read_to_string(&file_path)?
+        crate::storage::read_text_file_capped(&file_path)?
     } else {
         String::new()
     };

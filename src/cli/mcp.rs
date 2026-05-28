@@ -557,7 +557,7 @@ fn local_config_path(root: &Path) -> PathBuf {
 
 fn read_toml_value(path: &Path) -> Result<toml::Value, anyhow::Error> {
     if path.exists() {
-        let text = std::fs::read_to_string(path)?;
+        let text = crate::storage::read_text_file_capped(path)?;
         text.parse::<toml::Value>().map_err(|e| {
             anyhow::anyhow!(
                 "mcp config file {} is corrupted: {}. Refusing to overwrite; fix or remove it first.",

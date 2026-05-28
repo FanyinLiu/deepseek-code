@@ -80,3 +80,48 @@ pub(crate) fn project_storage_keys(project_root: &Path) -> Vec<String> {
         vec![stable, legacy]
     }
 }
+
+pub const TEXT_FILE_SIZE_CAP: u64 = 50 * 1024 * 1024;
+
+pub fn read_text_file_capped(path: impl AsRef<Path>) -> Result<String, anyhow::Error> {
+    let path = path.as_ref();
+    let size = std::fs::metadata(path)?.len();
+    if size > TEXT_FILE_SIZE_CAP {
+        anyhow::bail!("file too large: {size} bytes, cap {TEXT_FILE_SIZE_CAP}");
+    }
+    Ok(std::fs::read_to_string(path)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn read_text_file_capped_reads_small_files() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("small.txt");
+        std::fs::write(&path, "hello").expect("write small");
+
+        assert_eq!(read_text_file_capped(&path).expect("read"), "hello");
+    }
+
+    #[test]
+    fn read_text_file_capped_rejects_large_files_before_reading() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("large.txt");
+        let mut file = std::fs::File::create(&path).expect("create large");
+        file.write_all(b"x").expect("seed large");
+        file.set_len(TEXT_FILE_SIZE_CAP + 1).expect("extend large");
+
+        let error = read_text_file_capped(&path).expect_err("large file should fail");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "file too large: {} bytes, cap {}",
+                TEXT_FILE_SIZE_CAP + 1,
+                TEXT_FILE_SIZE_CAP
+            )
+        );
+    }
+}

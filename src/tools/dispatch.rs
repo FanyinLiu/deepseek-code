@@ -101,7 +101,7 @@ fn suggest_similar_files(project_root: &Path, requested_path: &str) -> Option<St
 /// Provide current file context when edit_file fails because old_string is not found.
 fn get_edit_context(project_root: &Path, path: &str, old_string: &str) -> Option<String> {
     let resolved = crate::workspace::paths::resolve_workspace_path(project_root, path)?;
-    let content = std::fs::read_to_string(&resolved).ok()?;
+    let content = crate::storage::read_text_file_capped(&resolved).ok()?;
 
     // Try to find lines containing a substring of old_string
     let target = old_string.lines().next()?.trim();

@@ -38,7 +38,7 @@ pub fn search_sessions(
             let session_dir = session_entry.path();
             let session_file = session_dir.join("session.json");
 
-            if let Ok(content) = std::fs::read_to_string(&session_file) {
+            if let Ok(content) = crate::storage::read_text_file_capped(&session_file) {
                 if content.to_lowercase().contains(&query_lower) {
                     // Try to extract a meaningful snippet
                     if let Ok(session_json) = serde_json::from_str::<serde_json::Value>(&content) {
