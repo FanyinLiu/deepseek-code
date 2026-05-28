@@ -1,10 +1,14 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use chrono::Utc;
 
 use crate::deepseek::{Checkpoint, FileSnapshot, Session, TurnId};
+
+const MAX_CHECKPOINT_FILE_BYTES: usize = 1_000_000;
+const MAX_CHECKPOINT_BACKUP_BYTES: usize = 100_000;
 
 /// Manages session checkpoints — snapshots of file state before tool execution.
 /// Allows rollback of tool-call side effects.
@@ -145,13 +149,13 @@ fn collect_file_snapshots(checkpoint_id: uuid::Uuid, project_root: &Path) -> Vec
 
         // Skip large files (>1MB)
         if let Ok(meta) = std::fs::metadata(path) {
-            if meta.len() > 1_000_000 {
+            if meta.len() > MAX_CHECKPOINT_FILE_BYTES as u64 {
                 continue;
             }
         }
 
         // Hash the content
-        if let Ok(content) = std::fs::read(path) {
+        if let Some(content) = read_checkpoint_file_capped(path, MAX_CHECKPOINT_FILE_BYTES) {
             let content_hash = hash_bytes(&content);
             let backup_path = backup_small_file(checkpoint_id, project_root, relative, &content);
 
@@ -166,13 +170,24 @@ fn collect_file_snapshots(checkpoint_id: uuid::Uuid, project_root: &Path) -> Vec
     file_snapshots
 }
 
+fn read_checkpoint_file_capped(path: &Path, max_bytes: usize) -> Option<Vec<u8>> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = file.take((max_bytes + 1) as u64);
+    let mut content = Vec::new();
+    let bytes_read = reader.read_to_end(&mut content).ok()?;
+    if bytes_read > max_bytes {
+        return None;
+    }
+    Some(content)
+}
+
 fn backup_small_file(
     checkpoint_id: uuid::Uuid,
     project_root: &Path,
     relative: &Path,
     content: &[u8],
 ) -> Option<PathBuf> {
-    if content.len() >= 100_000 {
+    if content.len() >= MAX_CHECKPOINT_BACKUP_BYTES {
         return None;
     }
     if !is_safe_relative_path(relative) {
@@ -453,6 +468,19 @@ mod tests {
 
         assert!(!first_dir.exists());
         assert!(second_dir.exists());
+    }
+
+    #[test]
+    fn checkpoint_reader_rejects_files_that_exceed_cap_during_read() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let tracked_file = root.path().join("tracked.txt");
+        std::fs::write(&tracked_file, b"123456789").expect("write tracked");
+
+        assert!(read_checkpoint_file_capped(&tracked_file, 8).is_none());
+        assert_eq!(
+            read_checkpoint_file_capped(&tracked_file, 9).expect("read capped file"),
+            b"123456789"
+        );
     }
 
     #[test]
