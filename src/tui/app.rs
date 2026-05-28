@@ -33,6 +33,7 @@ use tokio::task::JoinHandle;
 
 const PAGE_SCROLL_LINES: usize = 20;
 const MOUSE_SCROLL_LINES: usize = 5;
+const TUI_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InputState {
@@ -5401,6 +5402,41 @@ struct RunningTurn {
     cancel_token: Arc<AtomicBool>,
 }
 
+#[derive(Default)]
+struct RenderInvalidation {
+    throttled_stream: bool,
+    immediate: bool,
+}
+
+impl RenderInvalidation {
+    fn observe_agent_event(&mut self, event: &AgentEvent) {
+        if agent_event_can_throttle_render(event) {
+            self.throttled_stream = true;
+        } else {
+            self.immediate = true;
+        }
+    }
+
+    fn apply(self, force_render: &mut bool, pending_stream_draw: &mut bool) {
+        if self.immediate {
+            *force_render = true;
+            *pending_stream_draw = false;
+        } else if self.throttled_stream && !*force_render {
+            *pending_stream_draw = true;
+        }
+    }
+}
+
+fn agent_event_can_throttle_render(event: &AgentEvent) -> bool {
+    matches!(
+        event,
+        AgentEvent::ContentDelta(_)
+            | AgentEvent::ReasoningDelta(_)
+            | AgentEvent::TokenDelta { .. }
+            | AgentEvent::SubagentDelta { .. }
+    )
+}
+
 struct TerminalSession {
     active: bool,
 }
@@ -7053,6 +7089,8 @@ pub async fn run_tui(
     let mut yolo_mode = false;
     let mut last_render_state = app.render_dirty_state();
     let mut force_render = true;
+    let mut last_draw_at = std::time::Instant::now();
+    let mut pending_stream_draw = false;
 
     // Main event loop
     let result: Result<(), anyhow::Error> = loop {
@@ -7065,23 +7103,34 @@ pub async fn run_tui(
         let should_draw = force_render || dirty.any();
 
         if should_draw {
-            terminal
-                .draw(|f| app.render(f))
-                .map_err(|e| anyhow::anyhow!("TUI draw failed: {e}"))?;
-            force_render = false;
-            last_render_state = new_render_state;
+            let can_throttle = pending_stream_draw && !force_render;
+            if !can_throttle || last_draw_at.elapsed() >= TUI_FRAME_INTERVAL {
+                terminal
+                    .draw(|f| app.render(f))
+                    .map_err(|e| anyhow::anyhow!("TUI draw failed: {e}"))?;
+                last_draw_at = std::time::Instant::now();
+                force_render = false;
+                pending_stream_draw = false;
+                last_render_state = new_render_state;
+            }
         }
 
         if let Some(running) = running_turn.as_mut() {
+            let mut invalidation = RenderInvalidation::default();
             while let Ok(ev) = running.events.try_recv() {
+                invalidation.observe_agent_event(&ev);
                 app.apply_agent_event(ev);
             }
+            invalidation.apply(&mut force_render, &mut pending_stream_draw);
         }
 
         if let Some(mut running) = running_turn.take_if(|running| running.handle.is_finished()) {
+            let mut invalidation = RenderInvalidation::default();
             while let Ok(ev) = running.events.try_recv() {
+                invalidation.observe_agent_event(&ev);
                 app.apply_agent_event(ev);
             }
+            invalidation.apply(&mut force_render, &mut pending_stream_draw);
 
             match running.handle.await {
                 Ok((mut returned_orchestrator, run_error)) => {
@@ -7101,6 +7150,8 @@ pub async fn run_tui(
                     }
                     app.session_id = Some(returned_orchestrator.session.id);
                     orchestrator = Some(returned_orchestrator);
+                    force_render = true;
+                    pending_stream_draw = false;
                 }
                 Err(error) if error.is_cancelled() => {
                     app.is_streaming = false;
@@ -7108,12 +7159,16 @@ pub async fn run_tui(
                     app.pending_user_message = None;
                     app.status_message = "Turn interrupted".into();
                     orchestrator = None;
+                    force_render = true;
+                    pending_stream_draw = false;
                 }
                 Err(error) => {
                     app.is_streaming = false;
                     app.stream_start = None;
                     app.pending_user_message = None;
                     app.status_message = format!("Turn task ended early: {error}");
+                    force_render = true;
+                    pending_stream_draw = false;
                 }
             }
         }
@@ -7121,6 +7176,8 @@ pub async fn run_tui(
         if running_turn.is_none() && !app.is_streaming {
             if let Some(output) = app.pending_side_outputs.pop_front() {
                 app.show_local_output(output);
+                force_render = true;
+                pending_stream_draw = false;
             } else if let Some(queued) = app.queued_inputs.pop_front() {
                 let remaining = app.queued_inputs.len();
                 app.status_message = if remaining == 0 {
@@ -7129,6 +7186,8 @@ pub async fn run_tui(
                     format!("发送已排队的消息；剩余 {remaining} 条")
                 };
                 let _ = action_tx.send(TuiAction::Submit(queued));
+                force_render = true;
+                pending_stream_draw = false;
             }
         }
 
@@ -7153,19 +7212,28 @@ pub async fn run_tui(
                     if let Some(orchestrator) = orchestrator.as_mut() {
                         orchestrator.client = active_client.clone();
                     }
+                    force_render = true;
+                    pending_stream_draw = false;
                 }
             }
         }
 
         // Poll keyboard events (non-blocking)
-        if event::poll(std::time::Duration::from_millis(50))
-            .map_err(|e| anyhow::anyhow!("TUI event poll failed: {e}"))?
-        {
+        let poll_timeout = if pending_stream_draw {
+            TUI_FRAME_INTERVAL
+                .saturating_sub(last_draw_at.elapsed())
+                .min(std::time::Duration::from_millis(50))
+        } else {
+            std::time::Duration::from_millis(50)
+        };
+        if event::poll(poll_timeout).map_err(|e| anyhow::anyhow!("TUI event poll failed: {e}"))? {
             match event::read().map_err(|e| anyhow::anyhow!("TUI event read failed: {e}"))? {
                 CEvent::Key(key) => {
                     if !is_actionable_key_event(key) {
                         continue;
                     }
+                    force_render = true;
+                    pending_stream_draw = false;
                     if app.key_is_exit(key) {
                         if app.handle_exit_key() {
                             break Ok(());
@@ -7195,14 +7263,20 @@ pub async fn run_tui(
                     app.handle_key(key, &action_tx);
                 }
                 CEvent::Paste(text) => {
+                    force_render = true;
+                    pending_stream_draw = false;
                     app.clear_exit_confirmation();
                     app.handle_paste(&text);
                 }
                 CEvent::Mouse(mouse) => {
+                    force_render = true;
+                    pending_stream_draw = false;
                     app.clear_exit_confirmation();
                     app.handle_mouse(mouse);
                 }
                 CEvent::Resize(width, height) => {
+                    force_render = true;
+                    pending_stream_draw = false;
                     let _ = terminal.resize(Rect::new(0, 0, width, height));
                 }
                 _ => {}
@@ -7211,6 +7285,8 @@ pub async fn run_tui(
 
         // Drain TUI actions
         while let Ok(action) = action_rx.try_recv() {
+            force_render = true;
+            pending_stream_draw = false;
             match action {
                 TuiAction::SaveApiKey {
                     api_key,
@@ -7525,7 +7601,11 @@ pub async fn run_tui(
 
         let latest_state = app.render_dirty_state();
         if latest_state.diff(last_render_state).any() {
-            force_render = true;
+            if !pending_stream_draw {
+                force_render = true;
+            }
+        } else {
+            pending_stream_draw = false;
         }
     };
 
@@ -7539,6 +7619,35 @@ mod tests {
 
     fn test_app() -> TuiApp {
         test_app_with_root(PathBuf::from("D:/octocode"))
+    }
+
+    #[test]
+    fn stream_delta_events_are_render_throttled() {
+        assert!(agent_event_can_throttle_render(&AgentEvent::ContentDelta(
+            "visible".into()
+        )));
+        assert!(agent_event_can_throttle_render(
+            &AgentEvent::ReasoningDelta("hidden".into())
+        ));
+        assert!(agent_event_can_throttle_render(&AgentEvent::TokenDelta {
+            input_tokens: 0,
+            output_tokens: 1,
+        }));
+        assert!(agent_event_can_throttle_render(
+            &AgentEvent::SubagentDelta {
+                agent_id: "agent".into(),
+                content: "delta".into(),
+            }
+        ));
+        assert!(!agent_event_can_throttle_render(
+            &AgentEvent::TurnComplete {
+                session_id: SessionId::new_v4(),
+                total_tokens: 1,
+            }
+        ));
+        assert!(!agent_event_can_throttle_render(&AgentEvent::Error(
+            "boom".into()
+        )));
     }
 
     #[test]
