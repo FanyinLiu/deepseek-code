@@ -619,7 +619,7 @@ fn evaluate_tool_inner(
 
 fn matches_allowed_entry(entry: &str, tool_name: &str, args: &serde_json::Value) -> bool {
     let (name, pattern) = parse_allowed_entry(entry);
-    if name != tool_name {
+    if !allowed_entry_name_matches(name, tool_name) {
         return false;
     }
     let Some(pattern) = pattern else {
@@ -628,9 +628,41 @@ fn matches_allowed_entry(entry: &str, tool_name: &str, args: &serde_json::Value)
     let Some(primary_arg) = primary_arg_for_tool(tool_name, args) else {
         return false;
     };
+    if is_bash_entry(name) && tool_name == "run_command" {
+        return matches_bash_allowed_pattern(pattern, primary_arg);
+    }
     glob::Pattern::new(pattern)
         .map(|pattern| pattern.matches(primary_arg))
         .unwrap_or(false)
+}
+
+fn allowed_entry_name_matches(entry_name: &str, tool_name: &str) -> bool {
+    entry_name == tool_name || (is_bash_entry(entry_name) && tool_name == "run_command")
+}
+
+fn is_bash_entry(entry_name: &str) -> bool {
+    entry_name.eq_ignore_ascii_case("Bash")
+}
+
+fn matches_bash_allowed_pattern(pattern: &str, command: &str) -> bool {
+    if glob::Pattern::new(pattern)
+        .map(|pattern| pattern.matches(command))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    let Some(prefix) = pattern.strip_suffix(":*").map(str::trim) else {
+        return false;
+    };
+    if prefix.is_empty() {
+        return false;
+    }
+
+    let Some(rest) = command.strip_prefix(prefix) else {
+        return false;
+    };
+    rest.is_empty() || rest.chars().next().is_some_and(char::is_whitespace)
 }
 
 fn parse_allowed_entry(entry: &str) -> (&str, Option<&str>) {
@@ -1036,6 +1068,57 @@ mod tests {
             decision.display.details,
             "active allowed-tools: run_command(git*)"
         );
+    }
+
+    #[test]
+    fn allowed_tools_bash_name_entry_permits_run_command() {
+        let policy = PolicyConfig {
+            require_approval_for_command: true,
+            allowed_tools: Some(vec!["Bash".to_string()]),
+            ..PolicyConfig::default()
+        };
+        let decision = evaluate_tool(
+            "run_command",
+            &args(serde_json::json!({ "command": "git status" })),
+            Path::new("."),
+            &policy,
+        );
+        assert_eq!(decision.action, PolicyAction::AskOnce);
+        assert_eq!(decision.display.risk_level, RiskLevel::CommandExecution);
+    }
+
+    #[test]
+    fn allowed_tools_bash_pattern_entry_permits_command_prefix() {
+        let policy = PolicyConfig {
+            require_approval_for_command: true,
+            allowed_tools: Some(vec!["Bash(git:*)".to_string()]),
+            ..PolicyConfig::default()
+        };
+        let decision = evaluate_tool(
+            "run_command",
+            &args(serde_json::json!({ "command": "git status --short" })),
+            Path::new("."),
+            &policy,
+        );
+        assert_eq!(decision.action, PolicyAction::AskOnce);
+        assert_eq!(decision.display.risk_level, RiskLevel::CommandExecution);
+    }
+
+    #[test]
+    fn allowed_tools_bash_pattern_entry_blocks_command_prefix_miss() {
+        let policy = PolicyConfig {
+            require_approval_for_command: true,
+            allowed_tools: Some(vec!["Bash(git:*)".to_string()]),
+            ..PolicyConfig::default()
+        };
+        let decision = evaluate_tool(
+            "run_command",
+            &args(serde_json::json!({ "command": "cargo test" })),
+            Path::new("."),
+            &policy,
+        );
+        assert_eq!(decision.action, PolicyAction::Deny);
+        assert_eq!(decision.display.risk_level, RiskLevel::Blocked);
     }
 
     fn mcp_metadata(

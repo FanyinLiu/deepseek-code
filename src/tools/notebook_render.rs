@@ -22,7 +22,7 @@ pub fn render(
     offset: Option<usize>,
     limit: Option<usize>,
 ) -> Result<String, anyhow::Error> {
-    let raw = std::fs::read_to_string(path)?;
+    let raw = crate::storage::read_text_file_capped(path)?;
     let notebook: Notebook =
         serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("invalid notebook JSON: {e}"))?;
 
@@ -214,7 +214,7 @@ pub fn edit_cell(
     new_source: &str,
     edit_mode: EditMode,
 ) -> Result<String, anyhow::Error> {
-    let raw = std::fs::read_to_string(path)?;
+    let raw = crate::storage::read_text_file_capped(path)?;
     let mut notebook: serde_json::Value =
         serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("invalid notebook JSON: {e}"))?;
 
@@ -363,5 +363,27 @@ mod tests {
         let out = render(&path, "nb.ipynb", None, None).unwrap();
         assert!(out.contains("1 cells total"));
         assert!(!out.contains("# Title"));
+    }
+
+    #[test]
+    fn edit_rejects_large_notebook_before_reading() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("large.ipynb");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(crate::storage::TEXT_FILE_SIZE_CAP + 1)
+            .unwrap();
+
+        let error = edit_cell(&path, "0", "print('nope')", EditMode::Replace)
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(
+            error,
+            format!(
+                "file too large: {} bytes, cap {}",
+                crate::storage::TEXT_FILE_SIZE_CAP + 1,
+                crate::storage::TEXT_FILE_SIZE_CAP
+            )
+        );
     }
 }

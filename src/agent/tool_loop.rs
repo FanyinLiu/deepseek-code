@@ -4,7 +4,7 @@ use chrono::Utc;
 use tokio::sync::mpsc;
 
 use crate::deepseek::{Session, SubTurnId, ToolCall, ToolCallRecord, ToolResultRecord, TurnId};
-use crate::policy::{PolicyAction, PolicyDecision, ToolCallSource};
+use crate::policy::{PermissionMode, PolicyDecision, ToolCallSource};
 use crate::runtime::tool_runtime::{
     ApprovalFuture, ApprovalOutcome, ApprovalResolver, LocalDispatchRuntimeBackend, ToolRuntime,
     ToolRuntimeContext,
@@ -53,6 +53,7 @@ impl ToolLoop {
         session: &mut Session,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
         yolo_mode: bool,
+        permission_mode: PermissionMode,
         policy_config: &crate::storage::config::PolicyConfig,
         hooks_config: &crate::storage::config::HooksConfig,
         event_log_store: Option<EventLogStore>,
@@ -71,6 +72,7 @@ impl ToolLoop {
             let mut resolver = AgentApprovalResolver {
                 event_tx,
                 yolo_mode,
+                permission_mode,
                 subagent: None,
             };
             let mut backend = LocalDispatchRuntimeBackend;
@@ -128,6 +130,7 @@ impl ToolLoop {
 struct AgentApprovalResolver<'a> {
     event_tx: &'a mpsc::UnboundedSender<AgentEvent>,
     yolo_mode: bool,
+    permission_mode: PermissionMode,
     subagent: Option<(&'a str, &'a str)>,
 }
 
@@ -138,8 +141,13 @@ impl ApprovalResolver for AgentApprovalResolver<'_> {
         decision: &'a PolicyDecision,
     ) -> ApprovalFuture<'a> {
         Box::pin(async move {
-            if self.yolo_mode || matches!(decision.action, PolicyAction::Allow) {
-                return ApprovalOutcome::Approved;
+            if let Some(outcome) = crate::agent::approval::permission_mode_approval_outcome(
+                &call.tool,
+                self.yolo_mode,
+                self.permission_mode,
+                decision,
+            ) {
+                return outcome;
             }
             let (tx, rx) = tokio::sync::oneshot::channel();
             if let Some((agent_id, arguments)) = self.subagent {
@@ -274,6 +282,7 @@ mod tests {
             &mut session,
             &tx,
             true,
+            PermissionMode::Default,
             &crate::storage::config::PolicyConfig::default(),
             &crate::storage::config::HooksConfig::default(),
             None,
@@ -286,5 +295,91 @@ mod tests {
         assert_eq!(result.changed_files, vec!["generated.txt".to_string()]);
         assert_eq!(session.tool_call_history.len(), 1);
         assert_eq!(session.tool_call_history[0].duration_ms, result.duration_ms);
+    }
+
+    #[tokio::test]
+    async fn tool_loop_read_only_blocks_local_mutation_without_prompt() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let call = ToolCall {
+            id: "call-blocked-write".into(),
+            call_type: "function".into(),
+            function: ToolCallFunction {
+                name: "write_file".into(),
+                arguments: serde_json::json!({
+                    "path": "blocked.txt",
+                    "content": "nope"
+                })
+                .to_string(),
+            },
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut session = test_session(temp.path());
+
+        let results = ToolLoop::execute_tools_with_approval(
+            &[call],
+            temp.path(),
+            TurnId::new_v4(),
+            SubTurnId::new_v4(),
+            &mut session,
+            &tx,
+            false,
+            PermissionMode::ReadOnly,
+            &crate::storage::config::PolicyConfig::default(),
+            &crate::storage::config::HooksConfig::default(),
+            None,
+        )
+        .await;
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].result.is_error);
+        assert!(results[0].result.result.contains("read-only"));
+        assert!(!temp.path().join("blocked.txt").exists());
+        assert_eq!(session.tool_call_history.len(), 1);
+        assert!(!session.tool_call_history[0].approved);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn tool_loop_accept_edits_auto_approves_local_file_edit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let call = ToolCall {
+            id: "call-accepted-write".into(),
+            call_type: "function".into(),
+            function: ToolCallFunction {
+                name: "write_file".into(),
+                arguments: serde_json::json!({
+                    "path": "accepted.txt",
+                    "content": "yes"
+                })
+                .to_string(),
+            },
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut session = test_session(temp.path());
+
+        let results = ToolLoop::execute_tools_with_approval(
+            &[call],
+            temp.path(),
+            TurnId::new_v4(),
+            SubTurnId::new_v4(),
+            &mut session,
+            &tx,
+            false,
+            PermissionMode::AcceptEdits,
+            &crate::storage::config::PolicyConfig::default(),
+            &crate::storage::config::HooksConfig::default(),
+            None,
+        )
+        .await;
+
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].result.is_error);
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("accepted.txt")).expect("read output"),
+            "yes"
+        );
+        assert_eq!(session.tool_call_history.len(), 1);
+        assert!(session.tool_call_history[0].approved);
+        assert!(rx.try_recv().is_err());
     }
 }

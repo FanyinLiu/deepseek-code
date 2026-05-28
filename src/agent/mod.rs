@@ -1,3 +1,4 @@
+pub mod approval;
 pub mod background;
 pub mod bus;
 pub mod checkpoints;

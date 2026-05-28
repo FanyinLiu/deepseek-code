@@ -2433,10 +2433,24 @@ impl Orchestrator {
                     &self.project_root,
                     &policy_config,
                 );
-                let approved = match decision.action {
-                    policy::PolicyAction::Allow => true,
-                    policy::PolicyAction::Deny => {
-                        let result_text = format!("Blocked: {}", decision.reason);
+                let mode_outcome = if matches!(decision.action, policy::PolicyAction::Deny) {
+                    None
+                } else {
+                    crate::agent::approval::permission_mode_approval_outcome(
+                        &tc.function.name,
+                        self.yolo_mode,
+                        self.permission_mode,
+                        &decision,
+                    )
+                };
+                let approved = if let Some(outcome) = mode_outcome {
+                    if outcome.approved() {
+                        true
+                    } else {
+                        let result_text = outcome
+                            .reason()
+                            .unwrap_or("Denied by permission mode")
+                            .to_string();
                         let record = ToolResultRecord {
                             tool_call_id: tc.id.clone(),
                             name: tc.function.name.clone(),
@@ -2462,10 +2476,37 @@ impl Orchestrator {
                         results.push(ToolLoopResult::new(tc.clone(), record, 0, Vec::new()));
                         continue;
                     }
-                    policy::PolicyAction::AskOnce | policy::PolicyAction::AskSession => {
-                        if self.yolo_mode {
-                            true
-                        } else {
+                } else {
+                    match decision.action {
+                        policy::PolicyAction::Allow => true,
+                        policy::PolicyAction::Deny => {
+                            let result_text = format!("Blocked: {}", decision.reason);
+                            let record = ToolResultRecord {
+                                tool_call_id: tc.id.clone(),
+                                name: tc.function.name.clone(),
+                                result: result_text.clone(),
+                                is_error: true,
+                            };
+                            self.session
+                                .tool_call_history
+                                .push(crate::deepseek::ToolCallRecord {
+                                    id: tc.id.clone(),
+                                    name: tc.function.name.clone(),
+                                    arguments: tc.function.arguments.clone(),
+                                    result_summary: crate::agent::utils::truncate_for_summary(
+                                        &result_text,
+                                        200,
+                                    ),
+                                    exit_code: Some(1),
+                                    duration_ms: 0,
+                                    risk_level: decision.display.risk_level.to_string(),
+                                    approved: false,
+                                    at: Utc::now(),
+                                });
+                            results.push(ToolLoopResult::new(tc.clone(), record, 0, Vec::new()));
+                            continue;
+                        }
+                        policy::PolicyAction::AskOnce | policy::PolicyAction::AskSession => {
                             let (tx, rx) = tokio::sync::oneshot::channel();
                             send_event(
                                 event_tx,
@@ -2604,6 +2645,7 @@ impl Orchestrator {
                 &mut self.session,
                 event_tx,
                 self.yolo_mode,
+                self.permission_mode,
                 &policy_config,
                 &hooks_config,
                 self.event_log_store.clone(),
@@ -3060,17 +3102,13 @@ impl ApprovalResolver for OrchestratorApprovalResolver<'_> {
         decision: &'a policy::PolicyDecision,
     ) -> ApprovalFuture<'a> {
         Box::pin(async move {
-            if self.permission_mode.blocks_tool(&call.tool) {
-                return ApprovalOutcome::denied(format!(
-                    "Skipped — `{}` mode keeps this kind of tool out of reach for now",
-                    self.permission_mode.as_str()
-                ));
-            }
-            if self.yolo_mode
-                || matches!(decision.action, policy::PolicyAction::Allow)
-                || self.permission_mode.auto_approves(&call.tool, decision)
-            {
-                return ApprovalOutcome::Approved;
+            if let Some(outcome) = crate::agent::approval::permission_mode_approval_outcome(
+                &call.tool,
+                self.yolo_mode,
+                self.permission_mode,
+                decision,
+            ) {
+                return outcome;
             }
             let (tx, rx) = tokio::sync::oneshot::channel();
             send_event(
