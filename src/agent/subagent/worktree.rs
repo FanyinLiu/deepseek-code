@@ -14,12 +14,16 @@
 //! and committed-but-ahead-of-base (`git log base..HEAD`), matching Claude
 //! Code's behavior of surfacing any non-empty result.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus, Stdio};
 
 use anyhow::{anyhow, Context, Result};
 
 use super::types::{SubagentIsolation, SubagentResult, WorktreeArtifact};
+
+const WORKTREE_GIT_STDOUT_BYTES: usize = 512 * 1024;
+const WORKTREE_GIT_STDERR_BYTES: usize = 64 * 1024;
 
 /// Set up a `git worktree` for the subagent if the config asks for it.
 /// `Ok(None)` runs in-place; `Ok(Some(guard))` returns an isolated
@@ -60,34 +64,29 @@ impl WorktreeGuard {
         let path = std::env::temp_dir().join(format!("octo-wt-{id}"));
         let branch = format!("octo-subagent/{id}");
 
-        let base = Command::new("git")
-            .arg("-C")
-            .arg(parent_root)
-            .args(["rev-parse", "HEAD"])
-            .output()
+        let base = run_git_limited(parent_root, &["rev-parse", "HEAD"])
             .with_context(|| "spawn git rev-parse HEAD")?;
         if !base.status.success() {
             return Err(anyhow!(
                 "git rev-parse HEAD failed in {}: {}",
                 parent_root.display(),
-                String::from_utf8_lossy(&base.stderr).trim()
+                output_text(&base.stderr, base.stderr_truncated, "stderr").trim()
             ));
         }
-        let base_hash = String::from_utf8_lossy(&base.stdout).trim().to_string();
+        let base_hash = output_text(&base.stdout, base.stdout_truncated, "stdout")
+            .trim()
+            .to_string();
 
-        let add = Command::new("git")
-            .arg("-C")
-            .arg(parent_root)
-            .args(["worktree", "add", "-b"])
-            .arg(&branch)
-            .arg(&path)
-            .arg(&base_hash)
-            .output()
-            .with_context(|| "spawn git worktree add")?;
+        let path_arg = path.to_string_lossy().to_string();
+        let add = run_git_limited(
+            parent_root,
+            &["worktree", "add", "-b", &branch, &path_arg, &base_hash],
+        )
+        .with_context(|| "spawn git worktree add")?;
         if !add.status.success() {
             return Err(anyhow!(
                 "git worktree add failed: {}",
-                String::from_utf8_lossy(&add.stderr).trim()
+                output_text(&add.stderr, add.stderr_truncated, "stderr").trim()
             ));
         }
 
@@ -104,31 +103,27 @@ impl WorktreeGuard {
     }
 
     /// True iff the worktree has uncommitted edits or committed past the
-    /// base. Errors querying git fall back to "no changes" — better to
-    /// leave a worktree behind than to misreport.
+    /// base. Errors querying git fall back to "has changes" so the caller
+    /// leaves the worktree behind for manual inspection instead of deleting it.
     pub fn has_changes(&self) -> bool {
-        let porcelain = Command::new("git")
-            .arg("-C")
-            .arg(&self.path)
-            .args(["status", "--porcelain"])
-            .output();
-        if let Ok(out) = porcelain {
-            if !out.stdout.is_empty() {
-                return true;
-            }
+        let Ok(porcelain) = run_git_limited(&self.path, &["status", "--porcelain"]) else {
+            return true;
+        };
+        if !porcelain.status.success() {
+            return true;
         }
-        let log = Command::new("git")
-            .arg("-C")
-            .arg(&self.path)
-            .args(["log", "--oneline"])
-            .arg(format!("{}..HEAD", self.base_hash))
-            .output();
-        if let Ok(out) = log {
-            if !out.stdout.is_empty() {
-                return true;
-            }
+        if !porcelain.stdout.is_empty() {
+            return true;
         }
-        false
+
+        let range = format!("{}..HEAD", self.base_hash);
+        let Ok(log) = run_git_limited(&self.path, &["log", "--oneline", &range]) else {
+            return true;
+        };
+        if !log.status.success() {
+            return true;
+        }
+        !log.stdout.is_empty()
     }
 
     /// Hand off the worktree to the caller as a durable artifact. The
@@ -151,14 +146,101 @@ impl Drop for WorktreeGuard {
             .arg(&self.parent_root)
             .args(["worktree", "remove", "--force"])
             .arg(&self.path)
-            .output();
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
         let _ = Command::new("git")
             .arg("-C")
             .arg(&self.parent_root)
             .args(["branch", "-D"])
             .arg(&self.branch)
-            .output();
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
+}
+
+struct LimitedGitOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+}
+
+fn run_git_limited(repo: &Path, args: &[&str]) -> Result<LimitedGitOutput, std::io::Error> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("failed to capture worktree git stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("failed to capture worktree git stderr"))?;
+
+    let stdout_handle =
+        std::thread::spawn(move || read_limited_stream(stdout, WORKTREE_GIT_STDOUT_BYTES));
+    let stderr_handle =
+        std::thread::spawn(move || read_limited_stream(stderr, WORKTREE_GIT_STDERR_BYTES));
+    let status = child.wait()?;
+    let (stdout, stdout_truncated) = stdout_handle
+        .join()
+        .unwrap_or_else(|_| Err(std::io::Error::other("worktree git stdout reader panicked")))?;
+    let (stderr, stderr_truncated) = stderr_handle
+        .join()
+        .unwrap_or_else(|_| Err(std::io::Error::other("worktree git stderr reader panicked")))?;
+
+    Ok(LimitedGitOutput {
+        status,
+        stdout,
+        stderr,
+        stdout_truncated,
+        stderr_truncated,
+    })
+}
+
+fn read_limited_stream<R: Read>(
+    mut reader: R,
+    max_bytes: usize,
+) -> Result<(Vec<u8>, bool), std::io::Error> {
+    let mut collected = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0u8; 8192];
+
+    loop {
+        let bytes_read = reader.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        let remaining = max_bytes.saturating_sub(collected.len());
+        let keep = bytes_read.min(remaining);
+        if keep > 0 {
+            collected.extend_from_slice(&buffer[..keep]);
+        }
+        if keep < bytes_read || collected.len() >= max_bytes {
+            truncated = true;
+        }
+    }
+
+    Ok((collected, truncated))
+}
+
+fn output_text(bytes: &[u8], truncated: bool, stream: &str) -> String {
+    let mut text = String::from_utf8_lossy(bytes).to_string();
+    if truncated {
+        if !text.ends_with('\n') && !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&format!("[worktree git {stream} truncated]"));
+    }
+    text
 }
 
 #[cfg(test)]
@@ -212,6 +294,29 @@ mod tests {
         let guard = WorktreeGuard::create(repo.path()).expect("create worktree");
         std::fs::write(guard.path().join("scratch.txt"), "hello\n").expect("write scratch");
         assert!(guard.has_changes());
+    }
+
+    #[test]
+    fn has_changes_keeps_worktree_when_git_query_fails() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        let guard = WorktreeGuard {
+            parent_root: repo.path().to_path_buf(),
+            path: repo.path().join("missing-worktree"),
+            branch: "octo-subagent/missing".to_string(),
+            base_hash: "HEAD".to_string(),
+        };
+
+        assert!(guard.has_changes());
+        std::mem::forget(guard);
+    }
+
+    #[test]
+    fn limited_stream_reader_caps_worktree_git_output() {
+        let input = std::io::Cursor::new("x".repeat(8192));
+        let (bytes, truncated) = read_limited_stream(input, 1024).expect("limited stream");
+
+        assert_eq!(bytes.len(), 1024);
+        assert!(truncated);
     }
 
     #[test]
