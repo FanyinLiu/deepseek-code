@@ -5047,30 +5047,29 @@ impl TuiApp {
     }
 
     fn infer_pending_parent_step_index(&self) -> Option<usize> {
-        let pending_indices: Vec<usize> = self
-            .plan_steps
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, step)| {
-                (step.status == plan_tracker::PlanStepStatus::Pending).then_some(idx)
-            })
-            .collect();
-        let [pending_index] = pending_indices.as_slice() else {
-            return None;
-        };
+        let mut pending_index = None;
+        for (idx, step) in self.plan_steps.iter().enumerate() {
+            if step.status != plan_tracker::PlanStepStatus::Pending {
+                continue;
+            }
+            if pending_index.replace(idx).is_some() {
+                return None;
+            }
+        }
+        let pending_index = pending_index?;
         if self.plan_steps.iter().enumerate().any(|(idx, step)| {
-            idx != *pending_index && step.status == plan_tracker::PlanStepStatus::Running
+            idx != pending_index && step.status == plan_tracker::PlanStepStatus::Running
         }) {
             return None;
         }
         let has_completed_child = self.plan_steps.iter().enumerate().any(|(idx, step)| {
-            idx != *pending_index && step.status == plan_tracker::PlanStepStatus::Done
+            idx != pending_index && step.status == plan_tracker::PlanStepStatus::Done
         });
         if !has_completed_child {
             return None;
         }
         let all_children_terminal = self.plan_steps.iter().enumerate().all(|(idx, step)| {
-            idx == *pending_index
+            idx == pending_index
                 || matches!(
                     step.status,
                     plan_tracker::PlanStepStatus::Done | plan_tracker::PlanStepStatus::Failed
@@ -5079,11 +5078,11 @@ impl TuiApp {
         if !all_children_terminal {
             return None;
         }
-        let pending_step = &self.plan_steps[*pending_index];
+        let pending_step = &self.plan_steps[pending_index];
         let matches_summary = self.plan_summary.as_deref().is_some_and(|summary| {
             normalized_plan_title(summary) == normalized_plan_title(&pending_step.description)
         });
-        ((*pending_index == 0) || matches_summary).then_some(*pending_index)
+        ((pending_index == 0) || matches_summary).then_some(pending_index)
     }
 }
 
