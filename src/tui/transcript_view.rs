@@ -52,22 +52,59 @@ struct ToolRenderState {
 }
 
 impl ToolRenderState {
-    fn from_messages(messages: &[ProtocolMessage]) -> Self {
+    fn from_message_window(messages: &[ProtocolMessage], window_start: usize) -> Self {
         let mut state = Self::default();
-        for message in messages {
+        let window_start = window_start.min(messages.len());
+        let window = &messages[window_start..];
+        let mut missing_run_command_ids: Vec<&str> = Vec::new();
+
+        for message in window {
             for tool_call in &message.tool_calls {
-                if tool_call.function.name == "run_command" {
-                    state.run_commands.insert(
-                        tool_call.id.clone(),
-                        view_blocks::summarize_tool_arguments(
-                            &tool_call.function.name,
-                            &tool_call.function.arguments,
-                        ),
-                    );
+                state.record_run_command(tool_call);
+            }
+            for result in &message.tool_results {
+                if result.name == "run_command"
+                    && !state.run_commands.contains_key(&result.tool_call_id)
+                    && !missing_run_command_ids.contains(&result.tool_call_id.as_str())
+                {
+                    missing_run_command_ids.push(result.tool_call_id.as_str());
                 }
             }
         }
+
+        if !missing_run_command_ids.is_empty() {
+            for message in messages[..window_start].iter().rev() {
+                for tool_call in &message.tool_calls {
+                    if tool_call.function.name != "run_command" {
+                        continue;
+                    }
+                    if let Some(index) = missing_run_command_ids
+                        .iter()
+                        .position(|id| *id == tool_call.id.as_str())
+                    {
+                        state.record_run_command(tool_call);
+                        missing_run_command_ids.swap_remove(index);
+                        if missing_run_command_ids.is_empty() {
+                            return state;
+                        }
+                    }
+                }
+            }
+        }
+
         state
+    }
+
+    fn record_run_command(&mut self, tool_call: &ToolCall) {
+        if tool_call.function.name == "run_command" {
+            self.run_commands.insert(
+                tool_call.id.clone(),
+                view_blocks::summarize_tool_arguments(
+                    &tool_call.function.name,
+                    &tool_call.function.arguments,
+                ),
+            );
+        }
     }
 
     fn run_command(&self, tool_call_id: &str) -> Option<&str> {
@@ -77,17 +114,19 @@ impl ToolRenderState {
 
 pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) {
     let content_width = transcript_content_width(area.width);
-    let mut lines: Vec<Line<'static>> = Vec::new();
     let palette = theme::palette();
     let frame = motion::MotionFrame::new(motion::MotionLevel::Subtle, props.global_elapsed_ms);
     let visible_height = area.height as usize;
-    let mut tool_state = ToolRenderState::from_messages(props.messages);
     let messages = transcript_message_window(
         props.messages,
         content_width,
         visible_height,
         props.scroll_offset,
     );
+    let window_start = props.messages.len().saturating_sub(messages.len());
+    let mut tool_state = ToolRenderState::from_message_window(props.messages, window_start);
+    let mut lines: Vec<Line<'static>> =
+        Vec::with_capacity(messages.len().saturating_mul(3).saturating_add(16));
 
     // ── Messages ──
     for msg in messages {
@@ -2807,6 +2846,21 @@ mod tests {
         let window = transcript_message_window(&messages, 80, 10, 10_000);
 
         assert_eq!(window.len(), messages.len());
+    }
+
+    #[test]
+    fn tool_state_backfills_run_command_for_windowed_result() {
+        let call = assistant_tool_call("run_command", r#"{"command":"cargo test"}"#);
+        let result = tool_message("run_command", "ok");
+        let newer = test_message("newer message");
+        let messages = vec![call, result, newer];
+
+        let state = ToolRenderState::from_message_window(&messages, 1);
+
+        assert!(state
+            .run_command("tool-1")
+            .expect("run command was backfilled")
+            .contains("cargo test"));
     }
 
     #[test]
