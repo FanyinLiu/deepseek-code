@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Paragraph, Wrap},
+    widgets::{Paragraph, Wrap},
     Frame,
 };
 
@@ -455,6 +455,11 @@ pub fn suggested_prompt(index: usize) -> Option<&'static str> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub fn render_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
+    if data.api_key_status == "missing" {
+        render_compact_api_welcome(f, area, data);
+        return;
+    }
+
     if area.width < 110 || area.height < 18 {
         render_compact_welcome(f, area, data);
         return;
@@ -500,11 +505,6 @@ fn render_split_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) 
 
 fn render_identity(f: &mut Frame, area: Rect, data: &WelcomeDashboardData) {
     let lang = display_language(data);
-    if data.api_key_status == "missing" {
-        render_octo_with_bubble(f, area, data, lang);
-        return;
-    }
-
     let product_mark_height = if area.height >= 23 { 3 } else { 2 };
     // When the welcome area is generous, perch the pixel octopus pet above
     // the wordmark. 10 rows for the sprite + 1 gap; needs ~28 rows total.
@@ -1062,8 +1062,8 @@ fn render_compact_api_welcome(f: &mut Frame, area: Rect, data: &WelcomeDashboard
         let steps = Line::from(vec![Span::styled(
             tr(
                 lang,
-                "Paste key below, then press Enter.",
-                "在下方粘贴密钥，然后按 Enter。",
+                "Press Enter to save.",
+                "把密钥粘贴到输入行，然后按 Enter 保存。",
             ),
             welcome_muted(),
         )]);
@@ -1137,127 +1137,6 @@ fn pretty_workspace(path: &Path) -> String {
         }
     }
     display
-}
-
-fn render_octo_with_bubble(
-    f: &mut Frame,
-    area: Rect,
-    data: &WelcomeDashboardData,
-    lang: UiLanguage,
-) {
-    // Need at least 14 rows + 60 cols for the pet + bubble side-by-side to
-    // breathe. Below that, degrade to the wordmark only.
-    if area.height < 14 || area.width < 60 {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(if area.height >= 6 { 3 } else { 2 }),
-                Constraint::Min(0),
-            ])
-            .split(area);
-        render_product_mark(f, chunks[1], lang);
-        return;
-    }
-
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(28), Constraint::Min(20)])
-        .split(area);
-
-    let left = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(12),
-            Constraint::Length(1),
-            Constraint::Length(2),
-            Constraint::Min(0),
-        ])
-        .split(cols[0]);
-    render_octopus_pet(f, left[1]);
-    render_product_mark(f, left[3], lang);
-
-    let lines = compose_octo_dialogue(data, lang);
-    let bubble_inner = lines.len() as u16;
-    let bubble_outer = bubble_inner
-        .saturating_add(2)
-        .min(area.height.saturating_sub(2));
-    let pad_top = area.height.saturating_sub(bubble_outer) / 2;
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(pad_top),
-            Constraint::Length(bubble_outer),
-            Constraint::Min(0),
-        ])
-        .split(cols[1]);
-    render_speech_bubble(f, right[1], lines);
-}
-
-fn compose_octo_dialogue(data: &WelcomeDashboardData, lang: UiLanguage) -> Vec<Line<'static>> {
-    let p = theme::palette();
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let greeting = tr(lang, "Hi, I'm Octo.", "嗨，我是 Octo。");
-    lines.push(Line::from(Span::styled(
-        greeting.to_string(),
-        Style::default().fg(p.text).add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        tr(
-            lang,
-            "You haven't set an API key yet.",
-            "你还没配 API key。",
-        )
-        .to_string(),
-        Style::default().fg(p.text),
-    )));
-    lines.push(Line::from(Span::styled(
-        tr(
-            lang,
-            "Paste it into the input row to start.",
-            "粘贴到下方输入行就能开工。",
-        )
-        .to_string(),
-        Style::default().fg(p.dim),
-    )));
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled(
-            tr(lang, "workspace ", "工作区   ").to_string(),
-            Style::default().fg(p.dim),
-        ),
-        Span::styled(
-            pretty_workspace(&data.workspace_path),
-            Style::default().fg(p.text),
-        ),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(
-            tr(lang, "model     ", "模型     ").to_string(),
-            Style::default().fg(p.dim),
-        ),
-        Span::styled(
-            format!("{} ({})", model_label(&data.model), data.thinking),
-            Style::default().fg(p.dim),
-        ),
-    ]));
-    lines
-}
-
-fn render_speech_bubble(f: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
-    let p = theme::palette();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(p.assistant).bg(p.canvas))
-        .style(Style::default().bg(p.canvas));
-    let para = Paragraph::new(Text::from(lines))
-        .block(block)
-        .style(Style::default().bg(p.canvas))
-        .wrap(Wrap { trim: false });
-    f.render_widget(para, area);
 }
 
 fn render_octopus_pet(f: &mut Frame, area: Rect) {
