@@ -1103,9 +1103,10 @@ fn render_run_command_lines(
         return lines;
     }
 
-    let progress_lines = command_progress_lines(output);
+    let output_lines = command_output_lines(output);
+    let progress_lines = command_progress_lines(&output_lines);
     if progress_lines.is_empty() {
-        for preview in command_output_preview(output).into_iter().take(2) {
+        for preview in command_output_preview(&output_lines).into_iter().take(2) {
             lines.push(command_detail_line(&preview, p.dim));
         }
     } else {
@@ -1114,7 +1115,7 @@ fn render_run_command_lines(
         }
     }
 
-    lines.push(command_status_line(output, status));
+    lines.push(command_status_line(&output_lines, status));
     lines
 }
 
@@ -1202,7 +1203,7 @@ fn command_progress_line(
     ])
 }
 
-fn command_status_line(output: &str, status: view_blocks::ViewStatus) -> Line<'static> {
+fn command_status_line(lines: &[String], status: view_blocks::ViewStatus) -> Line<'static> {
     let p = theme::palette();
     let mut parts = vec![match status {
         view_blocks::ViewStatus::Done => "done".to_string(),
@@ -1216,10 +1217,10 @@ fn command_status_line(output: &str, status: view_blocks::ViewStatus) -> Line<'s
         view_blocks::ViewStatus::Retrying => "retrying".to_string(),
         view_blocks::ViewStatus::Skipped => "skipped".to_string(),
     }];
-    if let Some(exit_code) = command_exit_code(output) {
+    if let Some(exit_code) = command_exit_code(lines) {
         parts.push(format!("exit {exit_code}"));
     }
-    if let Some(duration_ms) = command_duration_ms(output) {
+    if let Some(duration_ms) = command_duration_ms(lines) {
         parts.push(plan_tracker::format_duration_compact(duration_ms));
     }
     let color = status.color();
@@ -1232,20 +1233,20 @@ fn command_status_line(output: &str, status: view_blocks::ViewStatus) -> Line<'s
     ])
 }
 
-fn command_progress_lines(output: &str) -> Vec<CommandProgressLine> {
+fn command_progress_lines(lines: &[String]) -> Vec<CommandProgressLine> {
     let mut items = Vec::new();
-    for line in command_output_lines(output) {
-        if !looks_like_progress_line(&line) {
+    for line in lines {
+        if !looks_like_progress_line(line) {
             continue;
         }
-        let percent = progress_percent(&line);
+        let percent = progress_percent(line);
         let suffix = percent
-            .and_then(|value| progress_suffix(&line, value))
-            .unwrap_or_else(|| truncate_display_width(&line, 80));
+            .and_then(|value| progress_suffix(line, value))
+            .unwrap_or_else(|| truncate_display_width(line, 80));
         items.push(CommandProgressLine {
             percent,
             suffix,
-            raw: line,
+            raw: line.clone(),
         });
     }
     let keep_from = items.len().saturating_sub(2);
@@ -1301,9 +1302,9 @@ fn progress_suffix(line: &str, percent: u8) -> Option<String> {
     }
 }
 
-fn command_output_preview(output: &str) -> Vec<String> {
-    command_output_lines(output)
-        .into_iter()
+fn command_output_preview(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
         .filter(|line| {
             let lower = line.to_ascii_lowercase();
             !matches!(lower.as_str(), "stdout:" | "stderr:")
@@ -1311,20 +1312,20 @@ fn command_output_preview(output: &str) -> Vec<String> {
                 && !looks_like_progress_line(line)
         })
         .take(2)
-        .map(|line| truncate_display_width(&line, 120))
+        .map(|line| truncate_display_width(line, 120))
         .collect()
 }
 
-fn command_exit_code(output: &str) -> Option<i32> {
-    command_output_lines(output).into_iter().find_map(|line| {
+fn command_exit_code(lines: &[String]) -> Option<i32> {
+    lines.iter().find_map(|line| {
         let rest = line.strip_prefix("exit_code:")?.trim();
         let code = rest.split('|').next()?.trim();
         code.parse::<i32>().ok()
     })
 }
 
-fn command_duration_ms(output: &str) -> Option<u64> {
-    command_output_lines(output).into_iter().find_map(|line| {
+fn command_duration_ms(lines: &[String]) -> Option<u64> {
+    lines.iter().find_map(|line| {
         let (_, rest) = line.split_once("duration:")?;
         let digits = rest
             .trim()
