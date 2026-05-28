@@ -242,7 +242,7 @@ pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) 
     }
 
     let lines = wrap_visual_lines(&lines, content_width);
-    let visible = transcript_visible_lines(&lines, visible_height, props.scroll_offset);
+    let visible = transcript_visible_lines(lines, visible_height, props.scroll_offset);
 
     let text = Text::from(visible);
     let paragraph = Paragraph::new(text)
@@ -323,7 +323,7 @@ fn estimate_text_visual_lines(text: &str, max_width: usize) -> usize {
 
 fn wrap_visual_lines(lines: &[Line<'static>], width: u16) -> Vec<Line<'static>> {
     let max_width = (width as usize).max(1);
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(lines.len());
 
     for line in lines {
         if line.spans.is_empty() {
@@ -372,7 +372,7 @@ fn wrap_visual_lines(lines: &[Line<'static>], width: u16) -> Vec<Line<'static>> 
 }
 
 fn transcript_visible_lines(
-    lines: &[Line<'static>],
+    lines: Vec<Line<'static>>,
     visible_height: usize,
     scroll_offset: usize,
 ) -> Vec<Line<'static>> {
@@ -384,7 +384,7 @@ fn transcript_visible_lines(
     let hidden_below = scroll_offset.min(max_offset);
     let end = lines.len().saturating_sub(hidden_below);
     let start = end.saturating_sub(visible_height);
-    lines[start..end].to_vec()
+    lines.into_iter().skip(start).take(end - start).collect()
 }
 
 fn render_message(
@@ -2876,11 +2876,11 @@ mod tests {
             .map(|index| Line::from(format!("line {index}")))
             .collect::<Vec<_>>();
 
-        let newest = transcript_visible_lines(&lines, 3, 0);
+        let newest = transcript_visible_lines(lines.clone(), 3, 0);
         assert_eq!(newest[0].spans[0].content.as_ref(), "line 4");
         assert_eq!(newest[2].spans[0].content.as_ref(), "line 6");
 
-        let older = transcript_visible_lines(&lines, 3, 2);
+        let older = transcript_visible_lines(lines, 3, 2);
         assert_eq!(older[0].spans[0].content.as_ref(), "line 2");
         assert_eq!(older[2].spans[0].content.as_ref(), "line 4");
     }
