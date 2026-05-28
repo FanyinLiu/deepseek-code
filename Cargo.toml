@@ -48,6 +48,9 @@ wiremock = "0.6"
 insta = "1"
 tempfile = "3"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
 [lib]
 name = "deepseek_code"
 path = "src/lib.rs"

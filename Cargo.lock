@@ -1787,6 +1787,7 @@ dependencies = [
  "unicode-width",
  "uuid",
  "walkdir",
+ "windows-sys 0.61.2",
  "wiremock",
  "zip",
 ]

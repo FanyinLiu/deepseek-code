@@ -14,7 +14,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), anyhow::Error> {
             .open(&temp_path)?;
         file.write_all(bytes)?;
         file.sync_all()?;
-        std::fs::rename(&temp_path, path)?;
+        replace_path(&temp_path, path)?;
         sync_parent_dir(parent);
         Ok(())
     })();
@@ -52,7 +52,7 @@ pub fn write_private_text_atomic(path: &Path, value: &str) -> Result<(), anyhow:
             .open(&temp_path)?;
         file.write_all(value.as_bytes())?;
         file.sync_all()?;
-        std::fs::rename(&temp_path, path)?;
+        replace_path(&temp_path, path)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         sync_parent_dir(parent);
         Ok(())
@@ -103,6 +103,43 @@ fn lock_path_for(path: &Path) -> PathBuf {
         .and_then(|name| name.to_str())
         .unwrap_or("atomic");
     path.with_file_name(format!(".{file_name}.lock"))
+}
+
+#[cfg(not(windows))]
+fn replace_path(temp_path: &Path, path: &Path) -> std::io::Result<()> {
+    std::fs::rename(temp_path, path)
+}
+
+#[cfg(windows)]
+fn replace_path(temp_path: &Path, path: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let from = temp_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let to = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+
+    let replaced = unsafe {
+        MoveFileExW(
+            from.as_ptr(),
+            to.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(unix)]
