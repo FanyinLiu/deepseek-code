@@ -172,6 +172,7 @@ impl<'a> CommandEntry<'a> {
 }
 
 /// Registry of all slash commands.
+#[derive(Clone)]
 pub struct CommandRegistry {
     commands: HashMap<&'static str, &'static SlashCommand>,
     prompt_commands: HashMap<String, PromptCommand>,

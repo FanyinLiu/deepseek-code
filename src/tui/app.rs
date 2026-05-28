@@ -7462,8 +7462,11 @@ pub async fn run_tui(
                     }
                     // Slash commands
                     if input.trim().starts_with('/') {
-                        let mut registry = crate::commands::CommandRegistry::new();
-                        registry.load_prompt_commands(&root);
+                        let registry = {
+                            let mut registry_cache = app.slash_command_registry_cache.borrow_mut();
+                            registry_cache.refresh_for_root(&root);
+                            registry_cache.registry().clone()
+                        };
                         let mcp_status = app.mcp_status.clone();
                         let background_tasks = orchestrator
                             .as_ref()
