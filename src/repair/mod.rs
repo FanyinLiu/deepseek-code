@@ -1126,11 +1126,7 @@ fn validate_patch_applies(project_root: &Path, patch: &str) -> Result<()> {
 
 fn truncate_patch_check_log(text: &str) -> String {
     const LIMIT: usize = 4000;
-    if text.len() <= LIMIT {
-        text.to_string()
-    } else {
-        format!("{}...", &text[..LIMIT])
-    }
+    truncate_chars(text, LIMIT, "...")
 }
 
 fn patch_hash(patch: &str) -> String {
@@ -1164,11 +1160,16 @@ fn run_command(root: &Path, name: &str, command: &[&str]) -> Result<RepairValida
 
 fn excerpt(text: &str) -> String {
     const LIMIT: usize = 4000;
-    if text.len() <= LIMIT {
-        text.to_string()
-    } else {
-        text[..LIMIT].to_string()
+    truncate_chars(text, LIMIT, "")
+}
+
+fn truncate_chars(text: &str, limit: usize, suffix: &str) -> String {
+    let mut chars = text.chars();
+    let mut out = chars.by_ref().take(limit).collect::<String>();
+    if chars.next().is_some() {
+        out.push_str(suffix);
     }
+    out
 }
 
 fn excerpt_for_target(relative: &str, text: &str) -> String {
@@ -1409,5 +1410,28 @@ fn list_or_none(values: &[String]) -> String {
             .map(|value| format!("`{value}`"))
             .collect::<Vec<_>>()
             .join(", ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn patch_check_log_truncation_is_char_safe() {
+        let text = "界".repeat(5000);
+        let output = truncate_patch_check_log(&text);
+
+        assert!(output.ends_with("..."));
+        assert!(output.starts_with('界'));
+    }
+
+    #[test]
+    fn validation_excerpt_truncation_is_char_safe() {
+        let text = "界".repeat(5000);
+        let output = excerpt(&text);
+
+        assert_eq!(output.chars().count(), 4000);
+        assert!(output.chars().all(|ch| ch == '界'));
     }
 }
