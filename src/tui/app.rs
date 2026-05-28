@@ -7461,111 +7461,114 @@ pub async fn run_tui(
                         orchestrator.stage_allowed_tools(staged_allowed_tools);
                     }
                     // Slash commands
-                    let mut registry = crate::commands::CommandRegistry::new();
-                    registry.load_prompt_commands(&root);
-                    let mcp_status = app.mcp_status.clone();
-                    let background_tasks = orchestrator
-                        .as_ref()
-                        .map(Orchestrator::background_tasks)
-                        .unwrap_or_default();
-                    let model_before = app.model.clone();
-                    let permission_mode_before = app.permission_mode;
-                    let mut ctx = crate::commands::CommandContext {
-                        app: &mut app,
-                        project_root: &root,
-                        yolo_mode: &mut yolo_mode,
-                        mcp_status: &mcp_status,
-                        background_tasks: &background_tasks,
-                    };
-                    if let Some(result) = registry.execute(&input, &mut ctx) {
-                        match result {
-                            Ok(Some(msg)) => {
-                                let command_name = input.split_whitespace().next();
-                                if app.model != model_before {
-                                    if let Some(orchestrator) = orchestrator.as_mut() {
-                                        orchestrator.set_active_model(app.model.clone());
+                    if input.trim().starts_with('/') {
+                        let mut registry = crate::commands::CommandRegistry::new();
+                        registry.load_prompt_commands(&root);
+                        let mcp_status = app.mcp_status.clone();
+                        let background_tasks = orchestrator
+                            .as_ref()
+                            .map(Orchestrator::background_tasks)
+                            .unwrap_or_default();
+                        let model_before = app.model.clone();
+                        let permission_mode_before = app.permission_mode;
+                        let mut ctx = crate::commands::CommandContext {
+                            app: &mut app,
+                            project_root: &root,
+                            yolo_mode: &mut yolo_mode,
+                            mcp_status: &mcp_status,
+                            background_tasks: &background_tasks,
+                        };
+                        if let Some(result) = registry.execute(&input, &mut ctx) {
+                            match result {
+                                Ok(Some(msg)) => {
+                                    let command_name = input.split_whitespace().next();
+                                    if app.model != model_before {
+                                        if let Some(orchestrator) = orchestrator.as_mut() {
+                                            orchestrator.set_active_model(app.model.clone());
+                                        }
                                     }
-                                }
-                                if app.permission_mode != permission_mode_before {
-                                    if let Some(orchestrator) = orchestrator.as_mut() {
-                                        orchestrator.permission_mode = app.permission_mode;
-                                        // Bypass/Auto imply legacy yolo;
-                                        // any other mode resets yolo so the
-                                        // user can dial back from bypass.
-                                        orchestrator.yolo_mode = matches!(
-                                            app.permission_mode,
-                                            crate::policy::PermissionMode::Bypass
-                                                | crate::policy::PermissionMode::Auto
-                                        );
-                                        yolo_mode = orchestrator.yolo_mode;
+                                    if app.permission_mode != permission_mode_before {
+                                        if let Some(orchestrator) = orchestrator.as_mut() {
+                                            orchestrator.permission_mode = app.permission_mode;
+                                            // Bypass/Auto imply legacy yolo;
+                                            // any other mode resets yolo so the
+                                            // user can dial back from bypass.
+                                            orchestrator.yolo_mode = matches!(
+                                                app.permission_mode,
+                                                crate::policy::PermissionMode::Bypass
+                                                    | crate::policy::PermissionMode::Auto
+                                            );
+                                            yolo_mode = orchestrator.yolo_mode;
+                                        }
                                     }
-                                }
-                                if matches!(
-                                    input.split_whitespace().next(),
-                                    Some("/compact" | "/compress")
-                                ) {
-                                    if let Some(orchestrator) = orchestrator.as_mut() {
-                                        orchestrator.session.messages = app.messages.clone();
-                                        if let Some(home) = dirs::home_dir() {
-                                            let store =
-                                                storage::SessionStore::new(home.join(".octocode"));
-                                            if let Err(e) = store.save(&orchestrator.session) {
-                                                app.push_activity(format!(
-                                                    "warning: failed to persist session after compact: {e}"
-                                                ));
+                                    if matches!(
+                                        input.split_whitespace().next(),
+                                        Some("/compact" | "/compress")
+                                    ) {
+                                        if let Some(orchestrator) = orchestrator.as_mut() {
+                                            orchestrator.session.messages = app.messages.clone();
+                                            if let Some(home) = dirs::home_dir() {
+                                                let store = storage::SessionStore::new(
+                                                    home.join(".octocode"),
+                                                );
+                                                if let Err(e) = store.save(&orchestrator.session) {
+                                                    app.push_activity(format!(
+                                                        "warning: failed to persist session after compact: {e}"
+                                                    ));
+                                                }
                                             }
                                         }
                                     }
-                                }
-                                if is_swarm_cancel_command(&input) {
-                                    if let Some(running) = running_turn.as_ref() {
-                                        running.cancel_token.store(true, Ordering::SeqCst);
+                                    if is_swarm_cancel_command(&input) {
+                                        if let Some(running) = running_turn.as_ref() {
+                                            running.cancel_token.store(true, Ordering::SeqCst);
+                                        }
+                                        app.request_swarm_cancel();
                                     }
-                                    app.request_swarm_cancel();
-                                }
-                                if matches!(command_name, Some("/btw" | "/recap")) {
-                                    maybe_start_side_slash_task(
-                                        &input,
-                                        &app,
-                                        &active_client,
-                                        &action_tx,
-                                    );
-                                }
-                                if running_turn.is_some() || app.is_streaming {
-                                    let status = msg
-                                        .lines()
-                                        .find(|line| !line.trim().is_empty())
-                                        .unwrap_or("Command complete")
-                                        .to_string();
-                                    app.clear_input_editor();
-                                    app.status_message = truncate_for_activity(&status, 120);
-                                    app.push_activity(format!(
-                                        "command: {}",
-                                        truncate_for_activity(&status, 80)
-                                    ));
-                                } else {
-                                    app.show_local_output(msg);
-                                }
-                                continue;
-                            }
-                            Ok(None) => {
-                                if matches!(
-                                    input.split_whitespace().next(),
-                                    Some("/settings" | "/set")
-                                ) {
+                                    if matches!(command_name, Some("/btw" | "/recap")) {
+                                        maybe_start_side_slash_task(
+                                            &input,
+                                            &app,
+                                            &active_client,
+                                            &action_tx,
+                                        );
+                                    }
+                                    if running_turn.is_some() || app.is_streaming {
+                                        let status = msg
+                                            .lines()
+                                            .find(|line| !line.trim().is_empty())
+                                            .unwrap_or("Command complete")
+                                            .to_string();
+                                        app.clear_input_editor();
+                                        app.status_message = truncate_for_activity(&status, 120);
+                                        app.push_activity(format!(
+                                            "command: {}",
+                                            truncate_for_activity(&status, 80)
+                                        ));
+                                    } else {
+                                        app.show_local_output(msg);
+                                    }
                                     continue;
                                 }
-                                if let Some(forwarded) =
-                                    crate::commands::forwarded_agent_input(&input)
-                                {
-                                    input = forwarded;
+                                Ok(None) => {
+                                    if matches!(
+                                        input.split_whitespace().next(),
+                                        Some("/settings" | "/set")
+                                    ) {
+                                        continue;
+                                    }
+                                    if let Some(forwarded) =
+                                        crate::commands::forwarded_agent_input(&input)
+                                    {
+                                        input = forwarded;
+                                    }
+                                    // Command forwarded to agent (e.g. /fix, /explain, /review)
+                                    // Fall through to normal processing
                                 }
-                                // Command forwarded to agent (e.g. /fix, /explain, /review)
-                                // Fall through to normal processing
-                            }
-                            Err(e) => {
-                                app.show_local_output(e);
-                                continue;
+                                Err(e) => {
+                                    app.show_local_output(e);
+                                    continue;
+                                }
                             }
                         }
                     }
