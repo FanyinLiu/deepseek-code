@@ -649,6 +649,13 @@ pub(crate) fn allowed_tools_match_tool_call(
         .any(|entry| matches_allowed_entry(entry, tool_name, args))
 }
 
+pub(crate) fn allowed_tools_include_tool_name(allowed: &[String], tool_name: &str) -> bool {
+    allowed.iter().any(|entry| {
+        let (name, _) = parse_allowed_entry(entry);
+        allowed_entry_name_matches(name, tool_name)
+    })
+}
+
 fn allowed_entry_name_matches(entry_name: &str, tool_name: &str) -> bool {
     entry_name == tool_name || (is_bash_entry(entry_name) && tool_name == "run_command")
 }
@@ -1160,6 +1167,15 @@ mod tests {
         );
         assert_eq!(decision.action, PolicyAction::Deny);
         assert_eq!(decision.display.risk_level, RiskLevel::Blocked);
+    }
+
+    #[test]
+    fn allowed_tools_include_tool_name_understands_patterns_and_bash_alias() {
+        let allowed = vec!["read_file(src/**)".to_string(), "Bash(git:*)".to_string()];
+
+        assert!(allowed_tools_include_tool_name(&allowed, "read_file"));
+        assert!(allowed_tools_include_tool_name(&allowed, "run_command"));
+        assert!(!allowed_tools_include_tool_name(&allowed, "write_file"));
     }
 
     fn mcp_metadata(

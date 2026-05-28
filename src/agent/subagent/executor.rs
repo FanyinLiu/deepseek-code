@@ -130,7 +130,7 @@ impl SubagentExecutor {
             })
             .filter(|t| {
                 self.config.allowed_tools.is_empty()
-                    || self.config.allowed_tools.contains(&t.function.name)
+                    || subagent_allows_tool_name(&self.config.allowed_tools, &t.function.name)
             })
             .collect();
 
@@ -422,9 +422,7 @@ impl SubagentExecutor {
 
         for tc in tool_calls {
             // Filter by allowed_tools
-            if !self.config.allowed_tools.is_empty()
-                && !self.config.allowed_tools.contains(&tc.function.name)
-            {
+            if !subagent_allows_tool_call(&self.config.allowed_tools, tc) {
                 push_subagent_tool_result(
                     &mut results,
                     &mut audit_meta,
@@ -784,6 +782,24 @@ fn read_only_allows_tool(tool_name: &str) -> bool {
     crate::tools::metadata::is_read_only(tool_name)
 }
 
+fn subagent_allows_tool_name(allowed_tools: &[String], tool_name: &str) -> bool {
+    allowed_tools.is_empty()
+        || crate::policy::approvals::allowed_tools_include_tool_name(allowed_tools, tool_name)
+}
+
+fn subagent_allows_tool_call(allowed_tools: &[String], tool_call: &ToolCall) -> bool {
+    if allowed_tools.is_empty() {
+        return true;
+    }
+    let args = serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments)
+        .unwrap_or_else(|_| serde_json::json!({}));
+    crate::policy::approvals::allowed_tools_match_tool_call(
+        Some(allowed_tools),
+        &tool_call.function.name,
+        &args,
+    )
+}
+
 fn structured_subagent_limit_message(task: &SubagentTask, _max_turns: u32) -> String {
     if subagent_task_uses_chinese(task) {
         format!(
@@ -1038,13 +1054,25 @@ mod tests {
     use super::{
         collect_successful_file_access, dedupe_preserving_order, emit_subagent_chunk_delta,
         read_only_allows_tool, run_nested_subagent, structured_subagent_error_message,
-        structured_subagent_limit_message, SubagentExecutor,
+        structured_subagent_limit_message, subagent_allows_tool_call, subagent_allows_tool_name,
+        SubagentExecutor,
     };
     use crate::agent::orchestrator::AgentEvent;
     use crate::agent::subagent::types::{SubagentConfig, SubagentTask};
     use crate::deepseek::client::DeepSeekClient;
     use crate::deepseek::models::{DeepSeekModel, StreamChunk};
     use std::sync::Arc;
+
+    fn tool_call(name: &str, arguments: serde_json::Value) -> crate::deepseek::ToolCall {
+        crate::deepseek::ToolCall {
+            id: "call-1".to_string(),
+            call_type: "function".to_string(),
+            function: crate::deepseek::ToolCallFunction {
+                name: name.to_string(),
+                arguments: arguments.to_string(),
+            },
+        }
+    }
 
     #[test]
     fn dedupe_preserving_order_keeps_first_occurrence() {
@@ -1264,6 +1292,30 @@ mod tests {
                 "{tool_name} should be blocked"
             );
         }
+    }
+
+    #[test]
+    fn subagent_allowed_tools_patterns_expose_matching_tool_schema() {
+        let allowed = vec!["Bash(git:*)".to_string()];
+
+        assert!(subagent_allows_tool_name(&allowed, "run_command"));
+        assert!(!subagent_allows_tool_name(&allowed, "read_file"));
+    }
+
+    #[test]
+    fn subagent_allowed_tools_patterns_filter_by_tool_arguments() {
+        let allowed = vec!["Bash(git:*)".to_string()];
+        let git_call = tool_call(
+            "run_command",
+            serde_json::json!({ "command": "git status" }),
+        );
+        let cargo_call = tool_call(
+            "run_command",
+            serde_json::json!({ "command": "cargo test" }),
+        );
+
+        assert!(subagent_allows_tool_call(&allowed, &git_call));
+        assert!(!subagent_allows_tool_call(&allowed, &cargo_call));
     }
 
     #[tokio::test]
