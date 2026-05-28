@@ -575,14 +575,18 @@ impl Orchestrator {
             });
     }
 
-    fn record_usage_event(&self, usage: &Usage) {
-        let config = crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
+    fn record_usage_event(&mut self, usage: &Usage) {
         let model = self.session.reasoning_state.effective_model();
-        let provider_name = config.provider.default.as_str();
-        let model_name = request_model_name_for_config(&config.provider, &model);
+        let (provider_name, model_name) = {
+            let config = self.turn_config();
+            (
+                config.provider.default.as_str().to_string(),
+                request_model_name_for_config(&config.provider, &model),
+            )
+        };
         if let Err(error) = crate::storage::record_usage_event(
             &self.project_root,
-            provider_name,
+            &provider_name,
             &model_name,
             usage,
         ) {
@@ -673,13 +677,20 @@ impl Orchestrator {
     }
 
     fn should_run_swarm(
-        &self,
+        &mut self,
         user_input: &str,
         assessment: Option<&ComplexityAssessment>,
         forced: bool,
     ) -> bool {
-        let config = crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
-        if !config.subagent.enabled || !config.subagent.swarm_enabled {
+        let (subagents_enabled, swarm_enabled, auto_decompose) = {
+            let config = self.turn_config();
+            (
+                config.subagent.enabled,
+                config.subagent.swarm_enabled,
+                config.subagent.auto_decompose,
+            )
+        };
+        if !subagents_enabled || !swarm_enabled {
             return false;
         }
         if forced {
@@ -703,7 +714,7 @@ impl Orchestrator {
             ],
         );
         let router_complex = assessment.is_some_and(|a| a.route == Route::PlanReview);
-        config.subagent.auto_decompose && (multi_file_hint || (router_complex && complex_hint))
+        auto_decompose && (multi_file_hint || (router_complex && complex_hint))
     }
 
     async fn run_swarm_mode(
