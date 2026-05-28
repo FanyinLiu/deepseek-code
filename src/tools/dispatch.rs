@@ -105,11 +105,11 @@ fn get_edit_context(project_root: &Path, path: &str, old_string: &str) -> Option
 
     // Try to find lines containing a substring of old_string
     let target = old_string.lines().next()?.trim();
-    let fragment = &target[..target.len().min(20)];
+    let fragment = target.chars().take(20).collect::<String>();
     let mut lines_found = Vec::new();
 
     for (i, line) in content.lines().enumerate() {
-        if line.trim().contains(fragment) {
+        if line.trim().contains(&fragment) {
             lines_found.push(format!("{:>6} | {}", i + 1, line));
             if lines_found.len() >= 5 {
                 break;
@@ -753,5 +753,20 @@ mod tests {
 
         assert!(is_error);
         assert!(output.contains("task not found"));
+    }
+
+    #[test]
+    fn edit_context_uses_char_safe_multibyte_fragment() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("notes.txt"), "第一行\n第二行\n").expect("write file");
+
+        let context = get_edit_context(
+            temp.path(),
+            "notes.txt",
+            "这是一个很长很长很长的中文片段但文件里没有",
+        )
+        .expect("context should render without panicking");
+
+        assert!(context.contains("First 20 lines") || context.contains("Lines containing"));
     }
 }
