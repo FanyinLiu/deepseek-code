@@ -10,6 +10,7 @@ pub mod sessions;
 pub mod transcripts;
 pub mod usage;
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub use config::{find_project_root, find_project_root_strict, Config};
@@ -89,7 +90,19 @@ pub fn read_text_file_capped(path: impl AsRef<Path>) -> Result<String, anyhow::E
     if size > TEXT_FILE_SIZE_CAP {
         anyhow::bail!("file too large: {size} bytes, cap {TEXT_FILE_SIZE_CAP}");
     }
-    Ok(std::fs::read_to_string(path)?)
+    let file = std::fs::File::open(path)?;
+    read_text_capped(file, TEXT_FILE_SIZE_CAP)
+}
+
+fn read_text_capped(reader: impl Read, cap: u64) -> Result<String, anyhow::Error> {
+    let mut bytes = Vec::new();
+    let mut limited = reader.take(cap.saturating_add(1));
+    limited.read_to_end(&mut bytes)?;
+    let bytes_read = bytes.len() as u64;
+    if bytes_read > cap {
+        anyhow::bail!("file too large: {bytes_read} bytes, cap {cap}");
+    }
+    Ok(String::from_utf8(bytes)?)
 }
 
 #[cfg(test)]
@@ -123,5 +136,13 @@ mod tests {
                 TEXT_FILE_SIZE_CAP
             )
         );
+    }
+
+    #[test]
+    fn read_text_capped_rejects_reader_after_cap() {
+        let error = read_text_capped(std::io::Cursor::new(b"abcdef"), 5)
+            .expect_err("reader should fail after cap");
+
+        assert_eq!(error.to_string(), "file too large: 6 bytes, cap 5");
     }
 }

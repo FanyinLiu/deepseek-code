@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
+use tokio::io::AsyncReadExt;
 
 use crate::policy::PolicyDecision;
 use crate::runtime::tool_runtime::{ApprovalFuture, ApprovalOutcome, ApprovalResolver, ToolCall};
@@ -214,7 +215,19 @@ async fn read_approval_file_capped(path: impl AsRef<Path>) -> std::io::Result<St
             format!("file too large: {size} bytes, cap {APPROVAL_FILE_SIZE_CAP}"),
         ));
     }
-    fs::read_to_string(path).await
+    let file = fs::File::open(path).await?;
+    let mut reader = file.take(APPROVAL_FILE_SIZE_CAP.saturating_add(1));
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).await?;
+    let bytes_read = bytes.len() as u64;
+    if bytes_read > APPROVAL_FILE_SIZE_CAP {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("file too large: {bytes_read} bytes, cap {APPROVAL_FILE_SIZE_CAP}"),
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))
 }
 
 fn validate_id(id: &str) -> Result<()> {
