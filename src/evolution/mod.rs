@@ -2,9 +2,9 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -29,6 +29,7 @@ const HIGH_RISK_FILES: &[&str] = &[
     "src/tools/dispatch.rs",
     "src/cli/login.rs",
 ];
+const VALIDATION_OUTPUT_CAPTURE_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EvolutionProposal {
@@ -1144,10 +1145,11 @@ impl EvolutionStore {
 
     fn run_validation_command(&self, command: Vec<String>) -> EvolutionCommandCheck {
         let started = Instant::now();
-        let output = Command::new(&command[0])
-            .args(&command[1..])
-            .current_dir(&self.project_root)
-            .output();
+        let output = run_limited_validation_command(
+            &command,
+            &self.project_root,
+            VALIDATION_OUTPUT_CAPTURE_BYTES,
+        );
         let duration_ms = started.elapsed().as_millis();
         match output {
             Ok(output) => EvolutionCommandCheck {
@@ -1159,8 +1161,8 @@ impl EvolutionStore {
                 },
                 exit_code: output.status.code(),
                 duration_ms,
-                stdout: truncate_log(&String::from_utf8_lossy(&output.stdout)),
-                stderr: truncate_log(&String::from_utf8_lossy(&output.stderr)),
+                stdout: format_limited_log(&output.stdout, output.stdout_truncated),
+                stderr: format_limited_log(&output.stderr, output.stderr_truncated),
             },
             Err(_) => EvolutionCommandCheck {
                 command,
@@ -2248,6 +2250,90 @@ fn bail_if_empty_id(id: &str, kind: &str) -> Result<()> {
     Ok(())
 }
 
+struct LimitedValidationOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+}
+
+fn run_limited_validation_command(
+    command: &[String],
+    cwd: &Path,
+    max_stream_bytes: usize,
+) -> Result<LimitedValidationOutput, std::io::Error> {
+    let mut child = Command::new(&command[0])
+        .args(&command[1..])
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("failed to capture validation stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("failed to capture validation stderr"))?;
+
+    let stdout_handle = std::thread::spawn(move || read_limited_stream(stdout, max_stream_bytes));
+    let stderr_handle = std::thread::spawn(move || read_limited_stream(stderr, max_stream_bytes));
+    let status = child.wait()?;
+    let (stdout, stdout_truncated) = stdout_handle
+        .join()
+        .unwrap_or_else(|_| Err(std::io::Error::other("validation stdout reader panicked")))?;
+    let (stderr, stderr_truncated) = stderr_handle
+        .join()
+        .unwrap_or_else(|_| Err(std::io::Error::other("validation stderr reader panicked")))?;
+
+    Ok(LimitedValidationOutput {
+        status,
+        stdout,
+        stderr,
+        stdout_truncated,
+        stderr_truncated,
+    })
+}
+
+fn read_limited_stream<R: Read>(
+    mut reader: R,
+    max_bytes: usize,
+) -> Result<(Vec<u8>, bool), std::io::Error> {
+    let mut collected = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0u8; 8192];
+
+    loop {
+        let bytes_read = reader.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        let remaining = max_bytes.saturating_sub(collected.len());
+        let keep = bytes_read.min(remaining);
+        if keep > 0 {
+            collected.extend_from_slice(&buffer[..keep]);
+        }
+        if keep < bytes_read || collected.len() >= max_bytes {
+            truncated = true;
+        }
+    }
+
+    Ok((collected, truncated))
+}
+
+fn format_limited_log(bytes: &[u8], truncated: bool) -> String {
+    let mut text = String::from_utf8_lossy(bytes).to_string();
+    if truncated {
+        if !text.ends_with('\n') && !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str("[output truncated]");
+    }
+    truncate_log(&text)
+}
+
 fn truncate_log(text: &str) -> String {
     const LIMIT: usize = 16_000;
     if text.len() <= LIMIT {
@@ -2311,6 +2397,23 @@ mod tests {
         let rollback = store.rollback_apply(&apply.id).expect("rollback");
         assert_eq!(rollback.status, EvolutionRollbackStatus::RolledBack);
         assert!(!temp.path().join(touched).exists());
+    }
+
+    #[test]
+    fn limited_stream_reader_caps_output() {
+        let input = std::io::Cursor::new("界".repeat(2000).into_bytes());
+        let (bytes, truncated) = read_limited_stream(input, 4096).expect("limited stream");
+
+        assert_eq!(bytes.len(), 4096);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn limited_log_marks_truncated_output() {
+        let output = format_limited_log("hello".as_bytes(), true);
+
+        assert!(output.contains("hello"));
+        assert!(output.contains("[output truncated]"));
     }
 
     #[test]
