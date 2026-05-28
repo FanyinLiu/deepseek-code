@@ -6,11 +6,13 @@
 //!
 //! Pagination via `offset`/`limit` happens at the line level after extraction.
 
+use std::io::Read;
 use std::path::Path;
 
 const SCANNED_PDF_HINT: &str =
     "[no extractable text — this looks like a scanned PDF. OCR is not built in; \
      run the file through an OCR tool first.]";
+const MAX_PDF_BYTES: u64 = 10 * 1024 * 1024;
 
 pub fn render(
     path: &Path,
@@ -18,7 +20,7 @@ pub fn render(
     offset: Option<usize>,
     limit: Option<usize>,
 ) -> Result<String, anyhow::Error> {
-    let bytes = std::fs::read(path)?;
+    let bytes = read_pdf_bytes_capped(path)?;
     let text = pdf_extract::extract_text_from_mem(&bytes)
         .map_err(|e| anyhow::anyhow!("pdf parse failed: {e}"))?;
 
@@ -54,6 +56,21 @@ pub fn render(
     Ok(out)
 }
 
+fn read_pdf_bytes_capped(path: &Path) -> Result<Vec<u8>, anyhow::Error> {
+    let size = std::fs::metadata(path)?.len();
+    if size > MAX_PDF_BYTES {
+        anyhow::bail!("file too large: {size} bytes, cap {MAX_PDF_BYTES}");
+    }
+    let file = std::fs::File::open(path)?;
+    let mut reader = file.take(MAX_PDF_BYTES.saturating_add(1));
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_PDF_BYTES {
+        anyhow::bail!("file too large: {} bytes, cap {MAX_PDF_BYTES}", bytes.len());
+    }
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,5 +84,17 @@ mod tests {
             None,
         );
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn oversized_pdf_is_rejected_before_full_read() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("large.pdf");
+        let file = std::fs::File::create(&path).expect("create pdf");
+        file.set_len(MAX_PDF_BYTES + 1).expect("extend pdf");
+
+        let error = render(&path, "large.pdf", None, None).expect_err("large pdf should fail");
+
+        assert!(error.to_string().contains("file too large"));
     }
 }
