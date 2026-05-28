@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
@@ -33,6 +33,8 @@ use tokio::task::JoinHandle;
 use crate::policy::sandbox::{command_invocation, CommandSandboxConfig};
 
 const MAX_LINES_PER_SHELL: usize = 4096;
+const MAX_LINE_BYTES_PER_SHELL: usize = 64 * 1024;
+const TRUNCATED_LINE_MARKER: &str = " [line truncated]";
 
 /// One running background shell.
 pub struct BackgroundShell {
@@ -66,6 +68,18 @@ impl ShellState {
             stderr_truncated: false,
             exit_code: None,
             finished_at: None,
+        }
+    }
+
+    fn push_stdout_line(&mut self, line: String, line_truncated: bool) {
+        if push_bounded_line(&mut self.stdout_lines, line, line_truncated) {
+            self.stdout_truncated = true;
+        }
+    }
+
+    fn push_stderr_line(&mut self, line: String, line_truncated: bool) {
+        if push_bounded_line(&mut self.stderr_lines, line, line_truncated) {
+            self.stderr_truncated = true;
         }
     }
 }
@@ -241,16 +255,14 @@ impl BackgroundShell {
         let stdout_task = {
             let state = state.clone();
             tokio::spawn(async move {
-                let mut reader = BufReader::new(stdout).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
+                let mut reader = BufReader::new(stdout);
+                while let Ok(Some((line, line_truncated))) =
+                    read_limited_output_line(&mut reader, MAX_LINE_BYTES_PER_SHELL).await
+                {
                     let mut s = state
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if s.stdout_lines.len() >= MAX_LINES_PER_SHELL {
-                        s.stdout_truncated = true;
-                        s.stdout_lines.remove(0);
-                    }
-                    s.stdout_lines.push(line);
+                    s.push_stdout_line(line, line_truncated);
                 }
             })
         };
@@ -258,16 +270,14 @@ impl BackgroundShell {
         let stderr_task = {
             let state = state.clone();
             tokio::spawn(async move {
-                let mut reader = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
+                let mut reader = BufReader::new(stderr);
+                while let Ok(Some((line, line_truncated))) =
+                    read_limited_output_line(&mut reader, MAX_LINE_BYTES_PER_SHELL).await
+                {
                     let mut s = state
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if s.stderr_lines.len() >= MAX_LINES_PER_SHELL {
-                        s.stderr_truncated = true;
-                        s.stderr_lines.remove(0);
-                    }
-                    s.stderr_lines.push(line);
+                    s.push_stderr_line(line, line_truncated);
                 }
             })
         };
@@ -370,6 +380,61 @@ fn shell_program() -> (&'static str, &'static str) {
     } else {
         ("sh", "-c")
     }
+}
+
+fn push_bounded_line(lines: &mut Vec<String>, line: String, line_truncated: bool) -> bool {
+    let mut truncated = line_truncated;
+    if lines.len() >= MAX_LINES_PER_SHELL {
+        truncated = true;
+        lines.remove(0);
+    }
+    lines.push(line);
+    truncated
+}
+
+async fn read_limited_output_line<R>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> std::io::Result<Option<(String, bool)>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    let mut truncated = false;
+
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+
+        let newline_offset = available.iter().position(|byte| *byte == b'\n');
+        let take = newline_offset.map_or(available.len(), |offset| offset + 1);
+        let remaining = max_bytes.saturating_sub(bytes.len());
+        let keep = remaining.min(take);
+        if keep > 0 {
+            bytes.extend_from_slice(&available[..keep]);
+        }
+        if take > remaining {
+            truncated = true;
+        }
+
+        reader.consume(take);
+        if newline_offset.is_some() {
+            break;
+        }
+    }
+
+    let mut line = String::from_utf8_lossy(&bytes)
+        .trim_end_matches(['\r', '\n'])
+        .to_string();
+    if truncated {
+        line.push_str(TRUNCATED_LINE_MARKER);
+    }
+    Ok(Some((line, truncated)))
 }
 
 #[cfg(test)]
@@ -487,6 +552,36 @@ mod tests {
             }
         }
         panic!("background shell did not produce env output in time");
+    }
+
+    #[tokio::test]
+    async fn background_output_line_is_byte_limited() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let cmd = "powershell -NoProfile -Command \"$s='x'*70000; Write-Output $s\"";
+        #[cfg(not(windows))]
+        let cmd = "awk 'BEGIN { for (i = 0; i < 70000; i++) printf \"x\"; printf \"\\n\" }'";
+
+        let registry = BackgroundShellsRegistry::default();
+        let id = registry.spawn(cmd, temp.path()).await.unwrap();
+
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let snap = registry.get(&id).unwrap().snapshot(0, 0);
+            if snap.exit_code.is_some() && !snap.stdout.is_empty() {
+                assert!(snap.stdout_truncated);
+                assert!(snap.stdout.contains(TRUNCATED_LINE_MARKER));
+                assert!(
+                    snap.stdout.len() < 66_000,
+                    "stdout should be capped, got {} bytes",
+                    snap.stdout.len()
+                );
+                let _ = registry.kill(&id).await;
+                return;
+            }
+        }
+
+        panic!("background shell did not produce capped output in time");
     }
 
     #[cfg(unix)]
