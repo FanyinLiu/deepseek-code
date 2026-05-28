@@ -14,6 +14,10 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
+const DEFAULT_HEAD_LIMIT: usize = 250;
+const MAX_HEAD_LIMIT: usize = 2000;
+const MAX_CONTEXT_LINES: usize = 20;
+
 #[derive(Debug, Clone, Copy, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputMode {
@@ -62,9 +66,12 @@ pub fn grep(project_root: &Path, args: GrepArgs) -> Result<String> {
         .transpose()
         .with_context(|| "invalid glob filter")?;
 
-    let head_limit = args.head_limit.unwrap_or(250);
-    let before = args.before.unwrap_or(0);
-    let after = args.after.unwrap_or(0);
+    let head_limit = args
+        .head_limit
+        .unwrap_or(DEFAULT_HEAD_LIMIT)
+        .clamp(1, MAX_HEAD_LIMIT);
+    let before = args.before.unwrap_or(0).min(MAX_CONTEXT_LINES);
+    let after = args.after.unwrap_or(0).min(MAX_CONTEXT_LINES);
 
     let mut file_hits: Vec<FileHit> = Vec::new();
     let mut emitted = 0usize;
@@ -226,4 +233,46 @@ fn format_output(
         ));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grep_caps_content_context_lines() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut lines = Vec::new();
+        for line in 1..=60 {
+            if line == 31 {
+                lines.push("needle".to_string());
+            } else {
+                lines.push(format!("line {line}"));
+            }
+        }
+        std::fs::write(temp.path().join("notes.txt"), lines.join("\n")).expect("write notes");
+
+        let output = grep(
+            temp.path(),
+            GrepArgs {
+                pattern: "needle".to_string(),
+                path: None,
+                glob: None,
+                output_mode: OutputMode::Content,
+                case_insensitive: false,
+                multiline: false,
+                before: Some(usize::MAX),
+                after: Some(usize::MAX),
+                head_limit: None,
+                show_line_numbers: true,
+            },
+        )
+        .expect("grep output");
+
+        assert!(!output.contains("| line 10\n"), "{output}");
+        assert!(output.contains("| line 11\n"), "{output}");
+        assert!(output.contains(">     31 | needle\n"), "{output}");
+        assert!(output.contains("| line 51\n"), "{output}");
+        assert!(!output.contains("| line 52\n"), "{output}");
+    }
 }
