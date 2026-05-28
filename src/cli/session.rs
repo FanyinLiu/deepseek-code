@@ -93,7 +93,7 @@ fn export(
     let format = transcript_format(format);
     let output = storage::export_transcript(&session, format);
     let filename = format!("session-{session_id}.{}", transcript_extension(format));
-    std::fs::write(&filename, output)?;
+    crate::storage::atomic::write_text_atomic(Path::new(&filename), &output)?;
     println!("Session exported to: {filename}");
     Ok(())
 }

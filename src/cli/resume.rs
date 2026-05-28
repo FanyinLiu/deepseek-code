@@ -139,7 +139,7 @@ pub async fn export(
         let fmt = transcript_format(format.as_deref());
         let output = storage::export_transcript(&session, fmt);
         let filename = format!("session-{sid}.{}", transcript_extension(fmt));
-        std::fs::write(&filename, output)?;
+        crate::storage::atomic::write_text_atomic(Path::new(&filename), &output)?;
         println!("Session exported to: {filename}");
     } else {
         // Export latest session
@@ -149,7 +149,7 @@ pub async fn export(
             let fmt = transcript_format(format.as_deref());
             let output = storage::export_transcript(&session, fmt);
             let filename = format!("session-{}.{}", latest.id, transcript_extension(fmt));
-            std::fs::write(&filename, output)?;
+            crate::storage::atomic::write_text_atomic(Path::new(&filename), &output)?;
             println!("Latest session exported to: {filename}");
         } else {
             println!("No sessions found for this project.");

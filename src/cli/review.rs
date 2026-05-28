@@ -107,7 +107,7 @@ pub async fn review(
     let report = synthesize_report(&all_results, &root);
 
     if let Some(out_path) = output {
-        std::fs::write(&out_path, &report)?;
+        crate::storage::atomic::write_text_atomic(&out_path, &report)?;
         println!("\n📄 Review report saved to: {}", out_path.display());
     } else {
         println!("\n{report}");
