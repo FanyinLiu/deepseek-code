@@ -5104,17 +5104,14 @@ fn recalculate_swarm_counts(swarm: &mut SwarmViewState) {
 }
 
 fn plan_steps_hash(steps: &[plan_tracker::PlanStepItem]) -> u64 {
-    let state = steps
-        .iter()
-        .map(|step| {
-            (
-                step.description.as_str(),
-                plan_step_status_tag(step.status),
-                step.duration_ms,
-            )
-        })
-        .collect::<Vec<_>>();
-    stable_hash(&state)
+    let mut hasher = DefaultHasher::new();
+    steps.len().hash(&mut hasher);
+    for step in steps {
+        step.description.hash(&mut hasher);
+        plan_step_status_tag(step.status).hash(&mut hasher);
+        step.duration_ms.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn plan_step_status_tag(status: plan_tracker::PlanStepStatus) -> u8 {
@@ -5127,25 +5124,22 @@ fn plan_step_status_tag(status: plan_tracker::PlanStepStatus) -> u8 {
 }
 
 fn subagents_hash(cards: &[subagent_cards::SubagentCard]) -> u64 {
-    let state = cards
-        .iter()
-        .map(|card| {
-            (
-                card.agent_id.as_str(),
-                card.agent_type.as_str(),
-                card.description.as_str(),
-                subagent_status_tag(&card.status),
-                card.last_update.as_deref(),
-                card.summary.as_deref(),
-                card.duration_ms,
-                card.files_read,
-                card.files_written,
-                card.token_usage,
-                card.is_background,
-            )
-        })
-        .collect::<Vec<_>>();
-    stable_hash(&state)
+    let mut hasher = DefaultHasher::new();
+    cards.len().hash(&mut hasher);
+    for card in cards {
+        card.agent_id.hash(&mut hasher);
+        card.agent_type.hash(&mut hasher);
+        card.description.hash(&mut hasher);
+        subagent_status_tag(&card.status).hash(&mut hasher);
+        card.last_update.hash(&mut hasher);
+        card.summary.hash(&mut hasher);
+        card.duration_ms.hash(&mut hasher);
+        card.files_read.hash(&mut hasher);
+        card.files_written.hash(&mut hasher);
+        card.token_usage.hash(&mut hasher);
+        card.is_background.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn subagent_status_tag(status: &subagent_cards::SubagentCardStatus) -> u8 {
