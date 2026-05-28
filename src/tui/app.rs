@@ -34,6 +34,8 @@ use tokio::task::JoinHandle;
 const PAGE_SCROLL_LINES: usize = 20;
 const MOUSE_SCROLL_LINES: usize = 5;
 const TUI_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+const COMPLETION_PANEL_MAX_HEIGHT: u16 = 9;
+const SHELL_HINT_PANEL_HEIGHT: u16 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InputState {
@@ -1203,11 +1205,20 @@ impl TuiApp {
 
     fn render_option_height(&self, state: &RenderOptionState, chrome: usize, max: u16) -> u16 {
         let count = self.render_option_count(state);
-        if count > 0 {
-            (count + chrome).min(max as usize) as u16
-        } else {
-            0
+        if count == 0 {
+            return 0;
         }
+
+        if self.options_needed.is_some() || self.pending_options.is_some() {
+            return (count + chrome).min(max as usize) as u16;
+        }
+
+        if state.shell_hint_active {
+            return SHELL_HINT_PANEL_HEIGHT.min(max);
+        }
+
+        let max = max.min(COMPLETION_PANEL_MAX_HEIGHT);
+        (count + 2).min(max as usize) as u16
     }
 
     fn input_pending_options<'a>(&'a self, state: &'a RenderOptionState) -> Option<&'a [String]> {
@@ -10023,6 +10034,14 @@ mod tests {
         let command_state = app.render_option_state();
         assert!(!command_state.slash_suggestions.is_empty());
         assert!(app.render_option_height(&command_state, 5, 12) > 0);
+        assert!(app.render_option_height(&command_state, 5, 12) <= COMPLETION_PANEL_MAX_HEIGHT);
+
+        app.pending_options = Some((
+            "Choose".to_string(),
+            (1..=10).map(|idx| format!("Option {idx}")).collect(),
+        ));
+        assert_eq!(app.render_option_height(&command_state, 5, 12), 12);
+        app.pending_options = None;
 
         app.history_search_active = true;
         app.input_history = vec!["cargo test".to_string(), "/doctor".to_string()];
