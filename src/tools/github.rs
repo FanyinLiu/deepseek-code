@@ -1,10 +1,14 @@
 //! GitHub PR integration helpers.
 
-use reqwest;
+use bytes::Bytes;
+use futures::{Stream, StreamExt};
 use serde_json::Value;
 
 const BASE_URL: &str = "https://api.github.com";
 const USER_AGENT: &str = "octocode/0.1.0";
+const MAX_GITHUB_JSON_BYTES: usize = 2 * 1024 * 1024;
+const MAX_GITHUB_DIFF_BYTES: usize = 2 * 1024 * 1024;
+const MAX_GITHUB_ERROR_BODY_BYTES: usize = 64 * 1024;
 
 fn build_client() -> Result<reqwest::Client, anyhow::Error> {
     let mut headers = reqwest::header::HeaderMap::new();
@@ -34,10 +38,10 @@ pub async fn list_prs(owner: &str, repo: &str, state: &str) -> Result<String, an
     let resp = client.get(&url).send().await?;
     let status = resp.status();
     if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
+        let text = github_error_body(resp).await;
         anyhow::bail!("GitHub API error {}: {}", status, text);
     }
-    let json: Value = resp.json().await?;
+    let json = response_json_capped(resp, MAX_GITHUB_JSON_BYTES).await?;
     Ok(format_pr_list(&json))
 }
 
@@ -48,10 +52,10 @@ pub async fn get_pr(owner: &str, repo: &str, number: u64) -> Result<String, anyh
     let resp = client.get(&url).send().await?;
     let status = resp.status();
     if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
+        let text = github_error_body(resp).await;
         anyhow::bail!("GitHub API error {}: {}", status, text);
     }
-    let json: Value = resp.json().await?;
+    let json = response_json_capped(resp, MAX_GITHUB_JSON_BYTES).await?;
     Ok(format_pr_detail(&json))
 }
 
@@ -66,10 +70,10 @@ pub async fn get_pr_diff(owner: &str, repo: &str, number: u64) -> Result<String,
         .await?;
     let status = resp.status();
     if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
+        let text = github_error_body(resp).await;
         anyhow::bail!("GitHub API error {}: {}", status, text);
     }
-    let body = resp.text().await?;
+    let body = response_text_capped(resp, MAX_GITHUB_DIFF_BYTES).await?;
     Ok(format!("# PR {} Diff\n\n```diff\n{}\n```", number, body))
 }
 
@@ -92,11 +96,65 @@ pub async fn comment_pr(
     let resp = client.post(&url).json(&payload).send().await?;
     let status = resp.status();
     if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
+        let text = github_error_body(resp).await;
         anyhow::bail!("GitHub API error {}: {}", status, text);
     }
-    let json: Value = resp.json().await?;
+    let json = response_json_capped(resp, MAX_GITHUB_JSON_BYTES).await?;
     Ok(format_comment_response(&json))
+}
+
+async fn github_error_body(response: reqwest::Response) -> String {
+    response_text_capped(response, MAX_GITHUB_ERROR_BODY_BYTES)
+        .await
+        .unwrap_or_else(|error| format!("[response body unavailable: {error}]"))
+}
+
+async fn response_json_capped(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Value, anyhow::Error> {
+    let bytes = response_bytes_capped(response, max_bytes).await?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+async fn response_text_capped(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<String, anyhow::Error> {
+    let bytes = response_bytes_capped(response, max_bytes).await?;
+    Ok(String::from_utf8_lossy(&bytes).to_string())
+}
+
+async fn response_bytes_capped(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, anyhow::Error> {
+    if let Some(content_length) = response.content_length() {
+        if content_length > max_bytes as u64 {
+            anyhow::bail!(
+                "response too large: {content_length} bytes exceeds {max_bytes} byte limit"
+            );
+        }
+    }
+    collect_limited_body(response.bytes_stream(), max_bytes).await
+}
+
+async fn collect_limited_body<S, E>(stream: S, max_bytes: usize) -> Result<Vec<u8>, anyhow::Error>
+where
+    S: Stream<Item = Result<Bytes, E>>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    futures::pin_mut!(stream);
+
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            anyhow::bail!("response too large: exceeds {max_bytes} byte limit");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn format_pr_list(value: &Value) -> String {
@@ -232,5 +290,21 @@ mod tests {
         let text = format_comment_response(&json);
         assert!(text.contains("12345"));
         assert!(text.contains("https://github.com/owner/repo/issues/1#issuecomment-12345"));
+    }
+
+    #[tokio::test]
+    async fn test_collect_limited_body_rejects_large_response() {
+        let chunks = futures::stream::iter(vec![
+            Ok::<_, std::io::Error>(Bytes::from_static(b"12345")),
+            Ok::<_, std::io::Error>(Bytes::from_static(b"67890")),
+        ]);
+
+        let error = collect_limited_body(chunks, 8)
+            .await
+            .expect_err("body over limit should fail");
+        assert!(
+            error.to_string().contains("response too large"),
+            "unexpected error: {error}"
+        );
     }
 }
