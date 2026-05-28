@@ -1,5 +1,6 @@
 //! Web search using DuckDuckGo HTML (no API key required).
-use reqwest;
+use bytes::Bytes;
+use futures::{Stream, StreamExt};
 
 /// A single search result.
 #[derive(Debug, PartialEq)]
@@ -8,6 +9,8 @@ struct SearchResult {
     url: String,
     snippet: String,
 }
+
+const MAX_SEARCH_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Search the web via DuckDuckGo HTML and return a plain-text result list.
 ///
@@ -33,7 +36,17 @@ pub async fn web_search(query: &str, limit: usize) -> Result<String, anyhow::Err
         anyhow::bail!("HTTP {status} for DuckDuckGo search");
     }
 
-    let body = response.text().await?;
+    if let Some(content_length) = response.content_length() {
+        if content_length > MAX_SEARCH_RESPONSE_BYTES as u64 {
+            anyhow::bail!(
+                "response too large: {content_length} bytes exceeds {MAX_SEARCH_RESPONSE_BYTES} byte limit"
+            );
+        }
+    }
+
+    let body_bytes =
+        collect_limited_body(response.bytes_stream(), MAX_SEARCH_RESPONSE_BYTES).await?;
+    let body = String::from_utf8_lossy(&body_bytes);
     let results = parse_ddg_results(&body);
     let trimmed: Vec<_> = results.into_iter().take(limit).collect();
 
@@ -42,6 +55,24 @@ pub async fn web_search(query: &str, limit: usize) -> Result<String, anyhow::Err
     } else {
         Ok(format_results(&trimmed))
     }
+}
+
+async fn collect_limited_body<S, E>(stream: S, max_bytes: usize) -> Result<Vec<u8>, anyhow::Error>
+where
+    S: Stream<Item = Result<Bytes, E>>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    futures::pin_mut!(stream);
+
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            anyhow::bail!("response too large: exceeds {max_bytes} byte limit");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 /// Percent-encode a query string for `application/x-www-form-urlencoded`.
@@ -266,5 +297,21 @@ mod tests {
         assert!(formatted.contains("2. Title Two"));
         assert!(formatted.contains("https://two.com"));
         assert!(formatted.contains("Snippet two."));
+    }
+
+    #[tokio::test]
+    async fn test_collect_limited_body_rejects_large_response() {
+        let chunks = futures::stream::iter(vec![
+            Ok::<_, std::io::Error>(Bytes::from_static(b"12345")),
+            Ok::<_, std::io::Error>(Bytes::from_static(b"67890")),
+        ]);
+
+        let error = collect_limited_body(chunks, 8)
+            .await
+            .expect_err("body over limit should fail");
+        assert!(
+            error.to_string().contains("response too large"),
+            "unexpected error: {error}"
+        );
     }
 }
