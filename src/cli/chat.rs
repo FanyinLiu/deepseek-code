@@ -168,9 +168,8 @@ pub async fn chat(
             }
         }
         let mut orch = orchestrator.take().expect("orchestrator already consumed");
-        let p_for_turn = p.clone();
         let turn_handle = tokio::spawn(async move {
-            let result = orch.run_turn(&p_for_turn, ev_tx).await;
+            let result = orch.run_turn(&p, ev_tx).await;
             (orch, result)
         });
 
@@ -541,10 +540,9 @@ pub async fn chat(
             // concurrently instead of deadlocking when the orchestrator waits
             // for a response while we are still awaiting run_turn.
             let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel();
-            let input_for_turn = input.clone();
             let mut orch = orchestrator.take().expect("orchestrator already consumed");
             let turn_handle = tokio::spawn(async move {
-                let result = orch.run_turn(&input_for_turn, ev_tx).await;
+                let result = orch.run_turn(&input, ev_tx).await;
                 (orch, result)
             });
 

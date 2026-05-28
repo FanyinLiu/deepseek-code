@@ -920,7 +920,7 @@ impl Orchestrator {
         let changed_files = result
             .pending_patches
             .iter()
-            .flat_map(|patch| patch.changed_files.clone())
+            .flat_map(|patch| patch.changed_files.iter().cloned())
             .collect::<Vec<_>>();
 
         if let Err(error) =

@@ -2250,7 +2250,7 @@ impl TuiApp {
             return Vec::new();
         }
 
-        let language = self.config.ui.language.clone();
+        let language = self.config.ui.language.as_str();
         {
             let cache = self.slash_suggestion_cache.borrow();
             if cache.prefix == trimmed && cache.language == language {
@@ -2282,9 +2282,9 @@ impl TuiApp {
                             crate::commands::localized_command_description(
                                 cmd.name,
                                 cmd.description,
-                                &language,
+                                language,
                             ),
-                            crate::commands::localized_command_usage(cmd.usage, &language),
+                            crate::commands::localized_command_usage(cmd.usage, language),
                         ),
                     )
                 }
@@ -2297,7 +2297,7 @@ impl TuiApp {
         {
             let mut cache = self.slash_suggestion_cache.borrow_mut();
             cache.prefix = trimmed.to_string();
-            cache.language = language;
+            cache.language = language.to_string();
             cache.suggestions = suggestions.clone();
         }
         suggestions
