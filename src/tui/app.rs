@@ -1624,7 +1624,8 @@ impl TuiApp {
                 self.status_message = format!("{changed} · saved {}", path.to_string_lossy());
             }
             Err(err) => {
-                self.status_message = format!("Setting changed but save failed: {err}");
+                self.status_message =
+                    format!("Setting applied in this session, but couldn't persist: {err}");
             }
         }
     }
@@ -3252,7 +3253,7 @@ impl TuiApp {
 
     fn finish_api_key_save_error(&mut self, error: &anyhow::Error) {
         self.set_api_key_state(ApiKeyState::Error);
-        self.status_message = format!("API key save failed: {error}");
+        self.status_message = format!("Couldn't save the API key just now: {error}");
         self.stream_buffer = format!(
             "Could not save API key.\n\n{error}\n\nTry again, or run `octo login --api-key <key>`."
         );
@@ -7096,7 +7097,7 @@ pub async fn run_tui(
                     app.pending_user_message = None;
                     app.refresh_welcome(&root);
                     if let Some(error) = run_error {
-                        app.status_message = format!("Turn failed: {error}");
+                        app.status_message = format!("This turn didn't finish: {error}");
                     }
                     app.session_id = Some(returned_orchestrator.session.id);
                     orchestrator = Some(returned_orchestrator);
@@ -7112,7 +7113,7 @@ pub async fn run_tui(
                     app.is_streaming = false;
                     app.stream_start = None;
                     app.pending_user_message = None;
-                    app.status_message = format!("Turn task failed: {error}");
+                    app.status_message = format!("Turn task ended early: {error}");
                 }
             }
         }
