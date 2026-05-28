@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Mutex;
@@ -12,7 +12,7 @@ const APPLY_PATCH_STDERR_BYTES: usize = 256 * 1024;
 struct EditRecord {
     turn_id: String,
     path: PathBuf,
-    original: String,
+    original: Option<String>,
     at: DateTime<Utc>,
 }
 
@@ -27,7 +27,7 @@ pub fn set_current_turn_id(id: &str) {
     }
 }
 
-fn push_history(path: PathBuf, original: String) {
+fn push_history(path: PathBuf, original: Option<String>) {
     let turn_id = CURRENT_TURN_ID
         .lock()
         .map(|t| t.clone())
@@ -54,14 +54,7 @@ pub fn undo_last_change(project_root: &Path) -> Result<String, anyhow::Error> {
     let record = history
         .pop()
         .ok_or_else(|| anyhow::anyhow!("no changes to undo"))?;
-    std::fs::write(&record.path, &record.original)?;
-    let relative = record
-        .path
-        .strip_prefix(project_root)
-        .unwrap_or(&record.path)
-        .to_string_lossy()
-        .to_string();
-    Ok(relative)
+    restore_record(project_root, record)
 }
 
 /// Undo the last `n` changes. Returns restored relative paths.
@@ -72,16 +65,27 @@ pub fn undo_n_changes(project_root: &Path, n: usize) -> Result<Vec<String>, anyh
     let mut restored = Vec::new();
     for _ in 0..n {
         let Some(record) = history.pop() else { break };
-        std::fs::write(&record.path, &record.original)?;
-        let relative = record
-            .path
-            .strip_prefix(project_root)
-            .unwrap_or(&record.path)
-            .to_string_lossy()
-            .to_string();
-        restored.push(relative);
+        restored.push(restore_record(project_root, record)?);
     }
     Ok(restored)
+}
+
+fn restore_record(project_root: &Path, record: EditRecord) -> Result<String, anyhow::Error> {
+    match record.original {
+        Some(original) => std::fs::write(&record.path, original)?,
+        None => match std::fs::remove_file(&record.path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        },
+    }
+    let relative = record
+        .path
+        .strip_prefix(project_root)
+        .unwrap_or(&record.path)
+        .to_string_lossy()
+        .to_string();
+    Ok(relative)
 }
 
 /// Get edit history grouped by turn.
@@ -178,12 +182,12 @@ pub fn apply_edit(
     let file_path = resolve_for_write(project_root, relative_path)?;
 
     // Read original
-    let original = if file_path.exists() {
+    let file_existed = file_path.exists();
+    let original = if file_existed {
         crate::storage::read_text_file_capped(&file_path)?
     } else {
         String::new()
     };
-    push_history(file_path.clone(), original.clone());
 
     // Check uniqueness
     let occurrences = original.matches(old_string).count();
@@ -198,6 +202,7 @@ pub fn apply_edit(
 
     // Apply
     let modified = original.replacen(old_string, new_string, 1);
+    push_history(file_path.clone(), file_existed.then_some(original.clone()));
     std::fs::create_dir_all(
         file_path
             .parent()
@@ -224,9 +229,9 @@ pub fn apply_write(
     let file_path = resolve_for_write(project_root, relative_path)?;
 
     let original = if file_path.exists() {
-        crate::storage::read_text_file_capped(&file_path)?
+        Some(crate::storage::read_text_file_capped(&file_path)?)
     } else {
-        String::new()
+        None
     };
     push_history(file_path.clone(), original.clone());
 
@@ -237,7 +242,7 @@ pub fn apply_write(
     )?;
     std::fs::write(&file_path, content)?;
 
-    let diff = super::diff::unified_diff(&original, content, relative_path);
+    let diff = super::diff::unified_diff(original.as_deref().unwrap_or(""), content, relative_path);
     let stats = super::diff::diff_stats(&diff);
 
     Ok(DiffResult {
@@ -435,6 +440,13 @@ pub fn apply_patch(project_root: &Path, patch: &str) -> Result<(), anyhow::Error
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static HISTORY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn history_test_guard() -> MutexGuard<'static, ()> {
+        HISTORY_TEST_LOCK.lock().expect("history test lock")
+    }
 
     #[test]
     fn apply_patch_reports_missing_git_clearly() {
@@ -489,6 +501,44 @@ rename to new.txt
                 "old.rs".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn undo_write_removes_new_file() {
+        let _guard = history_test_guard();
+        clear_history();
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("new.txt");
+
+        apply_write(root.path(), "new.txt", "created").expect("write file");
+        assert!(path.exists());
+
+        let restored = undo_last_change(root.path()).expect("undo write");
+
+        assert_eq!(restored, "new.txt");
+        assert!(!path.exists());
+        clear_history();
+    }
+
+    #[test]
+    fn failed_edit_does_not_add_undo_history() {
+        let _guard = history_test_guard();
+        clear_history();
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("tracked.txt");
+        std::fs::write(&path, "original").expect("write original");
+
+        let error = apply_edit(root.path(), "tracked.txt", "missing", "updated")
+            .expect_err("edit should fail");
+
+        assert!(error.to_string().contains("old_string not found"));
+        let undo_error = undo_last_change(root.path()).expect_err("history should be empty");
+        assert_eq!(undo_error.to_string(), "no changes to undo");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read original"),
+            "original"
+        );
+        clear_history();
     }
 
     #[test]
