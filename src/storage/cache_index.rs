@@ -18,7 +18,7 @@ impl CacheIndex {
         std::fs::create_dir_all(&dir)?;
 
         let path = dir.join(sanitize_key(key));
-        std::fs::write(&path, value)?;
+        crate::storage::atomic::write_text_atomic(&path, value)?;
         Ok(())
     }
 

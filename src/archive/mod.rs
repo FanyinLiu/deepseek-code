@@ -2,7 +2,6 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -123,7 +122,7 @@ impl ArchiveStore {
             failure_reason: input.failure_reason,
         };
         let path = self.candidates_dir().join(format!("{}.json", candidate.id));
-        fs::write(&path, serde_json::to_string_pretty(&candidate)?)
+        crate::storage::atomic::write_json_pretty_atomic(&path, &candidate)
             .with_context(|| format!("write {}", path.display()))?;
         self.append_lineage(LineageEvent {
             event: "candidate_created".to_string(),
@@ -230,12 +229,8 @@ impl ArchiveStore {
     }
 
     fn append_lineage(&self, event: LineageEvent) -> Result<()> {
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.root.join("lineage.jsonl"))
-            .with_context(|| format!("open {}", self.root.join("lineage.jsonl").display()))?;
-        writeln!(file, "{}", serde_json::to_string(&event)?)
+        let path = self.root.join("lineage.jsonl");
+        crate::storage::atomic::append_jsonl_locked(&path, &serde_json::to_string(&event)?)
             .with_context(|| format!("append {}", self.root.join("lineage.jsonl").display()))?;
         Ok(())
     }

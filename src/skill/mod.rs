@@ -2,7 +2,6 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::repair::{RepairRun, REPAIR_DIR};
@@ -106,18 +105,19 @@ impl SkillStore {
             last_used_at: None,
             tags: skill_tags(&run),
         };
-        fs::write(
-            skill_dir.join("metadata.json"),
-            serde_json::to_string_pretty(&metadata)?,
+        crate::storage::atomic::write_json_pretty_atomic(
+            &skill_dir.join("metadata.json"),
+            &metadata,
         )
         .with_context(|| format!("write {}", skill_dir.join("metadata.json").display()))?;
-        fs::write(
-            skill_dir.join("SKILL.md"),
-            render_skill_markdown(&metadata, &run),
+        crate::storage::atomic::write_text_atomic(
+            &skill_dir.join("SKILL.md"),
+            &render_skill_markdown(&metadata, &run),
         )
         .with_context(|| format!("write {}", skill_dir.join("SKILL.md").display()))?;
         append_trace(
             &skill_dir,
+            "skill_draft_created",
             &format!("draft skill generated from repair run {}", run.id),
         )?;
         Ok(metadata)
@@ -259,10 +259,11 @@ impl SkillStore {
         } else {
             metadata.failure_count = metadata.failure_count.saturating_add(1);
         }
-        fs::write(&metadata_path, serde_json::to_string_pretty(&metadata)?)
+        crate::storage::atomic::write_json_pretty_atomic(&metadata_path, &metadata)
             .with_context(|| format!("write {}", metadata_path.display()))?;
         append_trace(
             &skill_dir,
+            "skill_used",
             &format!("skill used by repair run {run_id}; success={success}"),
         )?;
         Ok(())
@@ -489,20 +490,15 @@ fn check_exists(name: &str, path: PathBuf) -> SkillTestCheck {
     }
 }
 
-fn append_trace(skill_dir: &Path, summary: &str) -> Result<()> {
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(skill_dir.join("traces.jsonl"))
-        .with_context(|| format!("open {}", skill_dir.join("traces.jsonl").display()))?;
-    writeln!(
-        file,
-        "{}",
-        serde_json::to_string(&serde_json::json!({
+fn append_trace(skill_dir: &Path, event: &str, summary: &str) -> Result<()> {
+    let path = skill_dir.join("traces.jsonl");
+    crate::storage::atomic::append_jsonl_locked(
+        &path,
+        &serde_json::to_string(&serde_json::json!({
             "time": Utc::now(),
-            "event": "skill_draft_created",
+            "event": event,
             "summary": summary
-        }))?
+        }))?,
     )
     .with_context(|| format!("append {}", skill_dir.join("traces.jsonl").display()))?;
     Ok(())
@@ -589,6 +585,19 @@ mod skill_trigger_tests {
     fn strip_frontmatter_removes_yaml_block() {
         let md = "---\nkeywords: [a]\n---\nThe body.\nMore.";
         assert_eq!(strip_frontmatter(md), "The body.\nMore.");
+    }
+
+    #[test]
+    fn append_trace_uses_given_event_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        append_trace(temp.path(), "skill_used", "used successfully").expect("append trace");
+
+        let data = crate::storage::read_text_file_capped(temp.path().join("traces.jsonl"))
+            .expect("read trace");
+        let event: serde_json::Value =
+            serde_json::from_str(data.trim()).expect("parse trace event");
+        assert_eq!(event["event"], "skill_used");
+        assert_eq!(event["summary"], "used successfully");
     }
 
     #[test]

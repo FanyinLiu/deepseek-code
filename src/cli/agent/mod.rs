@@ -176,7 +176,7 @@ fn create_agent(
     let content = render_template(name, template);
     SubagentRegistry::parse_markdown_agent(&content)
         .with_context(|| format!("template for '{name}' did not parse"))?;
-    std::fs::write(&path, content)?;
+    crate::storage::atomic::write_text_atomic(&path, &content)?;
     Ok(path)
 }
 

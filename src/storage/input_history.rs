@@ -32,7 +32,7 @@ pub fn save_history(history: &[String]) {
         .map(|s| s.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    let _ = std::fs::write(&path, content);
+    let _ = crate::storage::atomic::write_text_atomic(&path, &content);
 }
 
 fn history_path() -> PathBuf {

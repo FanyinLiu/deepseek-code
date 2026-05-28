@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::Instant;
@@ -545,16 +545,19 @@ impl EvolutionStore {
         write_json(&run_dir.join("proposal.json"), &proposal)?;
         write_json(&run_dir.join("agents.json"), &candidate.agents)?;
         write_json(&run_dir.join("candidate.json"), &candidate)?;
-        fs::write(run_dir.join("candidate.md"), candidate_markdown(&candidate))
-            .with_context(|| format!("failed to write candidate for {run_id}"))?;
-        fs::write(
-            run_dir.join("worktree/README.md"),
-            isolated_worktree_readme(&proposal),
+        crate::storage::atomic::write_text_atomic(
+            &run_dir.join("candidate.md"),
+            &candidate_markdown(&candidate),
+        )
+        .with_context(|| format!("failed to write candidate for {run_id}"))?;
+        crate::storage::atomic::write_text_atomic(
+            &run_dir.join("worktree/README.md"),
+            &isolated_worktree_readme(&proposal),
         )
         .with_context(|| format!("failed to write isolated worktree for {run_id}"))?;
-        fs::write(
-            run_dir.join("patch.diff"),
-            self.build_proposed_patch(&proposal, &candidate)?,
+        crate::storage::atomic::write_text_atomic(
+            &run_dir.join("patch.diff"),
+            &self.build_proposed_patch(&proposal, &candidate)?,
         )
         .with_context(|| format!("failed to write patch for {run_id}"))?;
         let touched_files = proposal_target_files(&proposal);
@@ -715,12 +718,21 @@ impl EvolutionStore {
             manual_review_required,
         };
         write_json(&run_dir.join("gates.json"), &report)?;
-        fs::write(run_dir.join("stdout.log"), gate_stdout(&report))
-            .with_context(|| format!("failed to write stdout log for {run_id}"))?;
-        fs::write(run_dir.join("stderr.log"), gate_stderr(&report))
-            .with_context(|| format!("failed to write stderr log for {run_id}"))?;
-        fs::write(run_dir.join("report.md"), gate_report_markdown(&report))
-            .with_context(|| format!("failed to write report for {run_id}"))?;
+        crate::storage::atomic::write_text_atomic(
+            &run_dir.join("stdout.log"),
+            &gate_stdout(&report),
+        )
+        .with_context(|| format!("failed to write stdout log for {run_id}"))?;
+        crate::storage::atomic::write_text_atomic(
+            &run_dir.join("stderr.log"),
+            &gate_stderr(&report),
+        )
+        .with_context(|| format!("failed to write stderr log for {run_id}"))?;
+        crate::storage::atomic::write_text_atomic(
+            &run_dir.join("report.md"),
+            &gate_report_markdown(&report),
+        )
+        .with_context(|| format!("failed to write report for {run_id}"))?;
         Ok(report)
     }
 
@@ -1279,9 +1291,9 @@ impl EvolutionStore {
             &self.proposals_dir().join(format!("{}.json", proposal.id)),
             proposal,
         )?;
-        fs::write(
-            self.proposals_dir().join(format!("{}.md", proposal.id)),
-            proposal_markdown(proposal),
+        crate::storage::atomic::write_text_atomic(
+            &self.proposals_dir().join(format!("{}.md", proposal.id)),
+            &proposal_markdown(proposal),
         )
         .with_context(|| format!("failed to write proposal markdown for {}", proposal.id))?;
         Ok(())
@@ -1323,7 +1335,7 @@ impl EvolutionStore {
         let json_path = self.proof_json_path(&proof.id);
         let report_path = self.proof_report_path(&proof.id);
         write_json(&json_path, proof)?;
-        fs::write(&report_path, proof_markdown(proof))
+        crate::storage::atomic::write_text_atomic(&report_path, &proof_markdown(proof))
             .with_context(|| format!("failed to write proof report {}", report_path.display()))?;
         append_proof_lineage(&self.proofs_dir().join("proofs.jsonl"), proof)?;
         append_evolution_memory(&self.memory_dir().join("events.jsonl"), proof)?;
@@ -1377,7 +1389,7 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
         .with_context(|| format!("{} has no parent directory", path.display()))?;
     fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
     let data = serde_json::to_string_pretty(value)?;
-    fs::write(path, format!("{data}\n"))
+    crate::storage::atomic::write_text_atomic(path, &format!("{data}\n"))
         .with_context(|| format!("failed to write {}", path.display()))
 }
 
@@ -1686,12 +1698,7 @@ fn proof_markdown(proof: &EvolutionProof) -> String {
 }
 
 fn append_proof_lineage(path: &Path, proof: &EvolutionProof) -> Result<()> {
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .with_context(|| format!("failed to open proof lineage {}", path.display()))?;
-    writeln!(file, "{}", serde_json::to_string(proof)?)
+    crate::storage::atomic::append_jsonl_locked(path, &serde_json::to_string(proof)?)
         .with_context(|| format!("failed to append proof lineage {}", path.display()))?;
     Ok(())
 }
@@ -1714,12 +1721,7 @@ fn append_evolution_memory(path: &Path, proof: &EvolutionProof) -> Result<()> {
         "sandbox_status": proof.sandbox_status.clone(),
         "failure_reason": proof.failure_reason.clone(),
     });
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .with_context(|| format!("failed to open evolution memory {}", path.display()))?;
-    writeln!(file, "{}", serde_json::to_string(&event)?)
+    crate::storage::atomic::append_jsonl_locked(path, &serde_json::to_string(&event)?)
         .with_context(|| format!("failed to append evolution memory {}", path.display()))?;
     Ok(())
 }

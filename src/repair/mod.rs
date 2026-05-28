@@ -183,16 +183,16 @@ impl RepairStore {
             context_bundle,
             status: RepairProposalStatus::Proposed,
         };
-        fs::write(
-            self.proposal_json_path(&id)?,
-            serde_json::to_string_pretty(&proposal)?,
+        crate::storage::atomic::write_json_pretty_atomic(&self.proposal_json_path(&id)?, &proposal)
+            .with_context(|| format!("write proposal {}", proposal.id))?;
+        crate::storage::atomic::write_text_atomic(
+            &self.proposal_md_path(&id)?,
+            &render_proposal_md(&proposal),
         )
-        .with_context(|| format!("write proposal {}", proposal.id))?;
-        fs::write(self.proposal_md_path(&id)?, render_proposal_md(&proposal))
-            .with_context(|| format!("write proposal markdown {}", proposal.id))?;
-        fs::write(
-            self.proposal_context_path(&id)?,
-            serde_json::to_string_pretty(&proposal.context_bundle)?,
+        .with_context(|| format!("write proposal markdown {}", proposal.id))?;
+        crate::storage::atomic::write_json_pretty_atomic(
+            &self.proposal_context_path(&id)?,
+            &proposal.context_bundle,
         )
         .with_context(|| format!("write proposal context {}", proposal.id))?;
         Ok(proposal)
@@ -301,27 +301,27 @@ impl RepairStore {
             diff_judge,
             report_path: report_path.display().to_string(),
         };
-        fs::write(
-            run_dir.join("run.json"),
-            serde_json::to_string_pretty(&run)?,
-        )
-        .with_context(|| format!("write {}", run_dir.join("run.json").display()))?;
-        fs::write(
-            run_dir.join("diff-judge.json"),
-            serde_json::to_string_pretty(&run.diff_judge)?,
+        crate::storage::atomic::write_json_pretty_atomic(&run_dir.join("run.json"), &run)
+            .with_context(|| format!("write {}", run_dir.join("run.json").display()))?;
+        crate::storage::atomic::write_json_pretty_atomic(
+            &run_dir.join("diff-judge.json"),
+            &run.diff_judge,
         )
         .with_context(|| format!("write {}", run_dir.join("diff-judge.json").display()))?;
-        fs::write(run_dir.join("patch.diff"), &patch)
+        crate::storage::atomic::write_text_atomic(&run_dir.join("patch.diff"), &patch)
             .with_context(|| format!("write {}", run_dir.join("patch.diff").display()))?;
         if let Some(sandbox_result) = &run.sandbox_result {
-            fs::write(
-                run_dir.join("sandbox-result.json"),
-                serde_json::to_string_pretty(sandbox_result)?,
+            crate::storage::atomic::write_json_pretty_atomic(
+                &run_dir.join("sandbox-result.json"),
+                sandbox_result,
             )
             .with_context(|| format!("write {}", run_dir.join("sandbox-result.json").display()))?;
         }
-        fs::write(&report_path, render_run_report(&proposal, &run))
-            .with_context(|| format!("write {}", report_path.display()))?;
+        crate::storage::atomic::write_text_atomic(
+            &report_path,
+            &render_run_report(&proposal, &run),
+        )
+        .with_context(|| format!("write {}", report_path.display()))?;
         for skill in &proposal.context_bundle.candidate_skills {
             let success = matches!(run.status, RepairRunStatus::Passed)
                 && run.patch_hash.is_some()
