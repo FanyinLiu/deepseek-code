@@ -2108,8 +2108,10 @@ fn cmd_memory(_args: &str, ctx: &mut CommandContext) -> CommandResult {
     let mut lines = vec!["Memory files".to_string(), "".to_string()];
     for path in crate::agent::prompt_builder::project_rule_candidates(ctx.project_root) {
         if path.exists() {
-            let content = crate::storage::read_text_file_capped(&path).unwrap_or_default();
-            lines.push(format!("{} — {} bytes", path.display(), content.len()));
+            match crate::storage::read_text_file_capped(&path) {
+                Ok(content) => lines.push(format!("{} — {} bytes", path.display(), content.len())),
+                Err(error) => lines.push(format!("{} — unreadable: {error}", path.display())),
+            }
         } else {
             lines.push(format!("{} — missing", path.display()));
         }
@@ -3974,6 +3976,42 @@ mod tests {
             forwarded_agent_input("/commit ship it").as_deref(),
             Some("Stage the appropriate workspace changes and create a git commit with this message: ship it")
         );
+    }
+
+    #[test]
+    fn memory_command_reports_unreadable_rule_files() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let large_rule = root.path().join("AGENTS.md");
+        let file = std::fs::File::create(&large_rule).expect("create large rule");
+        file.set_len(crate::storage::TEXT_FILE_SIZE_CAP + 1)
+            .expect("extend large rule");
+        drop(file);
+
+        let reg = CommandRegistry::new();
+        let mut app = crate::tui::app::TuiApp::new(
+            crate::deepseek::DeepSeekModel::Flash,
+            crate::deepseek::ThinkingMode::Auto,
+            None,
+            root.path().to_path_buf(),
+        );
+        let mut yolo = false;
+        let mut ctx = CommandContext {
+            app: &mut app,
+            project_root: root.path(),
+            yolo_mode: &mut yolo,
+            mcp_status: "MCP: not initialized",
+            background_tasks: &[],
+        };
+
+        let output = reg
+            .execute("/memory", &mut ctx)
+            .expect("command should be handled")
+            .expect("command should succeed")
+            .expect("memory output");
+
+        assert!(output.contains("AGENTS.md"));
+        assert!(output.contains("unreadable"));
+        assert!(output.contains("file too large"));
     }
 
     fn execute_with_test_app(input: &str) -> CommandResult {
