@@ -53,30 +53,40 @@ fn statusline_row(props: &StatuslineProps<'_>, canvas: Color, width: u16) -> Vec
 
     push_label(
         &mut spans,
+        canvas,
         label(props.chinese, "Context", "上下文"),
         colors.label,
     );
     push_text(
         &mut spans,
+        canvas,
         context_value_for_width(props.tokens, width, context_limit),
         colors.text,
     );
     push_sep(&mut spans, canvas, colors.sep);
     push_label(
         &mut spans,
+        canvas,
         label(props.chinese, "Mode", "模式"),
         colors.label,
     );
-    push_text(&mut spans, props.mode.label().to_string(), colors.text);
+    push_text(
+        &mut spans,
+        canvas,
+        props.mode.label().to_string(),
+        colors.text,
+    );
     if !narrow {
         push_sep(&mut spans, canvas, colors.sep);
         push_label(
             &mut spans,
+            canvas,
             label(props.chinese, "Model", "模型"),
             colors.label,
         );
         push_text(
             &mut spans,
+            canvas,
             model_value(props.provider, props.model, width),
             colors.text,
         );
@@ -87,6 +97,7 @@ fn statusline_row(props: &StatuslineProps<'_>, canvas: Color, width: u16) -> Vec
                 push_sep(&mut spans, canvas, colors.sep);
                 push_label(
                     &mut spans,
+                    canvas,
                     label(props.chinese, "Hit", "命中率"),
                     colors.label,
                 );
@@ -98,25 +109,28 @@ fn statusline_row(props: &StatuslineProps<'_>, canvas: Color, width: u16) -> Vec
                 } else {
                     colors.sep
                 };
-                push_text(&mut spans, format!("{:.0}%", rate), fg);
+                push_text(&mut spans, canvas, format!("{:.0}%", rate), fg);
             }
         }
     }
     push_sep(&mut spans, canvas, colors.sep);
     push_label(
         &mut spans,
+        canvas,
         label(props.chinese, "State", "状态"),
         colors.label,
     );
-    push_text(&mut spans, props.status.to_string(), colors.text);
+    push_text(&mut spans, canvas, props.status.to_string(), colors.text);
     push_sep(&mut spans, canvas, colors.sep);
     push_label(
         &mut spans,
+        canvas,
         label(props.chinese, "Permissions", "权限"),
         colors.label,
     );
     push_text(
         &mut spans,
+        canvas,
         compact_permissions(props.permissions).to_string(),
         colors.permission,
     );
@@ -250,22 +264,19 @@ fn compact_permissions(permissions: &str) -> &'static str {
     }
 }
 
-fn push_label(spans: &mut Vec<Span<'static>>, label: &'static str, fg: Color) {
+fn push_label(spans: &mut Vec<Span<'static>>, canvas: Color, label: &'static str, fg: Color) {
     spans.push(Span::styled(
         format!("{label} "),
-        Style::default().fg(fg).bg(theme::palette().canvas),
+        Style::default().fg(fg).bg(canvas),
     ));
 }
 
-fn push_text(spans: &mut Vec<Span<'static>>, text: String, fg: Color) {
-    spans.push(Span::styled(
-        text,
-        Style::default().fg(fg).bg(theme::palette().canvas),
-    ));
+fn push_text(spans: &mut Vec<Span<'static>>, canvas: Color, text: String, fg: Color) {
+    spans.push(Span::styled(text, Style::default().fg(fg).bg(canvas)));
 }
 
 fn push_sep(spans: &mut Vec<Span<'static>>, canvas: Color, fg: Color) {
-    spans.push(Span::styled("  ·  ", Style::default().fg(fg).bg(canvas)));
+    spans.push(Span::styled(" · ", Style::default().fg(fg).bg(canvas)));
 }
 
 #[derive(Clone, Copy)]
