@@ -229,33 +229,40 @@ async fn read_stdio_message<R>(reader: &mut R) -> Result<Option<String>>
 where
     R: AsyncBufRead + Unpin,
 {
-    let mut first_line = String::new();
-    loop {
-        first_line.clear();
-        let n = reader.read_line(&mut first_line).await?;
-        if n == 0 {
-            return Ok(None);
+    read_stdio_message_with_limits(reader, MAX_MCP_CONTENT_LENGTH, MAX_MCP_HEADER_LINE_LENGTH).await
+}
+
+async fn read_stdio_message_with_limits<R>(
+    reader: &mut R,
+    max_content_length: usize,
+    max_header_line_length: usize,
+) -> Result<Option<String>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let first_line = loop {
+        let line = match read_limited_line(reader, max_content_length).await? {
+            Some(line) => line,
+            None => return Ok(None),
+        };
+        if !line.trim().is_empty() {
+            break line;
         }
-        if !first_line.trim().is_empty() {
-            break;
-        }
-    }
+    };
 
     let trimmed = first_line.trim_start();
     if trimmed.starts_with('{') {
         return Ok(Some(first_line.trim().to_string()));
     }
+    if first_line.len() > max_header_line_length {
+        anyhow::bail!("MCP header line too long");
+    }
 
     let mut content_length = parse_content_length_header(&first_line)?;
     loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 {
-            anyhow::bail!("EOF while reading MCP headers");
-        }
-        if line.len() > MAX_MCP_HEADER_LINE_LENGTH {
-            anyhow::bail!("MCP header line too long");
-        }
+        let line = read_limited_line(reader, max_header_line_length)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("EOF while reading MCP headers"))?;
         let line = line.trim_end_matches(['\r', '\n']);
         if line.is_empty() {
             break;
@@ -269,12 +276,42 @@ where
     }
 
     let len = content_length.ok_or_else(|| anyhow::anyhow!("missing Content-Length header"))?;
-    if len > MAX_MCP_CONTENT_LENGTH {
-        anyhow::bail!("MCP frame too large: Content-Length {len} exceeds {MAX_MCP_CONTENT_LENGTH}");
+    if len > max_content_length {
+        anyhow::bail!("MCP frame too large: Content-Length {len} exceeds {max_content_length}");
     }
     let mut buf = vec![0; len];
     reader.read_exact(&mut buf).await?;
     Ok(Some(String::from_utf8(buf)?))
+}
+
+async fn read_limited_line<R>(reader: &mut R, max_len: usize) -> Result<Option<String>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let take = newline.map_or(available.len(), |index| index + 1);
+        if bytes.len().saturating_add(take) > max_len {
+            anyhow::bail!("MCP line too long");
+        }
+
+        bytes.extend_from_slice(&available[..take]);
+        reader.consume(take);
+        if newline.is_some() {
+            break;
+        }
+    }
+
+    Ok(Some(String::from_utf8(bytes)?))
 }
 
 fn parse_content_length_header(line: &str) -> Result<Option<usize>> {
@@ -402,5 +439,30 @@ mod tests {
             .expect("message");
 
         assert_eq!(message, body);
+    }
+
+    #[tokio::test]
+    async fn stdio_reader_rejects_oversized_first_header_line() {
+        let body = "{}";
+        let frame = encode_stdio_frame(body);
+        let mut reader = BufReader::new(frame.as_bytes());
+
+        let err = read_stdio_message_with_limits(&mut reader, MAX_MCP_CONTENT_LENGTH, 8)
+            .await
+            .expect_err("first header line should be capped");
+
+        assert!(err.to_string().contains("MCP header line too long"));
+    }
+
+    #[tokio::test]
+    async fn stdio_reader_rejects_oversized_legacy_line_json() {
+        let bytes = b"{\"jsonrpc\":\"2.0\"}\n";
+        let mut reader = BufReader::new(bytes.as_slice());
+
+        let err = read_stdio_message_with_limits(&mut reader, 8, MAX_MCP_HEADER_LINE_LENGTH)
+            .await
+            .expect_err("legacy JSON line should be capped");
+
+        assert!(err.to_string().contains("MCP line too long"));
     }
 }
