@@ -16,6 +16,31 @@ use super::orchestrator::AgentEvent;
 /// Handles the tool-call execution loop.
 pub struct ToolLoop;
 
+#[derive(Debug, Clone)]
+pub struct ToolLoopResult {
+    pub call: ToolCall,
+    pub result: ToolResultRecord,
+    pub duration_ms: u64,
+    pub changed_files: Vec<String>,
+}
+
+impl ToolLoopResult {
+    #[must_use]
+    pub fn new(
+        call: ToolCall,
+        result: ToolResultRecord,
+        duration_ms: u64,
+        changed_files: Vec<String>,
+    ) -> Self {
+        Self {
+            call,
+            result,
+            duration_ms,
+            changed_files,
+        }
+    }
+}
+
 impl ToolLoop {
     /// Execute tools with policy checks and approval before each tool.
     /// Sends `ToolApprovalNeeded` events and awaits oneshot responses.
@@ -31,7 +56,7 @@ impl ToolLoop {
         policy_config: &crate::storage::config::PolicyConfig,
         hooks_config: &crate::storage::config::HooksConfig,
         event_log_store: Option<EventLogStore>,
-    ) -> Vec<(ToolCall, ToolResultRecord)> {
+    ) -> Vec<ToolLoopResult> {
         let mut results = Vec::new();
         let dispatch_config =
             crate::tools::dispatch::ToolDispatchConfig::from_policy(policy_config);
@@ -86,7 +111,12 @@ impl ToolLoop {
             };
             session.tool_call_history.push(record);
 
-            results.push((tc.clone(), outcome.result_record));
+            results.push(ToolLoopResult::new(
+                tc.clone(),
+                outcome.result_record,
+                outcome.backend_result.duration_ms,
+                outcome.backend_result.changed_files,
+            ));
         }
 
         results
@@ -184,3 +214,77 @@ fn send_event(tx: &mpsc::UnboundedSender<AgentEvent>, event: AgentEvent) {
 }
 
 // helpers moved to crate::agent::utils
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::deepseek::{
+        MessageContent, MessageId, MessageVisibility, ProtocolMessage, ReasoningState, Role,
+        SessionId, SessionMetadata, ToolCallFunction,
+    };
+
+    fn test_session(project_root: &Path) -> Session {
+        Session {
+            id: SessionId::new_v4(),
+            name: None,
+            project_root: project_root.to_path_buf(),
+            messages: vec![ProtocolMessage {
+                id: MessageId::new_v4(),
+                role: Role::User,
+                content: MessageContent::from("write a file"),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                tool_results: Vec::new(),
+                turn_id: TurnId::new_v4(),
+                sub_turn_id: None,
+                visibility: MessageVisibility::UserVisible,
+            }],
+            reasoning_state: ReasoningState::default(),
+            tool_call_history: Vec::new(),
+            checkpoints: Vec::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            metadata: SessionMetadata::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_loop_preserves_runtime_metadata_for_orchestrator_events() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let call = ToolCall {
+            id: "call-write".into(),
+            call_type: "function".into(),
+            function: ToolCallFunction {
+                name: "write_file".into(),
+                arguments: serde_json::json!({
+                    "path": "generated.txt",
+                    "content": "hello"
+                })
+                .to_string(),
+            },
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = test_session(temp.path());
+
+        let results = ToolLoop::execute_tools_with_approval(
+            &[call],
+            temp.path(),
+            TurnId::new_v4(),
+            SubTurnId::new_v4(),
+            &mut session,
+            &tx,
+            true,
+            &crate::storage::config::PolicyConfig::default(),
+            &crate::storage::config::HooksConfig::default(),
+            None,
+        )
+        .await;
+
+        assert_eq!(results.len(), 1);
+        let result = &results[0];
+        assert!(!result.result.is_error);
+        assert_eq!(result.changed_files, vec!["generated.txt".to_string()]);
+        assert_eq!(session.tool_call_history.len(), 1);
+        assert_eq!(session.tool_call_history[0].duration_ms, result.duration_ms);
+    }
+}

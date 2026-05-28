@@ -43,7 +43,7 @@ use super::router::{ComplexityAssessment, ComplexityRouter, ReasonCode, Route};
 use super::subagent::SubagentToolArgs;
 use super::swarm::{SwarmCoordinator, SwarmRunOptions, SwarmTaskStatus};
 use super::task_tool::TaskToolHandler;
-use super::tool_loop::ToolLoop;
+use super::tool_loop::{ToolLoop, ToolLoopResult};
 
 /// Events emitted by the orchestrator during execution.
 #[derive(Debug)]
@@ -2418,7 +2418,7 @@ impl Orchestrator {
         }
 
         // Execute subagent calls
-        let mut results: Vec<(ToolCall, ToolResultRecord)> = Vec::new();
+        let mut results: Vec<ToolLoopResult> = Vec::new();
         if !subagent_calls.is_empty() {
             let handler = TaskToolHandler::new(
                 Arc::new(self.client.clone()),
@@ -2459,7 +2459,7 @@ impl Orchestrator {
                                 approved: false,
                                 at: Utc::now(),
                             });
-                        results.push((tc.clone(), record));
+                        results.push(ToolLoopResult::new(tc.clone(), record, 0, Vec::new()));
                         continue;
                     }
                     policy::PolicyAction::AskOnce | policy::PolicyAction::AskSession => {
@@ -2504,7 +2504,7 @@ impl Orchestrator {
                             approved: false,
                             at: Utc::now(),
                         });
-                    results.push((tc.clone(), record));
+                    results.push(ToolLoopResult::new(tc.clone(), record, 0, Vec::new()));
                     continue;
                 }
 
@@ -2543,7 +2543,12 @@ impl Orchestrator {
                         approved: true,
                         at: Utc::now(),
                     });
-                results.push((tc.clone(), record));
+                results.push(ToolLoopResult::new(
+                    tc.clone(),
+                    record,
+                    duration_ms,
+                    Vec::new(),
+                ));
             }
         }
 
@@ -2585,7 +2590,7 @@ impl Orchestrator {
                         .into(),
                     is_error: false,
                 };
-                results.push((tc.clone(), record));
+                results.push(ToolLoopResult::new(tc.clone(), record, 0, Vec::new()));
             }
         }
 
@@ -2667,7 +2672,12 @@ impl Orchestrator {
                     };
                     self.session.tool_call_history.push(record);
 
-                    results.push((tc.clone(), outcome.result_record));
+                    results.push(ToolLoopResult::new(
+                        tc.clone(),
+                        outcome.result_record,
+                        outcome.backend_result.duration_ms,
+                        outcome.backend_result.changed_files,
+                    ));
                 }
             } else {
                 for tc in mcp_calls {
@@ -2677,13 +2687,15 @@ impl Orchestrator {
                         result: "MCP registry not initialized".into(),
                         is_error: true,
                     };
-                    results.push((tc.clone(), record));
+                    results.push(ToolLoopResult::new(tc.clone(), record, 0, Vec::new()));
                 }
             }
         }
 
-        for (tc, result) in &results {
-            let changed_files = changed_files_for_tool_call(tc);
+        for tool_result in &results {
+            let tc = &tool_result.call;
+            let result = &tool_result.result;
+            let changed_files = event_changed_files_for_tool_result(tool_result);
             let pending_question = (!result.is_error)
                 .then(|| question_prompt_for_tool_call(tc))
                 .flatten();
@@ -2694,7 +2706,7 @@ impl Orchestrator {
                     name: result.name.clone(),
                     success: !result.is_error,
                     summary: crate::agent::utils::truncate_for_summary(&result.result, 200),
-                    duration_ms: 0,
+                    duration_ms: tool_result.duration_ms,
                     changed_files: changed_files.clone(),
                 },
             );
@@ -2777,11 +2789,11 @@ impl Orchestrator {
         }
 
         // Self-verification after file edits
-        let had_edits = results.iter().any(|(tc, r)| {
-            !r.is_error
-                && (tc.function.name == "edit_file"
-                    || tc.function.name == "write_file"
-                    || tc.function.name == "apply_patch")
+        let had_edits = results.iter().any(|tool_result| {
+            !tool_result.result.is_error
+                && (tool_result.call.function.name == "edit_file"
+                    || tool_result.call.function.name == "write_file"
+                    || tool_result.call.function.name == "apply_patch")
         });
         if had_edits {
             if policy_config.require_approval_for_command && !self.yolo_mode {
@@ -2812,7 +2824,9 @@ impl Orchestrator {
 
         // Advance plan execution step tracker after each tool batch
         if let Some(ref mut plan_exec) = self.plan_execution {
-            let had_error = results.iter().any(|(_, r)| r.is_error);
+            let had_error = results
+                .iter()
+                .any(|tool_result| tool_result.result.is_error);
             let updates = plan_exec.updates_after_tool_batch(had_error);
             for update in updates {
                 self.emit_event(
@@ -3212,6 +3226,14 @@ fn estimate_stream_tokens(value: &str) -> u64 {
 
 fn changed_files_for_tool_call(tc: &ToolCall) -> Vec<String> {
     crate::tools::backend::changed_files_for_call(tc)
+}
+
+fn event_changed_files_for_tool_result(tool_result: &ToolLoopResult) -> Vec<String> {
+    if tool_result.changed_files.is_empty() {
+        changed_files_for_tool_call(&tool_result.call)
+    } else {
+        tool_result.changed_files.clone()
+    }
 }
 
 fn question_prompt_for_tool_call(
@@ -3749,16 +3771,18 @@ fn summarize_parent_context(session: &Session) -> String {
 mod tests {
     use super::{
         changed_files_for_tool_call, emit_stream_chunk_deltas,
-        emit_stream_chunk_deltas_with_options, generate_plan_options,
-        is_contextual_followup_request, plan_execution_context, plan_execution_prompt,
-        plan_or_input_uses_chinese, plan_uses_chinese, swarm_patch_approval_details,
-        validate_swarm_patch_for_auto_apply, AgentEvent, ContextualTurnInput, PlanExecutionState,
-        PlanStepStatus,
+        emit_stream_chunk_deltas_with_options, event_changed_files_for_tool_result,
+        generate_plan_options, is_contextual_followup_request, plan_execution_context,
+        plan_execution_prompt, plan_or_input_uses_chinese, plan_uses_chinese,
+        swarm_patch_approval_details, validate_swarm_patch_for_auto_apply, AgentEvent,
+        ContextualTurnInput, PlanExecutionState, PlanStepStatus,
     };
     use crate::agent::swarm::{SwarmAgentRole, SwarmPendingPatch, SwarmResult};
+    use crate::agent::tool_loop::ToolLoopResult;
     use crate::deepseek::models::{
         MessageContent, MessageId, MessageVisibility, ProtocolMessage, ReasoningState, Role,
-        Session, SessionId, SessionMetadata, StreamChunk, ToolCall, ToolCallFunction, TurnId,
+        Session, SessionId, SessionMetadata, StreamChunk, ToolCall, ToolCallFunction,
+        ToolResultRecord, TurnId,
     };
     use crate::plan::executor::PlanStep;
     use crate::plan::schema::{Plan, Risk, RiskLevel};
@@ -4005,6 +4029,35 @@ mod tests {
                 "src/agent/orchestrator.rs".to_string(),
                 "tests/session_resume_tests.rs".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn event_changed_files_prefers_runtime_metadata_over_argument_guess() {
+        let call = ToolCall {
+            id: "call-1".into(),
+            call_type: "function".into(),
+            function: ToolCallFunction {
+                name: "write_file".into(),
+                arguments: serde_json::json!({
+                    "path": "src/from-arguments.rs",
+                    "content": "old"
+                })
+                .to_string(),
+            },
+        };
+        let result = ToolResultRecord {
+            tool_call_id: call.id.clone(),
+            name: call.function.name.clone(),
+            result: "ok".into(),
+            is_error: false,
+        };
+        let tool_result =
+            ToolLoopResult::new(call, result, 42, vec!["src/from-runtime.rs".to_string()]);
+
+        assert_eq!(
+            event_changed_files_for_tool_result(&tool_result),
+            vec!["src/from-runtime.rs".to_string()]
         );
     }
 
