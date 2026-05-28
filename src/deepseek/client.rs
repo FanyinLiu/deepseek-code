@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use bytes::Bytes;
 use futures::StreamExt;
 use reqwest::Client as HttpClient;
 use tokio_stream::Stream;
@@ -12,6 +13,8 @@ use super::stream::{parse_stream, StreamAccumulator, StreamEvent};
 
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 const MAX_RETRIES: u32 = 3;
+const MAX_DEEPSEEK_JSON_BYTES: usize = 16 * 1024 * 1024;
+const MAX_DEEPSEEK_ERROR_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct DeepSeekClient {
@@ -172,7 +175,9 @@ impl DeepSeekClient {
     ) -> Result<reqwest::Response, DeepSeekError> {
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = response_text_capped(response, MAX_DEEPSEEK_ERROR_BYTES)
+                .await
+                .unwrap_or_else(|error| format!("[response body unavailable: {error}]"));
             return Err(DeepSeekError::from_status(status.as_u16(), &body));
         }
         Ok(response)
@@ -191,7 +196,7 @@ impl DeepSeekClient {
             .await?;
 
         let response = Self::require_success(response).await?;
-        let resp: ChatResponse = response.json().await?;
+        let resp: ChatResponse = response_json_capped(response, MAX_DEEPSEEK_JSON_BYTES).await?;
         Ok(resp)
     }
 
@@ -276,7 +281,7 @@ impl DeepSeekClient {
             .await?;
 
         let response = Self::require_success(response).await?;
-        Ok(response.json().await?)
+        response_json_capped(response, MAX_DEEPSEEK_JSON_BYTES).await
     }
 
     /// FIM completion (non-thinking lane).
@@ -295,8 +300,57 @@ impl DeepSeekClient {
             .await?;
 
         let response = Self::require_success(response).await?;
-        Ok(response.json().await?)
+        response_json_capped(response, MAX_DEEPSEEK_JSON_BYTES).await
     }
+}
+
+async fn response_json_capped<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<T, DeepSeekError> {
+    let bytes = response_bytes_capped(response, max_bytes).await?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+async fn response_text_capped(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<String, DeepSeekError> {
+    let bytes = response_bytes_capped(response, max_bytes).await?;
+    Ok(String::from_utf8_lossy(&bytes).to_string())
+}
+
+async fn response_bytes_capped(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, DeepSeekError> {
+    if let Some(content_length) = response.content_length() {
+        if content_length > max_bytes as u64 {
+            return Err(DeepSeekError::Other(format!(
+                "response too large: {content_length} bytes exceeds {max_bytes} byte limit"
+            )));
+        }
+    }
+    collect_limited_body(response.bytes_stream(), max_bytes).await
+}
+
+async fn collect_limited_body<S>(stream: S, max_bytes: usize) -> Result<Vec<u8>, DeepSeekError>
+where
+    S: Stream<Item = reqwest::Result<Bytes>>,
+{
+    futures::pin_mut!(stream);
+
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(DeepSeekError::Other(format!(
+                "response too large: exceeds {max_bytes} byte limit"
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn parse_thinking_config(value: &serde_json::Value) -> Option<ThinkingConfig> {
@@ -347,6 +401,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+
     use super::{accumulate_stream_events, DeepSeekError, StreamEvent};
     use crate::deepseek::models::{ChatRequest, StreamChunk, ThinkingConfig, ThinkingWireFormat};
 
@@ -378,6 +434,23 @@ mod tests {
             .expect("DONE should finish stream");
 
         assert_eq!(result.content, "ok");
+    }
+
+    #[tokio::test]
+    async fn collect_limited_body_rejects_large_deepseek_response() {
+        let chunks = futures::stream::iter([
+            Ok(Bytes::from_static(b"12345")),
+            Ok(Bytes::from_static(b"67890")),
+        ]);
+
+        let error = super::collect_limited_body(chunks, 8)
+            .await
+            .expect_err("body over limit should fail");
+
+        assert!(
+            error.to_string().contains("response too large"),
+            "unexpected error: {error}"
+        );
     }
 
     fn request_with_thinking(thinking: ThinkingConfig) -> ChatRequest {
