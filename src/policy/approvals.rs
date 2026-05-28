@@ -362,9 +362,16 @@ fn evaluate_tool_inner(
             }
         }
 
-        "glob" | "grep" | "search_files" | "search_code" | "git_status" | "git_diff"
-        | "git_log" | "task_get" | "task_list" | "ask_user" | "ask_user_question"
-        | "bash_output" => PolicyDecision::allow(
+        "glob" | "grep" => read_only_search_decision(
+            tool_name,
+            &args,
+            project_root,
+            policy,
+            auto_approve_safe_read,
+        ),
+
+        "search_files" | "search_code" | "git_status" | "git_diff" | "git_log" | "task_get"
+        | "task_list" | "ask_user" | "ask_user_question" | "bash_output" => PolicyDecision::allow(
             "safe read-only operation",
             tool_name.to_string(),
             "Read-only search/git operation",
@@ -716,6 +723,61 @@ fn infer_tool_call_source(tool_name: &str) -> ToolCallSource {
         ToolCallSource::Mission
     } else {
         ToolCallSource::Main
+    }
+}
+
+fn read_only_search_decision(
+    tool_name: &str,
+    args: &serde_json::Value,
+    project_root: &Path,
+    policy: &PolicyConfig,
+    auto_approve_safe_read: bool,
+) -> PolicyDecision {
+    let Some(path) = args.get("path").and_then(serde_json::Value::as_str) else {
+        return PolicyDecision::allow(
+            "safe read-only operation",
+            tool_name.to_string(),
+            "Read-only search/git operation",
+            RiskLevel::SafeRead,
+        );
+    };
+    if path.trim().is_empty() {
+        return PolicyDecision::allow(
+            "safe read-only operation",
+            tool_name.to_string(),
+            "Read-only search/git operation",
+            RiskLevel::SafeRead,
+        );
+    }
+
+    match evaluate_path_risk(path, project_root, policy.block_protected_paths) {
+        RiskLevel::SafeRead if auto_approve_safe_read => PolicyDecision::allow(
+            "safe search within project",
+            format!("Search: {path}"),
+            "Searching within project workspace",
+            RiskLevel::SafeRead,
+        ),
+        RiskLevel::SafeRead => PolicyDecision::ask_once(
+            "safe search within project",
+            format!("Search: {path}"),
+            "Searching within project workspace",
+            RiskLevel::SafeRead,
+            String::new(),
+        ),
+        RiskLevel::Blocked => PolicyDecision::deny(
+            "protected path",
+            format!("Blocked: {path}"),
+            "Path is protected",
+            RiskLevel::Blocked,
+            String::new(),
+        ),
+        _ => PolicyDecision::ask_once(
+            format!("search path outside project: {path}"),
+            format!("Search outside project: {path}"),
+            "Searching a directory outside the workspace",
+            RiskLevel::SensitiveRead,
+            format!("Path: {path}\nScope: outside workspace"),
+        ),
     }
 }
 
@@ -1222,6 +1284,64 @@ mod tests {
             .display
             .details
             .contains("Scope: outside workspace"));
+    }
+
+    #[test]
+    fn outside_workspace_grep_path_requires_approval() {
+        let root = tempfile::tempdir().expect("workspace");
+        let outside = tempfile::tempdir().expect("outside dir");
+        let policy = PolicyConfig::default();
+
+        let decision = evaluate_tool(
+            "grep",
+            &args(serde_json::json!({
+                "pattern": "secret",
+                "path": outside.path().to_string_lossy()
+            })),
+            root.path(),
+            &policy,
+        );
+
+        assert_eq!(decision.action, PolicyAction::AskOnce);
+        assert_eq!(decision.display.risk_level, RiskLevel::SensitiveRead);
+        assert!(decision.display.title.contains("Search outside project"));
+        assert!(decision
+            .display
+            .details
+            .contains("Scope: outside workspace"));
+    }
+
+    #[test]
+    fn workspace_glob_path_is_auto_allowed_by_default() {
+        let root = tempfile::tempdir().expect("workspace");
+        std::fs::create_dir(root.path().join("src")).expect("create src");
+        let policy = PolicyConfig::default();
+
+        let decision = evaluate_tool(
+            "glob",
+            &args(serde_json::json!({ "pattern": "*.rs", "path": "src" })),
+            root.path(),
+            &policy,
+        );
+
+        assert_eq!(decision.action, PolicyAction::Allow);
+        assert_eq!(decision.display.risk_level, RiskLevel::SafeRead);
+    }
+
+    #[test]
+    fn grep_without_path_remains_safe_read() {
+        let root = tempfile::tempdir().expect("workspace");
+        let policy = PolicyConfig::default();
+
+        let decision = evaluate_tool(
+            "grep",
+            &args(serde_json::json!({ "pattern": "needle" })),
+            root.path(),
+            &policy,
+        );
+
+        assert_eq!(decision.action, PolicyAction::Allow);
+        assert_eq!(decision.display.risk_level, RiskLevel::SafeRead);
     }
 
     #[test]
