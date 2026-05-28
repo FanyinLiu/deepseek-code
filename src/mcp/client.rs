@@ -280,7 +280,7 @@ impl StdioMcpClient {
         let id = self.next_id;
         self.next_id += 1;
 
-        let body = make_request(id, method, params);
+        let body = make_request(id, method, params)?;
         self.send_raw_with_timeout(method, &body).await?;
 
         let response_text = self.read_message().await?;
@@ -298,7 +298,7 @@ impl StdioMcpClient {
         method: &str,
         params: T,
     ) -> Result<(), anyhow::Error> {
-        let body = make_notification(method, params);
+        let body = make_notification(method, params)?;
         self.send_raw_with_timeout(method, &body).await
     }
 
@@ -501,7 +501,7 @@ impl RemoteMcpClient {
         let id = self.next_id;
         self.next_id += 1;
 
-        let body = make_request(id, method, params);
+        let body = make_request(id, method, params)?;
         let response_text = self.send_json_rpc(method, body, true).await?;
         let response: JsonRpcResponse<R> = serde_json::from_str(&response_text)
             .map_err(|e| anyhow::anyhow!("failed to parse response: {e}\nraw: {response_text}"))?;
@@ -517,7 +517,7 @@ impl RemoteMcpClient {
         method: &str,
         params: T,
     ) -> Result<(), anyhow::Error> {
-        let body = make_notification(method, params);
+        let body = make_notification(method, params)?;
         self.send_json_rpc(method, body, false).await.map(|_| ())
     }
 

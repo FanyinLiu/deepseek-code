@@ -208,23 +208,30 @@ pub enum ResourceContent {
 // Helpers
 // ---------------------------------------------------------------------------
 
-pub fn make_request<T: Serialize>(id: i64, method: &str, params: T) -> String {
+pub fn make_request<T: Serialize>(
+    id: i64,
+    method: &str,
+    params: T,
+) -> Result<String, serde_json::Error> {
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id,
         method: method.to_string(),
         params,
     };
-    serde_json::to_string(&req).unwrap()
+    serde_json::to_string(&req)
 }
 
-pub fn make_notification<T: Serialize>(method: &str, params: T) -> String {
+pub fn make_notification<T: Serialize>(
+    method: &str,
+    params: T,
+) -> Result<String, serde_json::Error> {
     let notif = JsonRpcNotification {
         jsonrpc: "2.0".to_string(),
         method: method.to_string(),
         params,
     };
-    serde_json::to_string(&notif).unwrap()
+    serde_json::to_string(&notif)
 }
 
 #[cfg(test)]
@@ -244,9 +251,28 @@ mod tests {
                     version: "1.0".into(),
                 },
             },
-        );
+        )
+        .expect("request should serialize");
         assert!(req.contains("initialize"));
         assert!(req.contains("2.0"));
+    }
+
+    #[test]
+    fn make_request_returns_serialization_errors() {
+        struct FailingParams;
+
+        impl Serialize for FailingParams {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                Err(serde::ser::Error::custom("forced failure"))
+            }
+        }
+
+        let error = make_request(1, "initialize", FailingParams)
+            .expect_err("serialization failure should be returned");
+        assert!(error.to_string().contains("forced failure"));
     }
 
     #[test]
