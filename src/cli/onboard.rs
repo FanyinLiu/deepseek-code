@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::agent::subagent::SubagentRegistry;
-use crate::provider::{build_provider, Provider};
+use crate::provider::request_model_name_for_config;
 use crate::storage;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -69,15 +69,14 @@ fn build_report(root: &Path, options: OnboardOptions) -> Result<OnboardReport, a
 
     let config = match storage::Config::load(Some(root)) {
         Ok(config) => {
-            let provider = build_provider(&config.provider, String::new());
-            let kind = provider.kind();
+            let kind = config.provider.default;
             checks.push(OnboardCheck {
                 name: "config",
                 status: CheckStatus::Pass,
                 summary: format!(
                     "provider={} model={}",
                     kind.as_str(),
-                    provider.request_model_name(&config.model.default.canonical())
+                    request_model_name_for_config(&config.provider, &config.model.default)
                 ),
                 detail: Some("resolved from ~/.octocode plus project .octocode config".to_string()),
             });

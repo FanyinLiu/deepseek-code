@@ -705,6 +705,27 @@ pub fn build_provider(config: &ProviderConfig, api_key: String) -> DeepSeekProvi
     }
 }
 
+/// Resolve the provider-facing model name without constructing a provider.
+///
+/// This is useful in display and telemetry paths that only need model-label
+/// resolution; constructing a provider also normalizes base URLs and carries
+/// an API key slot that those paths do not use.
+#[must_use]
+pub fn request_model_name_for_config(config: &ProviderConfig, model: &DeepSeekModel) -> String {
+    let endpoint = config.endpoint_for(config.default);
+    match model.canonical() {
+        DeepSeekModel::Pro => endpoint
+            .pro_model
+            .clone()
+            .unwrap_or_else(|| default_request_model_name(config.default, &DeepSeekModel::Pro)),
+        DeepSeekModel::Flash => endpoint
+            .flash_model
+            .clone()
+            .unwrap_or_else(|| default_request_model_name(config.default, &DeepSeekModel::Flash)),
+        other => default_request_model_name(config.default, &other),
+    }
+}
+
 fn normalize_base_url(value: &str) -> String {
     value.trim_end_matches('/').to_string()
 }
@@ -1224,5 +1245,30 @@ flash_model = "chat-fast"
             provider.request_model_name(&DeepSeekModel::Flash),
             "chat-fast"
         );
+    }
+
+    #[test]
+    fn request_model_name_for_config_matches_provider_resolution() {
+        let config = ProviderConfig {
+            default: ProviderKind::OpenAiCompatible,
+            openai_compatible: ProviderEndpointConfig {
+                pro_model: Some("reasoning-pro".into()),
+                flash_model: Some("chat-fast".into()),
+                ..ProviderEndpointConfig::default()
+            },
+            ..ProviderConfig::default()
+        };
+        let provider = build_provider(&config, String::new());
+
+        for model in [
+            DeepSeekModel::Pro,
+            DeepSeekModel::Flash,
+            DeepSeekModel::LegacyReasoner,
+        ] {
+            assert_eq!(
+                request_model_name_for_config(&config, &model),
+                provider.request_model_name(&model)
+            );
+        }
     }
 }

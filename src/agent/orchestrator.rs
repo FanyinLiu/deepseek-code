@@ -16,7 +16,7 @@ use crate::hooks::{HookEvent, HookPayload, HookRunSummary};
 use crate::plan;
 use crate::plan::schema::{Plan, RiskLevel};
 use crate::policy;
-use crate::provider::Provider;
+use crate::provider::request_model_name_for_config;
 use crate::runtime::tool_runtime::{
     ApprovalFuture, ApprovalOutcome, ApprovalResolver, McpRegistryRuntimeBackend, ToolRuntime,
     ToolRuntimeContext,
@@ -578,9 +578,8 @@ impl Orchestrator {
     fn record_usage_event(&self, usage: &Usage) {
         let config = crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
         let model = self.session.reasoning_state.effective_model();
-        let provider = crate::provider::build_provider(&config.provider, String::new());
         let provider_name = config.provider.default.as_str();
-        let model_name = provider.request_model_name(&model);
+        let model_name = request_model_name_for_config(&config.provider, &model);
         if let Err(error) = crate::storage::record_usage_event(
             &self.project_root,
             provider_name,

@@ -143,7 +143,9 @@ use crate::deepseek::{
     SessionMetadata, ThinkingConfig, ThinkingMode, ToolCall, ToolCallFunction,
 };
 use crate::policy::ApprovalDisplay;
-use crate::provider::{build_provider, context_budget_for, Provider, ProviderKind};
+use crate::provider::{
+    build_provider, context_budget_for, request_model_name_for_config, Provider, ProviderKind,
+};
 use crate::storage;
 
 use super::{
@@ -4783,9 +4785,8 @@ impl TuiApp {
         } else {
             "permissions ask"
         };
-        let provider = crate::provider::build_provider(&self.config.provider, String::new());
         let provider_label = self.config.provider.default.as_str();
-        let model_label = provider.request_model_name(&self.model.canonical());
+        let model_label = request_model_name_for_config(&self.config.provider, &self.model);
 
         statusline::render_statusline(
             f,
