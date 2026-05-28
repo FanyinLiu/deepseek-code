@@ -21,6 +21,7 @@ const DEFAULT_WORKSPACE_RELEASE_TAG: &str = "octocode-workspace-cache";
 const DEFAULT_MAX_WORKFLOW_INPUT_BYTES: usize = 60_000;
 const DEFAULT_MAX_WORKSPACE_ARCHIVE_BYTES: usize = 25 * 1024 * 1024;
 const MAX_GITHUB_ERROR_BODY_BYTES: usize = 64 * 1024;
+const MAX_GITHUB_API_JSON_BYTES: usize = 1024 * 1024;
 const MAX_VALIDATION_ARTIFACT_ZIP_BYTES: usize = 5 * 1024 * 1024;
 const MAX_VALIDATION_RESULT_JSON_BYTES: usize = 1024 * 1024;
 
@@ -404,15 +405,16 @@ async fn validate_with_http(
     if let Some(token) = token {
         request = request.bearer_auth(token);
     }
-    let mut result: SandboxValidationResult = request
+    let response = request
         .send()
         .await
         .context("send sandbox validation request")?
         .error_for_status()
-        .context("sandbox validation request failed")?
-        .json()
-        .await
-        .context("parse sandbox validation response")?;
+        .context("sandbox validation request failed")?;
+    let mut result: SandboxValidationResult =
+        response_json_capped(response, MAX_VALIDATION_RESULT_JSON_BYTES)
+            .await
+            .context("parse sandbox validation response")?;
     result.backend = Some("http".to_string());
     Ok(result)
 }
@@ -651,8 +653,7 @@ async fn upload_workspace_asset(
         let body = response_text_capped(response, MAX_GITHUB_ERROR_BODY_BYTES).await;
         bail!("workspace asset upload failed: {status} {body}");
     }
-    response
-        .json()
+    response_json_capped(response, MAX_GITHUB_API_JSON_BYTES)
         .await
         .context("parse uploaded workspace asset")
 }
@@ -666,8 +667,7 @@ async fn ensure_release(
     let tag_url = format!("{api_base}/repos/{repo}/releases/tags/{release_tag}");
     let response = client.get(&tag_url).send().await?;
     if response.status().is_success() {
-        return response
-            .json()
+        return response_json_capped(response, MAX_GITHUB_API_JSON_BYTES)
             .await
             .context("parse workspace cache release");
     }
@@ -694,8 +694,7 @@ async fn ensure_release(
         let body = response_text_capped(response, MAX_GITHUB_ERROR_BODY_BYTES).await;
         bail!("workspace cache release creation failed: {status} {body}");
     }
-    response
-        .json()
+    response_json_capped(response, MAX_GITHUB_API_JSON_BYTES)
         .await
         .context("parse created workspace cache release")
 }
@@ -817,13 +816,9 @@ async fn wait_for_workflow_run(
             "{api_base}/repos/{}/actions/workflows/{}/runs?event=workflow_dispatch&per_page=20",
             config.repo, config.workflow
         );
-        let response: WorkflowRunsResponse = client
-            .get(runs_url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let response = client.get(runs_url).send().await?.error_for_status()?;
+        let response: WorkflowRunsResponse =
+            response_json_capped(response, MAX_GITHUB_API_JSON_BYTES).await?;
         if let Some(run) = response.workflow_runs.into_iter().find(|run| {
             run.created_at.0 >= dispatched_at - chrono::Duration::seconds(5)
                 && run
@@ -867,13 +862,9 @@ async fn download_validation_artifact(
     request_id: &str,
 ) -> Result<SandboxValidationResult> {
     let artifacts_url = format!("{api_base}/repos/{repo}/actions/runs/{run_id}/artifacts");
-    let response: ArtifactsResponse = client
-        .get(artifacts_url)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    let response = client.get(artifacts_url).send().await?.error_for_status()?;
+    let response: ArtifactsResponse =
+        response_json_capped(response, MAX_GITHUB_API_JSON_BYTES).await?;
     let expected = format!("validation-result-{request_id}");
     let artifact = response
         .artifacts
@@ -918,6 +909,14 @@ async fn response_text_capped(response: reqwest::Response, max_bytes: usize) -> 
         Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
         Err(error) => format!("[response body unavailable: {error}]"),
     }
+}
+
+async fn response_json_capped<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<T> {
+    let bytes = response_bytes_capped(response, max_bytes).await?;
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
 async fn response_bytes_capped(response: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>> {
@@ -1078,6 +1077,9 @@ fn parse_env_u64(key: &str, default: u64) -> u64 {
 mod tests {
     use super::*;
 
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
     fn zip_with_validation_json(content: &[u8]) -> Vec<u8> {
         use std::io::Write as _;
 
@@ -1124,6 +1126,29 @@ mod tests {
             error
                 .to_string()
                 .contains("validation-result.json too large"),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn response_json_capped_rejects_large_remote_sandbox_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("x".repeat(9)))
+            .mount(&server)
+            .await;
+
+        let response = reqwest::Client::new()
+            .get(server.uri())
+            .send()
+            .await
+            .expect("mock response");
+        let error = response_json_capped::<serde_json::Value>(response, 8)
+            .await
+            .expect_err("body over limit should fail");
+
+        assert!(
+            error.to_string().contains("response too large"),
             "{error:?}"
         );
     }
