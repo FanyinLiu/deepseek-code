@@ -284,6 +284,7 @@ pub struct TuiApp {
     pub settings_tab: settings_panel::SettingsTab,
     pub settings_selected: usize,
     slash_suggestion_cache: RefCell<SlashSuggestionCache>,
+    slash_command_registry_cache: RefCell<SlashCommandRegistryCache>,
     keymap: keybindings::Keymap,
 }
 
@@ -291,6 +292,7 @@ pub struct TuiApp {
 struct SlashSuggestionCache {
     prefix: String,
     language: String,
+    registry_generation: u64,
     suggestions: Vec<(String, String)>,
 }
 
@@ -298,7 +300,97 @@ impl SlashSuggestionCache {
     fn clear(&mut self) {
         self.prefix.clear();
         self.language.clear();
+        self.registry_generation = 0;
         self.suggestions.clear();
+    }
+}
+
+struct SlashCommandRegistryCache {
+    root: PathBuf,
+    fingerprint: Vec<PromptCommandFileFingerprint>,
+    generation: u64,
+    registry: crate::commands::CommandRegistry,
+}
+
+impl Default for SlashCommandRegistryCache {
+    fn default() -> Self {
+        Self {
+            root: PathBuf::new(),
+            fingerprint: Vec::new(),
+            generation: 0,
+            registry: crate::commands::CommandRegistry::new(),
+        }
+    }
+}
+
+impl SlashCommandRegistryCache {
+    fn refresh_for_root(&mut self, root: &Path) -> u64 {
+        let fingerprint = prompt_command_file_fingerprint(root);
+        if self.root != root || self.fingerprint != fingerprint {
+            let mut registry = crate::commands::CommandRegistry::new();
+            registry.load_prompt_commands(root);
+            self.root = root.to_path_buf();
+            self.fingerprint = fingerprint;
+            self.registry = registry;
+            self.generation = self.generation.saturating_add(1);
+        }
+        self.generation
+    }
+
+    fn registry(&self) -> &crate::commands::CommandRegistry {
+        &self.registry
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PromptCommandFileFingerprint {
+    path: PathBuf,
+    len: u64,
+    modified_nanos: u128,
+}
+
+fn prompt_command_file_fingerprint(project_root: &Path) -> Vec<PromptCommandFileFingerprint> {
+    let mut files = Vec::new();
+    if let Some(home) = crate::storage::user_home_dir() {
+        collect_prompt_command_fingerprint(&home.join(".octocode").join("commands"), &mut files);
+    }
+    collect_prompt_command_fingerprint(
+        &project_root.join(".octocode").join("commands"),
+        &mut files,
+    );
+    files.sort();
+    files
+}
+
+fn collect_prompt_command_fingerprint(dir: &Path, files: &mut Vec<PromptCommandFileFingerprint>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            collect_prompt_command_fingerprint(&path, files);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let modified_nanos = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |duration| duration.as_nanos());
+        files.push(PromptCommandFileFingerprint {
+            path,
+            len: metadata.len(),
+            modified_nanos,
+        });
     }
 }
 
@@ -860,6 +952,7 @@ impl TuiApp {
             settings_tab: settings_panel::SettingsTab::Model,
             settings_selected: 0,
             slash_suggestion_cache: RefCell::default(),
+            slash_command_registry_cache: RefCell::default(),
             keymap,
         }
     }
@@ -2283,53 +2376,63 @@ impl TuiApp {
         }
 
         let language = self.config.ui.language.as_str();
+        let registry_generation = self
+            .slash_command_registry_cache
+            .borrow_mut()
+            .refresh_for_root(&self.file_tree.root);
         {
             let cache = self.slash_suggestion_cache.borrow();
-            if cache.prefix == trimmed && cache.language == language {
+            if cache.prefix == trimmed
+                && cache.language == language
+                && cache.registry_generation == registry_generation
+            {
                 return cache.suggestions.clone();
             }
         }
 
-        let mut registry = crate::commands::CommandRegistry::new();
-        registry.load_prompt_commands(&self.file_tree.root);
-        let suggestions = registry
-            .match_prefix_all(trimmed)
-            .into_iter()
-            .map(|entry| match entry {
-                crate::commands::CommandEntry::Builtin(cmd) => {
-                    let display_name = if cmd.name.starts_with(trimmed) {
-                        cmd.name.to_string()
-                    } else {
-                        cmd.aliases
-                            .iter()
-                            .copied()
-                            .find(|alias| alias.starts_with(trimmed))
-                            .map(str::to_string)
-                            .unwrap_or_else(|| cmd.name.to_string())
-                    };
-                    (
-                        display_name,
-                        format!(
-                            "{} · {}",
-                            crate::commands::localized_command_description(
-                                cmd.name,
-                                cmd.description,
-                                language,
+        let suggestions = {
+            let registry_cache = self.slash_command_registry_cache.borrow();
+            registry_cache
+                .registry()
+                .match_prefix_all(trimmed)
+                .into_iter()
+                .map(|entry| match entry {
+                    crate::commands::CommandEntry::Builtin(cmd) => {
+                        let display_name = if cmd.name.starts_with(trimmed) {
+                            cmd.name.to_string()
+                        } else {
+                            cmd.aliases
+                                .iter()
+                                .copied()
+                                .find(|alias| alias.starts_with(trimmed))
+                                .map(str::to_string)
+                                .unwrap_or_else(|| cmd.name.to_string())
+                        };
+                        (
+                            display_name,
+                            format!(
+                                "{} · {}",
+                                crate::commands::localized_command_description(
+                                    cmd.name,
+                                    cmd.description,
+                                    language,
+                                ),
+                                crate::commands::localized_command_usage(cmd.usage, language),
                             ),
-                            crate::commands::localized_command_usage(cmd.usage, language),
-                        ),
-                    )
-                }
-                crate::commands::CommandEntry::Prompt(cmd) => (
-                    cmd.name.clone(),
-                    format!("{} · {}", cmd.description, entry.usage()),
-                ),
-            })
-            .collect::<Vec<_>>();
+                        )
+                    }
+                    crate::commands::CommandEntry::Prompt(cmd) => (
+                        cmd.name.clone(),
+                        format!("{} · {}", cmd.description, entry.usage()),
+                    ),
+                })
+                .collect::<Vec<_>>()
+        };
         {
             let mut cache = self.slash_suggestion_cache.borrow_mut();
             cache.prefix = trimmed.to_string();
             cache.language = language.to_string();
+            cache.registry_generation = registry_generation;
             cache.suggestions = suggestions.clone();
         }
         suggestions
@@ -2767,25 +2870,34 @@ impl TuiApp {
             return false;
         }
 
-        let mut registry = crate::commands::CommandRegistry::new();
-        registry.load_prompt_commands(&self.file_tree.root);
-        let matches = registry.match_prefix_all(trimmed);
+        let matches = {
+            let mut registry_cache = self.slash_command_registry_cache.borrow_mut();
+            registry_cache.refresh_for_root(&self.file_tree.root);
+            registry_cache
+                .registry()
+                .match_prefix_all(trimmed)
+                .into_iter()
+                .map(|entry| {
+                    let name = entry.name().to_string();
+                    let description = match entry {
+                        crate::commands::CommandEntry::Builtin(cmd) => {
+                            crate::commands::localized_command_description(
+                                cmd.name,
+                                cmd.description,
+                                &self.config.ui.language,
+                            )
+                            .to_string()
+                        }
+                        crate::commands::CommandEntry::Prompt(cmd) => cmd.description.clone(),
+                    };
+                    (name, description)
+                })
+                .collect::<Vec<_>>()
+        };
         match matches.as_slice() {
-            [entry] => {
-                let name = entry.name();
+            [(name, description)] => {
                 self.input_text = format!("{name} ");
                 self.cursor_pos = self.input_text.chars().count();
-                let description = match entry {
-                    crate::commands::CommandEntry::Builtin(cmd) => {
-                        crate::commands::localized_command_description(
-                            cmd.name,
-                            cmd.description,
-                            &self.config.ui.language,
-                        )
-                        .to_string()
-                    }
-                    crate::commands::CommandEntry::Prompt(cmd) => cmd.description.clone(),
-                };
                 self.status_message = format!("{name} — {description}");
             }
             [] => {
@@ -2798,7 +2910,7 @@ impl TuiApp {
             many => {
                 let names = many
                     .iter()
-                    .map(|entry| entry.name())
+                    .map(|(name, _)| name.as_str())
                     .collect::<Vec<_>>()
                     .join(" ");
                 self.status_message = if self.is_chinese_ui() {
@@ -8989,6 +9101,39 @@ mod tests {
         assert!(!suggestions
             .iter()
             .any(|(name, desc)| name == "/agents" && desc.contains("List built-in")));
+    }
+
+    #[test]
+    fn slash_suggestion_registry_cache_refreshes_custom_command_edits() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let command_dir = temp.path().join(".octocode").join("commands");
+        std::fs::create_dir_all(&command_dir).expect("mkdir commands");
+        let command_path = command_dir.join("zz-cache-refresh.md");
+        std::fs::write(
+            &command_path,
+            "---\ndescription: first cached description\n---\nDo $ARGUMENTS",
+        )
+        .expect("write command");
+
+        let mut app = test_app_with_root(temp.path().to_path_buf());
+        app.input_text = "/zz-cache".to_string();
+        app.cursor_pos = app.input_text.chars().count();
+
+        let first = app.slash_command_suggestions();
+        assert!(first.iter().any(|(name, desc)| {
+            name == "/zz-cache-refresh" && desc.contains("first cached description")
+        }));
+
+        std::fs::write(
+            &command_path,
+            "---\ndescription: second cached description with more bytes\n---\nDo $ARGUMENTS",
+        )
+        .expect("rewrite command");
+
+        let second = app.slash_command_suggestions();
+        assert!(second.iter().any(|(name, desc)| {
+            name == "/zz-cache-refresh" && desc.contains("second cached description")
+        }));
     }
 
     #[test]
