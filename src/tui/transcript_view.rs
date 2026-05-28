@@ -41,6 +41,7 @@ pub struct TranscriptProps<'a> {
     pub reasoning_elapsed_ms: u64,
     pub reasoning_tokens: u64,
     pub show_reasoning: bool,
+    pub chinese: bool,
 }
 
 const TRANSCRIPT_RENDER_MARGIN_LINES: usize = 120;
@@ -230,6 +231,7 @@ pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) 
             props.subagents,
             props.global_elapsed_ms,
             content_width,
+            props.chinese,
         );
     }
 
@@ -2105,6 +2107,7 @@ fn render_inline_subagents(
     cards: &[subagent_cards::SubagentCard],
     _global_elapsed_ms: u64,
     width: u16,
+    use_chinese: bool,
 ) {
     let p = theme::palette();
     let compact = width < 96;
@@ -2142,8 +2145,15 @@ fn render_inline_subagents(
     let files_read: usize = cards.iter().map(|c| c.files_read).sum();
     let files_written: usize = cards.iter().map(|c| c.files_written).sum();
     let token_usage: u64 = cards.iter().map(|c| c.token_usage).sum();
-    let mut header = if compact {
+    let mut header = if compact && use_chinese {
+        format!("智能体 {} · 运行 {running} · 完成 {done}", cards.len())
+    } else if compact {
         format!("Agents {} · running {running} · done {done}", cards.len())
+    } else if use_chinese {
+        format!(
+            "智能体团队 · {} 个 · 运行 {running} · 完成 {done} · 失败 {failed}",
+            cards.len()
+        )
     } else {
         format!(
             "Agent Team · {} total · {running} running · {done} done · {failed} failed",
@@ -2151,19 +2161,43 @@ fn render_inline_subagents(
         )
     };
     if waiting > 0 {
-        header.push_str(&format!(" · waiting {waiting}"));
+        if use_chinese {
+            header.push_str(&format!(" · 等待 {waiting}"));
+        } else {
+            header.push_str(&format!(" · waiting {waiting}"));
+        }
     }
     if retrying > 0 {
-        header.push_str(&format!(" · retry {retrying}"));
+        if use_chinese {
+            header.push_str(&format!(" · 重试 {retrying}"));
+        } else {
+            header.push_str(&format!(" · retry {retrying}"));
+        }
     }
     if blocked > 0 {
-        header.push_str(&format!(" · blocked {blocked}"));
+        if use_chinese {
+            header.push_str(&format!(" · 阻塞 {blocked}"));
+        } else {
+            header.push_str(&format!(" · blocked {blocked}"));
+        }
     }
     if cancelled > 0 {
-        header.push_str(&format!(" · cancelled {cancelled}"));
+        if use_chinese {
+            header.push_str(&format!(" · 取消 {cancelled}"));
+        } else {
+            header.push_str(&format!(" · cancelled {cancelled}"));
+        }
     }
     let artifacts = if token_usage > 0 {
-        format!("{summaries} summaries · files R{files_read} W{files_written} · {token_usage} tok")
+        if use_chinese {
+            format!("{summaries} 摘要 · 文件 读{files_read} 写{files_written} · {token_usage} tok")
+        } else {
+            format!(
+                "{summaries} summaries · files R{files_read} W{files_written} · {token_usage} tok"
+            )
+        }
+    } else if use_chinese {
+        format!("{summaries} 摘要 · 文件 读{files_read} 写{files_written}")
     } else {
         format!("{summaries} summaries · files R{files_read} W{files_written}")
     };
@@ -2180,9 +2214,15 @@ fn render_inline_subagents(
     ]));
     lines.push(Line::from(vec![
         Span::styled("│ ", transcript_style(p.divider)),
-        Span::styled("artifacts ", transcript_style(p.muted)),
         Span::styled(
-            truncate_display_width(&artifacts, line_width.saturating_sub(12)),
+            if use_chinese { "产物 " } else { "artifacts " },
+            transcript_style(p.muted),
+        ),
+        Span::styled(
+            truncate_display_width(
+                &artifacts,
+                line_width.saturating_sub(if use_chinese { 7 } else { 12 }),
+            ),
             transcript_style(if failed > 0 || blocked > 0 {
                 p.warning
             } else {
@@ -2203,7 +2243,7 @@ fn render_inline_subagents(
             .or(card.last_update.as_deref())
             .unwrap_or(&card.description);
         let display = sanitize_agent_visible_summary(display);
-        let role = truncate(&agent_role_label(&card.agent_type), 14);
+        let role = truncate(&agent_role_label(&card.agent_type, use_chinese), 14);
         let lane_style = match status {
             view_blocks::ViewStatus::Running => {
                 transcript_style(p.text).add_modifier(Modifier::BOLD)
@@ -2217,15 +2257,16 @@ fn render_inline_subagents(
             _ => transcript_style(p.text),
         };
         let role_width = if compact { 9 } else { 14 };
-        let role = truncate_display_width(&role, role_width);
-        let role = format!("{role:<role_width$}");
-        let status_label = if compact {
+        let role = pad_display_width(&role, role_width);
+        let status_label = if use_chinese {
+            localized_status_label(status)
+        } else if compact {
             compact_status_label(status)
         } else {
             status.label()
         };
         let status_width = if compact { 5 } else { 8 };
-        let status_text = format!("{status_label:<status_width$}");
+        let status_text = pad_display_width(status_label, status_width);
         let files = if !compact && (card.files_read > 0 || card.files_written > 0) {
             format!(" · R{} W{}", card.files_read, card.files_written)
         } else {
@@ -2261,19 +2302,26 @@ fn render_inline_subagents(
             Span::styled(description, lane_style),
             Span::styled(meta, transcript_style(p.dim)),
         ]));
-        let detail_label = match card.status {
-            subagent_cards::SubagentCardStatus::Running
-            | subagent_cards::SubagentCardStatus::Retrying => "now    ",
-            subagent_cards::SubagentCardStatus::WaitingApproval => "wait   ",
-            subagent_cards::SubagentCardStatus::Blocked => "blocked",
-            _ => "output ",
+        let detail_label = match (use_chinese, &card.status) {
+            (true, subagent_cards::SubagentCardStatus::Running)
+            | (true, subagent_cards::SubagentCardStatus::Retrying) => "当前",
+            (true, subagent_cards::SubagentCardStatus::WaitingApproval) => "等待",
+            (true, subagent_cards::SubagentCardStatus::Blocked) => "阻塞",
+            (true, _) => "输出",
+            (false, subagent_cards::SubagentCardStatus::Running)
+            | (false, subagent_cards::SubagentCardStatus::Retrying) => "now",
+            (false, subagent_cards::SubagentCardStatus::WaitingApproval) => "wait",
+            (false, subagent_cards::SubagentCardStatus::Blocked) => "blocked",
+            (false, _) => "output",
         };
-        let detail_width = line_width
-            .saturating_sub(2 + 2 + display_width(detail_label))
-            .max(8);
+        let detail_label_width = 7;
+        let detail_width = line_width.saturating_sub(2 + 2 + detail_label_width).max(8);
         lines.push(Line::from(vec![
             Span::styled("│   ", transcript_style(p.divider)),
-            Span::styled(detail_label, transcript_style(p.muted)),
+            Span::styled(
+                pad_display_width(detail_label, detail_label_width),
+                transcript_style(p.muted),
+            ),
             Span::styled(
                 truncate_display_width(&display, detail_width),
                 transcript_style(p.secondary),
@@ -2282,10 +2330,15 @@ fn render_inline_subagents(
     }
 
     if active > 0 {
+        let footer = if use_chinese {
+            "运行中的智能体保持可见；原始日志按需展开"
+        } else {
+            "active agents stay visible here; raw logs stay hidden until needed"
+        };
         lines.push(Line::from(vec![
             Span::styled("╰─ ", transcript_style(p.divider)),
             Span::styled(
-                "active agents stay visible here; raw logs stay hidden until needed",
+                truncate_display_width(footer, line_width.saturating_sub(3)),
                 transcript_style(p.dim),
             ),
         ]));
@@ -2297,14 +2350,34 @@ fn render_inline_subagents(
     }
 }
 
-fn agent_role_label(agent_type: &str) -> String {
-    match agent_type {
-        "code-explorer" => "explorer".to_string(),
-        "code-reviewer" => "reviewer".to_string(),
-        "planner" => "planner".to_string(),
-        "test-runner" => "test-runner".to_string(),
-        "worker" => "worker".to_string(),
-        other => other.replace('_', "-"),
+fn agent_role_label(agent_type: &str, use_chinese: bool) -> String {
+    match (use_chinese, agent_type) {
+        (true, "code-explorer") => "探索".to_string(),
+        (true, "code-reviewer") => "审查".to_string(),
+        (true, "planner") => "规划".to_string(),
+        (true, "test-runner") => "测试".to_string(),
+        (true, "worker") => "执行".to_string(),
+        (false, "code-explorer") => "explorer".to_string(),
+        (false, "code-reviewer") => "reviewer".to_string(),
+        (false, "planner") => "planner".to_string(),
+        (false, "test-runner") => "test-runner".to_string(),
+        (false, "worker") => "worker".to_string(),
+        (_, other) => other.replace('_', "-"),
+    }
+}
+
+fn localized_status_label(status: view_blocks::ViewStatus) -> &'static str {
+    match status {
+        view_blocks::ViewStatus::Queued => "队列",
+        view_blocks::ViewStatus::Running => "运行",
+        view_blocks::ViewStatus::Waiting => "等待",
+        view_blocks::ViewStatus::Retrying => "重试",
+        view_blocks::ViewStatus::Done => "完成",
+        view_blocks::ViewStatus::Failed => "失败",
+        view_blocks::ViewStatus::Blocked => "阻塞",
+        view_blocks::ViewStatus::Denied => "拒绝",
+        view_blocks::ViewStatus::Cancelled => "取消",
+        view_blocks::ViewStatus::Skipped => "跳过",
     }
 }
 
@@ -2321,6 +2394,13 @@ fn compact_status_label(status: view_blocks::ViewStatus) -> &'static str {
         view_blocks::ViewStatus::Cancelled => "cncl",
         view_blocks::ViewStatus::Skipped => "skip",
     }
+}
+
+fn pad_display_width(value: &str, width: usize) -> String {
+    let mut padded = truncate_display_width(value, width);
+    let pad = width.saturating_sub(display_width(&padded));
+    padded.push_str(&" ".repeat(pad));
+    padded
 }
 
 fn sanitize_transcript_visible_text(value: &str) -> String {
@@ -2626,6 +2706,7 @@ mod tests {
                         reasoning_elapsed_ms: 0,
                         reasoning_tokens: 0,
                         show_reasoning: false,
+                        chinese: false,
                     },
                 );
             })
@@ -2730,6 +2811,7 @@ mod tests {
                 reasoning_elapsed_ms: 0,
                 reasoning_tokens: 0,
                 show_reasoning: false,
+                chinese: false,
             },
         );
         let lines: Vec<&str> = rendered.lines().collect();
@@ -2797,6 +2879,7 @@ mod tests {
                 reasoning_elapsed_ms: 0,
                 reasoning_tokens: 0,
                 show_reasoning: false,
+                chinese: false,
             },
         );
 
@@ -2920,6 +3003,7 @@ mod tests {
                         reasoning_elapsed_ms: 0,
                         reasoning_tokens: 0,
                         show_reasoning: false,
+                        chinese: false,
                     },
                 );
             })
@@ -3157,6 +3241,7 @@ mod tests {
                         reasoning_elapsed_ms: 0,
                         reasoning_tokens: 0,
                         show_reasoning: false,
+                        chinese: false,
                     },
                 );
             })
@@ -3220,6 +3305,7 @@ mod tests {
                         reasoning_elapsed_ms: 0,
                         reasoning_tokens: 0,
                         show_reasoning: false,
+                        chinese: false,
                     },
                 );
             })
@@ -3305,6 +3391,7 @@ mod tests {
                         reasoning_elapsed_ms: 0,
                         reasoning_tokens: 0,
                         show_reasoning: false,
+                        chinese: false,
                     },
                 );
             })
@@ -3356,6 +3443,7 @@ mod tests {
                         reasoning_elapsed_ms: 0,
                         reasoning_tokens: 0,
                         show_reasoning: false,
+                        chinese: false,
                     },
                 );
             })
@@ -3408,6 +3496,7 @@ mod tests {
                         reasoning_elapsed_ms: 0,
                         reasoning_tokens: 0,
                         show_reasoning: false,
+                        chinese: false,
                     },
                 );
             })
@@ -3458,6 +3547,7 @@ mod tests {
                         reasoning_elapsed_ms: 1_500,
                         reasoning_tokens: 12,
                         show_reasoning: false,
+                        chinese: false,
                     },
                 );
             })
@@ -3511,6 +3601,7 @@ mod tests {
                         reasoning_elapsed_ms: 2_000,
                         reasoning_tokens: 9,
                         show_reasoning: true,
+                        chinese: false,
                     },
                 );
             })
@@ -3563,6 +3654,7 @@ mod tests {
                         reasoning_elapsed_ms: 0,
                         reasoning_tokens: 0,
                         show_reasoning: false,
+                        chinese: false,
                     },
                 );
             })
@@ -3618,6 +3710,7 @@ mod tests {
                         reasoning_elapsed_ms: 0,
                         reasoning_tokens: 0,
                         show_reasoning: false,
+                        chinese: false,
                     },
                 );
             })
@@ -3668,6 +3761,7 @@ mod tests {
                         reasoning_elapsed_ms: 0,
                         reasoning_tokens: 0,
                         show_reasoning: false,
+                        chinese: false,
                     },
                 );
             })
@@ -3732,6 +3826,7 @@ mod tests {
                         reasoning_elapsed_ms: 0,
                         reasoning_tokens: 0,
                         show_reasoning: false,
+                        chinese: false,
                     },
                 );
             })
@@ -3791,6 +3886,7 @@ mod tests {
                         reasoning_elapsed_ms: 0,
                         reasoning_tokens: 0,
                         show_reasoning: false,
+                        chinese: false,
                     },
                 );
             })
@@ -3881,6 +3977,7 @@ mod tests {
                         reasoning_elapsed_ms: 0,
                         reasoning_tokens: 0,
                         show_reasoning: false,
+                        chinese: false,
                     },
                 );
             })

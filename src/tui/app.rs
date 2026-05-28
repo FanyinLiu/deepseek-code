@@ -4549,6 +4549,7 @@ impl TuiApp {
                 reasoning_elapsed_ms: self.reasoning_elapsed_ms(),
                 reasoning_tokens: self.current_turn_reasoning_tokens,
                 show_reasoning: self.show_reasoning,
+                chinese: self.is_chinese_ui(),
             },
         );
     }
@@ -10667,9 +10668,9 @@ exit = "ctrl+q"
         .expect("render snapshot");
         let lines: Vec<&str> = snapshot.lines().collect();
 
-        assert!(snapshot.contains("Agents 3"));
-        assert!(snapshot.contains("running 2"));
-        assert!(snapshot.contains("done 1"));
+        assert!(snapshot.contains("智能体 3"));
+        assert!(snapshot.contains("运行 2"));
+        assert!(snapshot.contains("完成 1"));
         assert!(snapshot.contains("Review multi-agent UI"));
         assert!(!lines
             .iter()
