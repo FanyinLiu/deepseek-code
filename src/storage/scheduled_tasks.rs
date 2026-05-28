@@ -155,8 +155,26 @@ impl ScheduledTaskStore {
             if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
                 continue;
             }
-            let content = crate::storage::read_text_file_capped(&path)?;
-            let task = toml::from_str::<ScheduledTask>(&content)?;
+            let content = match crate::storage::read_text_file_capped(&path) {
+                Ok(content) => content,
+                Err(error) => {
+                    tracing::warn!(
+                        "skipping unreadable scheduled task {}: {error}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
+            let task = match toml::from_str::<ScheduledTask>(&content) {
+                Ok(task) => task,
+                Err(error) => {
+                    tracing::warn!(
+                        "skipping malformed scheduled task {}: {error}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
             if let Err(error) = validate_task_id(&task.id) {
                 tracing::warn!(
                     "skipping invalid scheduled task {}: {error}",
@@ -367,5 +385,25 @@ mod tests {
             .save(&task)
             .expect_err("invalid ids should not be saved");
         assert!(err.to_string().contains("invalid scheduled task id"));
+    }
+
+    #[test]
+    fn scheduled_task_list_skips_malformed_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tasks_dir = dir.path().join("tasks");
+        let store = ScheduledTaskStore::new(tasks_dir.clone());
+        let valid = store
+            .create(
+                ScheduledTaskKind::Standalone,
+                "检查 CLI".to_string(),
+                dir.path().to_path_buf(),
+            )
+            .expect("create task");
+        std::fs::write(tasks_dir.join("broken.toml"), "id =").expect("write malformed task");
+
+        let tasks = store.list().expect("list should skip malformed task files");
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, valid.id);
     }
 }
