@@ -202,17 +202,7 @@ async fn ensure_bridge_dirs(project_root: &Path) -> Result<()> {
 }
 
 async fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).await?;
-    }
-    let temp = path.with_extension("json.tmp");
-    let body = serde_json::to_vec_pretty(value)?;
-    fs::write(&temp, body).await?;
-    if fs::try_exists(path).await.unwrap_or(false) {
-        fs::remove_file(path).await.ok();
-    }
-    fs::rename(temp, path).await?;
-    Ok(())
+    crate::storage::atomic::write_json_pretty_atomic(path, value)
 }
 
 async fn read_approval_file_capped(path: impl AsRef<Path>) -> std::io::Result<String> {
