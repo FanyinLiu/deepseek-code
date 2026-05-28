@@ -157,7 +157,7 @@ impl GoalStore {
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
         let data = toml::to_string_pretty(config)?;
-        fs::write(&self.path, data)
+        crate::storage::atomic::write_text_atomic(&self.path, &data)
             .with_context(|| format!("failed to write {}", self.path.display()))
     }
 
@@ -259,7 +259,7 @@ impl GoalStore {
         fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
         let path = dir.join(format!("{}.json", graph.id));
         let data = serde_json::to_string_pretty(graph)?;
-        fs::write(&path, format!("{data}\n"))
+        crate::storage::atomic::write_text_atomic(&path, &format!("{data}\n"))
             .with_context(|| format!("failed to write {}", path.display()))
     }
 }

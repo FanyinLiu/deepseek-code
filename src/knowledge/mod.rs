@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -103,8 +102,9 @@ impl KnowledgeStore {
         let risk_map = self.load_or_create_risk_map()?;
         let updated_at = Utc::now();
         let project_md = render_project_knowledge(&self.project_root, &risk_map, updated_at);
-        fs::write(self.project_path(), project_md)
-            .with_context(|| format!("write {}", self.project_path().display()))?;
+        let project_path = self.project_path();
+        crate::storage::atomic::write_text_atomic(&project_path, &project_md)
+            .with_context(|| format!("write {}", project_path.display()))?;
         Ok(ProjectKnowledgeUpdate {
             project_root: self.project_root.display().to_string(),
             project_path: self.project_path().display().to_string(),
@@ -124,7 +124,7 @@ impl KnowledgeStore {
                 .with_context(|| format!("parse {}", path.display()));
         }
         let risk_map = default_risk_map();
-        fs::write(&path, serde_json::to_string_pretty(&risk_map)?)
+        crate::storage::atomic::write_json_pretty_atomic(&path, &risk_map)
             .with_context(|| format!("write {}", path.display()))?;
         Ok(risk_map)
     }
@@ -166,13 +166,9 @@ impl KnowledgeStore {
             lesson: input.lesson,
             tags: input.tags,
         };
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.failure_memory_path())
-            .with_context(|| format!("open {}", self.failure_memory_path().display()))?;
-        writeln!(file, "{}", serde_json::to_string(&entry)?)
-            .with_context(|| format!("append {}", self.failure_memory_path().display()))?;
+        let path = self.failure_memory_path();
+        crate::storage::atomic::append_jsonl_locked(&path, &serde_json::to_string(&entry)?)
+            .with_context(|| format!("append {}", path.display()))?;
         Ok(entry)
     }
 

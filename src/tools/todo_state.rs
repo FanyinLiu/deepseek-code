@@ -111,10 +111,7 @@ pub fn write_todo_items(project_root: &Path, todos: Vec<Value>) -> Result<TodoSu
         "updated_at": chrono::Utc::now(),
         "todos": todos,
     });
-    std::fs::write(
-        todo_state_path(project_root),
-        serde_json::to_string_pretty(&payload)?,
-    )?;
+    crate::storage::atomic::write_json_pretty_atomic(&todo_state_path(project_root), &payload)?;
     Ok(summarize_todo_items(
         payload
             .get("todos")
