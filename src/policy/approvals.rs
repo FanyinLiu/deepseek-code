@@ -522,7 +522,7 @@ fn evaluate_tool_inner(
             )
         }
 
-        "edit_file" | "write_file" => {
+        "edit_file" | "write_file" | "notebook_edit" => {
             let path = match args.get("path").and_then(serde_json::Value::as_str) {
                 Some(path) => path,
                 None => {
@@ -694,7 +694,7 @@ fn primary_arg_for_tool<'a>(tool: &str, args: &'a serde_json::Value) -> Option<&
     match tool {
         "run_command" => args.get("command").and_then(serde_json::Value::as_str),
         "bash_output" => args.get("shell_id").and_then(serde_json::Value::as_str),
-        "read_file" | "write_file" | "edit_file" | "list_dir" => {
+        "read_file" | "write_file" | "edit_file" | "notebook_edit" | "list_dir" => {
             args.get("path").and_then(serde_json::Value::as_str)
         }
         "glob" | "grep" => args.get("pattern").and_then(serde_json::Value::as_str),
@@ -1393,6 +1393,54 @@ mod tests {
         let decision = evaluate_tool(
             "write_file",
             &args(serde_json::json!({ "path": "src/main.rs" })),
+            temp.path(),
+            &policy,
+        );
+
+        assert_eq!(decision.action, PolicyAction::Allow);
+        assert_eq!(decision.display.risk_level, RiskLevel::WriteProject);
+    }
+
+    #[test]
+    fn notebook_edit_is_treated_as_project_write() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let policy = PolicyConfig::default();
+
+        let decision = evaluate_tool(
+            "notebook_edit",
+            &args(serde_json::json!({
+                "path": "notebooks/analysis.ipynb",
+                "cell": "0",
+                "new_source": "print(1)"
+            })),
+            temp.path(),
+            &policy,
+        );
+
+        assert_eq!(decision.action, PolicyAction::AskOnce);
+        assert_eq!(decision.display.risk_level, RiskLevel::WriteProject);
+        assert!(decision
+            .display
+            .details
+            .contains("notebooks/analysis.ipynb"));
+    }
+
+    #[test]
+    fn allowed_tools_pattern_matches_notebook_edit_path() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let policy = PolicyConfig {
+            require_approval_for_write: false,
+            allowed_tools: Some(vec!["notebook_edit(notebooks/analysis.ipynb)".to_string()]),
+            ..PolicyConfig::default()
+        };
+
+        let decision = evaluate_tool(
+            "notebook_edit",
+            &args(serde_json::json!({
+                "path": "notebooks/analysis.ipynb",
+                "cell": "0",
+                "new_source": "print(1)"
+            })),
             temp.path(),
             &policy,
         );

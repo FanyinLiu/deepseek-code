@@ -2839,6 +2839,7 @@ impl Orchestrator {
             !tool_result.result.is_error
                 && (tool_result.call.function.name == "edit_file"
                     || tool_result.call.function.name == "write_file"
+                    || tool_result.call.function.name == "notebook_edit"
                     || tool_result.call.function.name == "apply_patch")
         });
         if had_edits {

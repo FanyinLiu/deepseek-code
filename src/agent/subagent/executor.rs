@@ -669,7 +669,10 @@ impl SubagentRuntimeBackend<'_> {
         }
 
         let _lock_guard = if let Some(bus) = self.bus {
-            if matches!(call.function.name.as_str(), "write_file" | "edit_file") {
+            if matches!(
+                call.function.name.as_str(),
+                "write_file" | "edit_file" | "notebook_edit"
+            ) {
                 let args: serde_json::Value = match serde_json::from_str(&call.function.arguments) {
                     Ok(args) => args,
                     Err(error) => {
@@ -771,7 +774,7 @@ fn collect_successful_file_access(
 
     match tool_call.function.name.as_str() {
         "read_file" => files_read.push(path.to_string()),
-        "write_file" | "edit_file" => files_written.push(path.to_string()),
+        "write_file" | "edit_file" | "notebook_edit" => files_written.push(path.to_string()),
         _ => {}
     }
 }

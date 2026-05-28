@@ -273,7 +273,7 @@ pub fn classify_tool(name: &str) -> &'static str {
     match name {
         "read_file" | "list_dir" => "read",
         "search_files" | "search_code" | "semantic_search" => "search",
-        "edit_file" | "write_file" | "apply_patch" => "edit",
+        "edit_file" | "write_file" | "notebook_edit" | "apply_patch" => "edit",
         "run_command" => "run",
         "git_status" | "git_diff" | "git_log" | "git_add" | "git_commit" => "git",
         "fetch_url" | "web_search" => "fetch",
@@ -298,7 +298,7 @@ pub fn summarize_tool_arguments(name: &str, arguments: &str) -> String {
     };
 
     match name {
-        "read_file" | "list_dir" | "edit_file" | "write_file" => value["path"]
+        "read_file" | "list_dir" | "edit_file" | "write_file" | "notebook_edit" => value["path"]
             .as_str()
             .map_or_else(|| truncate(arguments, 120), ToOwned::to_owned),
         "run_command" => value["command"]

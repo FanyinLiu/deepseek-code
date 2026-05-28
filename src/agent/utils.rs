@@ -4,7 +4,7 @@ pub fn risk_level_for_tool(name: &str) -> &'static str {
     match name {
         "read_file" | "list_dir" | "search_files" | "search_code" | "git_status" | "git_diff"
         | "git_log" => "SafeRead",
-        "edit_file" | "write_file" | "apply_patch" => "WriteProject",
+        "edit_file" | "write_file" | "notebook_edit" | "apply_patch" => "WriteProject",
         "run_command" => "CommandExecution",
         _ => "Unknown",
     }

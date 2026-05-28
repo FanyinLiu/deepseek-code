@@ -61,7 +61,7 @@ impl ToolBackend for LocalToolBackend {
 pub(crate) fn changed_files_for_call(call: &ToolCall) -> Vec<String> {
     if !matches!(
         call.function.name.as_str(),
-        "edit_file" | "write_file" | "apply_patch"
+        "edit_file" | "write_file" | "notebook_edit" | "apply_patch"
     ) {
         return Vec::new();
     }
@@ -127,6 +127,28 @@ mod tests {
         assert_eq!(
             changed_files_for_call(&call),
             vec!["src/lib.rs".to_string(), "tests/new.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn changed_files_extracts_notebook_edit_path() {
+        let call = ToolCall {
+            id: "call-1".into(),
+            call_type: "function".into(),
+            function: ToolCallFunction {
+                name: "notebook_edit".into(),
+                arguments: serde_json::json!({
+                    "path": "notebooks/analysis.ipynb",
+                    "cell": "0",
+                    "new_source": "print(1)"
+                })
+                .to_string(),
+            },
+        };
+
+        assert_eq!(
+            changed_files_for_call(&call),
+            vec!["notebooks/analysis.ipynb".to_string()]
         );
     }
 }

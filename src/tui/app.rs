@@ -5908,7 +5908,9 @@ fn approval_description_for_tool(tool_name: &str, risk: &crate::policy::RiskLeve
             "子 agent 需要读取工作区外或敏感路径".to_string()
         }
         ("read_file" | "list_dir", _) => "子 agent 需要读取项目文件".to_string(),
-        ("write_file" | "edit_file" | "apply_patch", _) => "子 agent 需要修改项目文件".to_string(),
+        ("write_file" | "edit_file" | "notebook_edit" | "apply_patch", _) => {
+            "子 agent 需要修改项目文件".to_string()
+        }
         ("fetch_url" | "web_search", _) => "子 agent 需要访问网络".to_string(),
         _ => "子 agent 需要执行工具调用".to_string(),
     }
@@ -5918,7 +5920,9 @@ fn approval_target_summary(tool_name: &str, arguments: &str) -> (&'static str, S
     let value = serde_json::from_str::<serde_json::Value>(arguments).unwrap_or_default();
     let target = match tool_name {
         "run_command" => value["command"].as_str(),
-        "read_file" | "list_dir" | "write_file" | "edit_file" => value["path"].as_str(),
+        "read_file" | "list_dir" | "write_file" | "edit_file" | "notebook_edit" => {
+            value["path"].as_str()
+        }
         "search_files" | "search_code" | "semantic_search" => value["query"].as_str(),
         "fetch_url" => value["url"].as_str(),
         _ => None,

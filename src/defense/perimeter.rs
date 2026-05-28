@@ -64,7 +64,10 @@ impl BehavioralPerimeter {
             }
         }
 
-        if matches!(tool_name, "write_file" | "edit_file" | "apply_patch") {
+        if matches!(
+            tool_name,
+            "write_file" | "edit_file" | "notebook_edit" | "apply_patch"
+        ) {
             if touches_gitignore(tool_name, &parsed, project_root) {
                 return Some(violation(
                     PerimeterCategory::GitignoreTampering,
@@ -196,7 +199,7 @@ fn is_obfuscated_or_self_modifying(value: &str) -> bool {
 }
 
 fn touches_gitignore(tool_name: &str, parsed: &serde_json::Value, project_root: &Path) -> bool {
-    if matches!(tool_name, "write_file" | "edit_file") {
+    if matches!(tool_name, "write_file" | "edit_file" | "notebook_edit") {
         return parsed["path"]
             .as_str()
             .is_some_and(|path| path_ends_with_gitignore(path, project_root));
@@ -320,6 +323,23 @@ mod tests {
             &args(
                 serde_json::json!({ "path": "src/config.rs", "content": "api_key = \"sk-test\"" }),
             ),
+            Path::new("."),
+        );
+        assert_eq!(
+            denied.expect("violation").category,
+            PerimeterCategory::HardcodedSecret
+        );
+    }
+
+    #[test]
+    fn denies_hardcoded_secret_notebook_edits() {
+        let denied = BehavioralPerimeter.check_tool_call(
+            "notebook_edit",
+            &args(serde_json::json!({
+                "path": "analysis.ipynb",
+                "cell": "0",
+                "new_source": "api_key = \"sk-test\""
+            })),
             Path::new("."),
         );
         assert_eq!(
