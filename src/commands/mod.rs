@@ -175,7 +175,8 @@ impl<'a> CommandEntry<'a> {
 #[derive(Clone)]
 pub struct CommandRegistry {
     commands: HashMap<&'static str, &'static SlashCommand>,
-    primary_commands: Vec<&'static SlashCommand>,
+    primary_commands_by_name: Vec<&'static SlashCommand>,
+    primary_commands_by_priority: Vec<&'static SlashCommand>,
     prompt_commands: HashMap<String, PromptCommand>,
 }
 
@@ -190,15 +191,23 @@ impl CommandRegistry {
     pub fn new() -> Self {
         let mut registry = Self {
             commands: HashMap::with_capacity(96),
-            primary_commands: Vec::with_capacity(64),
+            primary_commands_by_name: Vec::with_capacity(64),
+            primary_commands_by_priority: Vec::with_capacity(64),
             prompt_commands: HashMap::new(),
         };
         registry.register_all();
         registry
+            .primary_commands_by_name
+            .sort_by_key(|cmd| cmd.name);
+        registry
+            .primary_commands_by_priority
+            .sort_by_key(|cmd| (slash_priority(cmd.name), cmd.name));
+        registry
     }
 
     fn register(&mut self, cmd: &'static SlashCommand) {
-        self.primary_commands.push(cmd);
+        self.primary_commands_by_name.push(cmd);
+        self.primary_commands_by_priority.push(cmd);
         self.commands.insert(cmd.name, cmd);
         for &alias in cmd.aliases {
             self.commands.insert(alias, cmd);
@@ -353,25 +362,20 @@ impl CommandRegistry {
 
     /// Get a list of all primary commands for help display.
     #[must_use]
-    pub fn list_commands(&self) -> Vec<&'static SlashCommand> {
-        let mut list = self.primary_commands.clone();
-        list.sort_by_key(|cmd| cmd.name);
-        list
+    pub fn list_commands(&self) -> &[&'static SlashCommand] {
+        &self.primary_commands_by_name
     }
 
     /// Find commands matching a prefix (for autocomplete).
     #[must_use]
     pub fn match_prefix(&self, prefix: &str) -> Vec<&'static SlashCommand> {
-        let mut list: Vec<&'static SlashCommand> = self
-            .primary_commands
+        self.primary_commands_by_priority
             .iter()
             .copied()
             .filter(|cmd| {
                 cmd.name.starts_with(prefix) || cmd.aliases.iter().any(|a| a.starts_with(prefix))
             })
-            .collect();
-        list.sort_by_key(|cmd| (slash_priority(cmd.name), cmd.name));
-        list
+            .collect()
     }
 
     /// Unified listing across built-in and user prompt commands.
@@ -379,7 +383,8 @@ impl CommandRegistry {
     pub fn list_all(&self) -> Vec<CommandEntry<'_>> {
         let mut entries: Vec<CommandEntry<'_>> = self
             .list_commands()
-            .into_iter()
+            .iter()
+            .copied()
             .map(CommandEntry::Builtin)
             .collect();
         entries.extend(self.prompt_commands().into_iter().map(CommandEntry::Prompt));

@@ -276,7 +276,8 @@ fn catalog_payload(
     let registry = crate::commands::CommandRegistry::new();
     let mut builtins = registry
         .list_commands()
-        .into_iter()
+        .iter()
+        .copied()
         .map(|cmd| BuiltinCommandPayload {
             name: cmd.name.to_string(),
             aliases: cmd
@@ -292,18 +293,7 @@ fn catalog_payload(
         .collect::<Vec<_>>();
     builtins.sort_by(|a, b| a.name.cmp(&b.name));
 
-    let builtin_names = crate::commands::CommandRegistry::new()
-        .list_commands()
-        .into_iter()
-        .flat_map(|cmd| {
-            std::iter::once(cmd.name.to_string()).chain(
-                cmd.aliases
-                    .iter()
-                    .map(|alias| (*alias).to_string())
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .collect::<std::collections::HashSet<_>>();
+    let builtin_names = builtin_command_names(registry.list_commands());
 
     let mut custom = Vec::new();
     for location in command_locations(root) {
@@ -591,18 +581,8 @@ fn is_command_file(path: &Path) -> bool {
 
 fn find_custom_command(root: &Path, name: &str) -> Result<CustomCommandDocument, anyhow::Error> {
     let name = normalize_command_name(name);
-    let builtin_names = crate::commands::CommandRegistry::new()
-        .list_commands()
-        .into_iter()
-        .flat_map(|cmd| {
-            std::iter::once(cmd.name.to_string()).chain(
-                cmd.aliases
-                    .iter()
-                    .map(|alias| (*alias).to_string())
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .collect::<std::collections::HashSet<_>>();
+    let registry = crate::commands::CommandRegistry::new();
+    let builtin_names = builtin_command_names(registry.list_commands());
     if builtin_names.contains(&name) {
         bail!("custom command {name} conflicts with a built-in slash command");
     }
@@ -627,6 +607,23 @@ fn find_custom_command(root: &Path, name: &str) -> Result<CustomCommandDocument,
             bail!("ambiguous custom command {name}; matches: {paths}")
         }
     }
+}
+
+fn builtin_command_names(
+    commands: &[&'static crate::commands::SlashCommand],
+) -> std::collections::HashSet<String> {
+    let capacity = commands
+        .iter()
+        .map(|cmd| 1usize.saturating_add(cmd.aliases.len()))
+        .sum();
+    let mut names = std::collections::HashSet::with_capacity(capacity);
+    for cmd in commands {
+        names.insert(cmd.name.to_string());
+        for alias in cmd.aliases {
+            names.insert((*alias).to_string());
+        }
+    }
+    names
 }
 
 fn collect_matching_command_documents(
