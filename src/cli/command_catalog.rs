@@ -198,8 +198,8 @@ async fn run_custom_command(
 ) -> Result<(), anyhow::Error> {
     let command = find_custom_command(root, name)?;
     let raw_prompt = render_custom_command_prompt(&command.prompt_template, &args);
-    let bang_enabled = crate::commands::allowed_tools_permit_bang(command.allowed_tools.as_deref());
-    let prompt = crate::commands::expand_bang_lines(&raw_prompt, root, bang_enabled);
+    let prompt =
+        crate::commands::expand_bang_lines(&raw_prompt, root, command.allowed_tools.as_deref());
     let payload = CustomCommandRunPayload {
         name: command.name,
         description: command.description,

@@ -134,9 +134,14 @@ pub(super) fn parse_prompt_command(content: &str) -> ParsedPrompt {
 
 /// Expand leading `!cmd` lines in `text` by running each command via `sh -c`
 /// from `project_root` and inlining its stdout. Lines that do not start with
-/// `!` pass through. When `enabled` is false the text is returned unchanged.
+/// `!` pass through. A bang line only runs when the active `allowed-tools`
+/// permits it as a `run_command` call.
 #[must_use]
-pub fn expand_bang_lines(text: &str, project_root: &Path, enabled: bool) -> String {
+pub fn expand_bang_lines(
+    text: &str,
+    project_root: &Path,
+    allowed_tools: Option<&[String]>,
+) -> String {
     if !text.contains('!') {
         return text.to_string();
     }
@@ -148,7 +153,7 @@ pub fn expand_bang_lines(text: &str, project_root: &Path, enabled: bool) -> Stri
         };
         let trimmed = body.trim_start();
         let indent_len = body.len() - trimmed.len();
-        if !enabled || !trimmed.starts_with('!') {
+        if !trimmed.starts_with('!') {
             out.push_str(line);
             continue;
         }
@@ -157,11 +162,20 @@ pub fn expand_bang_lines(text: &str, project_root: &Path, enabled: bool) -> Stri
             out.push_str(line);
             continue;
         }
+        if !bang_command_allowed(command, allowed_tools) {
+            out.push_str(line);
+            continue;
+        }
         out.push_str(&body[..indent_len]);
         out.push_str(&run_bang_line(command, project_root));
         out.push_str(eol);
     }
     out
+}
+
+fn bang_command_allowed(command: &str, allowed_tools: Option<&[String]>) -> bool {
+    let args = serde_json::json!({ "command": command });
+    crate::policy::approvals::allowed_tools_match_tool_call(allowed_tools, "run_command", &args)
 }
 
 fn run_bang_line(command: &str, project_root: &Path) -> String {
@@ -187,20 +201,6 @@ fn run_bang_line(command: &str, project_root: &Path) -> String {
         }
         Err(error) => format!("[!{command} error: {error}]"),
     }
-}
-
-/// True iff `allowed_tools` would permit a custom command to shell out via
-/// inline `!cmd` lines. Matches `Bash` case-insensitively to align with
-/// Claude Code's `allowed-tools: Bash(...)` convention.
-#[must_use]
-pub fn allowed_tools_permit_bang(allowed: Option<&[String]>) -> bool {
-    let Some(tools) = allowed else {
-        return false;
-    };
-    tools.iter().any(|tool| {
-        let head = tool.split(['(', ':']).next().unwrap_or("");
-        head.trim().eq_ignore_ascii_case("Bash")
-    })
 }
 
 /// Parse the value of an `allowed-tools:` frontmatter line.

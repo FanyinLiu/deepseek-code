@@ -5,8 +5,8 @@ mod schedule;
 mod tasks;
 
 pub use prompt::{
-    allowed_tools_permit_bang, apply_positional_args, expand_bang_lines, parse_allowed_tools_value,
-    prompt_command_name, PromptCommand,
+    apply_positional_args, expand_bang_lines, parse_allowed_tools_value, prompt_command_name,
+    PromptCommand,
 };
 
 use std::collections::HashMap;
@@ -341,8 +341,8 @@ impl CommandRegistry {
                 ctx.app.pending_allowed_tools = Some(tools.clone());
                 tools_note = format!(" [tools={}]", tools.join(","));
             }
-            let bang_enabled = allowed_tools_permit_bang(prompt.allowed_tools.as_deref());
-            let expanded = expand_bang_lines(&rendered, ctx.project_root, bang_enabled);
+            let expanded =
+                expand_bang_lines(&rendered, ctx.project_root, prompt.allowed_tools.as_deref());
             ctx.app.queued_inputs.push_back(expanded);
             let label = prompt
                 .source_path
@@ -2953,25 +2953,12 @@ mod tests {
     }
 
     #[test]
-    fn allowed_tools_permit_bang_matches_bash_case_insensitively() {
-        assert!(allowed_tools_permit_bang(Some(&["Bash".to_string()])));
-        assert!(allowed_tools_permit_bang(Some(
-            &["bash(git:*)".to_string()]
-        )));
-        assert!(allowed_tools_permit_bang(Some(&[
-            "read_file".to_string(),
-            "BASH".to_string()
-        ])));
-        assert!(!allowed_tools_permit_bang(Some(&["read_file".to_string()])));
-        assert!(!allowed_tools_permit_bang(None));
-    }
-
-    #[test]
     fn expand_bang_lines_runs_shell_when_enabled() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(temp.path().join("note.txt"), "marker\n").expect("write");
         let body = "Before\n!echo hello world\n!cat note.txt\nAfter";
-        let out = expand_bang_lines(body, temp.path(), true);
+        let allowed = vec!["Bash".to_string()];
+        let out = expand_bang_lines(body, temp.path(), Some(&allowed));
         assert!(out.contains("hello world"));
         assert!(out.contains("marker"));
         assert!(!out.contains("!echo"));
@@ -2980,7 +2967,7 @@ mod tests {
     #[test]
     fn expand_bang_lines_passthrough_when_disabled() {
         let body = "x\n!echo nope\n";
-        let out = expand_bang_lines(body, std::path::Path::new("."), false);
+        let out = expand_bang_lines(body, std::path::Path::new("."), None);
         assert_eq!(out, body);
     }
 
@@ -2988,8 +2975,22 @@ mod tests {
     fn expand_bang_lines_reports_failures_inline() {
         let temp = tempfile::tempdir().expect("tempdir");
         let body = "!nonexistent-command-zzz-octo";
-        let out = expand_bang_lines(body, temp.path(), true);
+        let allowed = vec!["Bash".to_string()];
+        let out = expand_bang_lines(body, temp.path(), Some(&allowed));
         assert!(out.contains("failed") || out.contains("not found"));
+    }
+
+    #[test]
+    fn expand_bang_lines_honors_bash_allowed_tools_pattern() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let allowed = vec!["Bash(echo:*)".to_string()];
+        let body = "!echo allowed\n!touch blocked";
+
+        let out = expand_bang_lines(body, temp.path(), Some(&allowed));
+
+        assert!(out.contains("allowed"));
+        assert!(out.contains("!touch blocked"));
+        assert!(!temp.path().join("blocked").exists());
     }
 
     #[test]

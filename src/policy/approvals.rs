@@ -636,6 +636,19 @@ fn matches_allowed_entry(entry: &str, tool_name: &str, args: &serde_json::Value)
         .unwrap_or(false)
 }
 
+pub(crate) fn allowed_tools_match_tool_call(
+    allowed: Option<&[String]>,
+    tool_name: &str,
+    args: &serde_json::Value,
+) -> bool {
+    let Some(allowed) = allowed else {
+        return false;
+    };
+    allowed
+        .iter()
+        .any(|entry| matches_allowed_entry(entry, tool_name, args))
+}
+
 fn allowed_entry_name_matches(entry_name: &str, tool_name: &str) -> bool {
     entry_name == tool_name || (is_bash_entry(entry_name) && tool_name == "run_command")
 }
