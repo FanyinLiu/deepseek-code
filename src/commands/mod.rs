@@ -10,12 +10,15 @@ pub use prompt::{
 };
 
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{Read, Write};
+use std::process::ExitStatus;
 use unicode_width::UnicodeWidthStr;
 
 use prompt::parse_prompt_command;
 #[cfg(test)]
 use tasks::{render_background_tasks, unified_background_task_views};
+
+const CLIPBOARD_STDERR_BYTES: usize = 64 * 1024;
 
 /// Context available when executing a slash command.
 pub struct CommandContext<'a> {
@@ -490,19 +493,22 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|e| format!("clipboard command failed: {e}"))?;
-        child
+        let mut stdin = child
             .stdin
-            .as_mut()
-            .ok_or_else(|| "clipboard stdin unavailable".to_string())?
+            .take()
+            .ok_or_else(|| "clipboard stdin unavailable".to_string())?;
+        stdin
             .write_all(text.as_bytes())
             .map_err(|e| format!("clipboard write failed: {e}"))?;
-        let output = child
-            .wait_with_output()
+        drop(stdin);
+        let output = wait_with_limited_stderr(child, CLIPBOARD_STDERR_BYTES)
             .map_err(|e| format!("clipboard command failed: {e}"))?;
         if output.status.success() {
             Ok(())
         } else {
-            Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+            Err(limited_stderr_text(&output.stderr, output.stderr_truncated)
+                .trim()
+                .to_string())
         }
     } else {
         let candidates: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
@@ -530,6 +536,70 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
         }
         Err("No clipboard helper found on PATH.".to_string())
     }
+}
+
+struct LimitedStderrOutput {
+    status: ExitStatus,
+    stderr: Vec<u8>,
+    stderr_truncated: bool,
+}
+
+fn wait_with_limited_stderr(
+    mut child: std::process::Child,
+    max_stderr_bytes: usize,
+) -> Result<LimitedStderrOutput, std::io::Error> {
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("failed to capture command stderr"))?;
+    let stderr_handle = std::thread::spawn(move || read_limited_stream(stderr, max_stderr_bytes));
+    let status = child.wait()?;
+    let (stderr, stderr_truncated) = stderr_handle
+        .join()
+        .unwrap_or_else(|_| Err(std::io::Error::other("stderr reader panicked")))?;
+
+    Ok(LimitedStderrOutput {
+        status,
+        stderr,
+        stderr_truncated,
+    })
+}
+
+fn read_limited_stream<R: Read>(
+    mut reader: R,
+    max_bytes: usize,
+) -> Result<(Vec<u8>, bool), std::io::Error> {
+    let mut collected = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0u8; 8192];
+
+    loop {
+        let bytes_read = reader.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        let remaining = max_bytes.saturating_sub(collected.len());
+        let keep = bytes_read.min(remaining);
+        if keep > 0 {
+            collected.extend_from_slice(&buffer[..keep]);
+        }
+        if keep < bytes_read || collected.len() >= max_bytes {
+            truncated = true;
+        }
+    }
+
+    Ok((collected, truncated))
+}
+
+fn limited_stderr_text(bytes: &[u8], truncated: bool) -> String {
+    let mut text = String::from_utf8_lossy(bytes).to_string();
+    if truncated {
+        if !text.ends_with('\n') && !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str("[stderr truncated]");
+    }
+    text
 }
 
 fn cmd_undo(_args: &str, ctx: &mut CommandContext) -> CommandResult {
@@ -2851,6 +2921,23 @@ mod tests {
     fn test_registry_has_commands() {
         let reg = CommandRegistry::new();
         assert!(!reg.list_commands().is_empty());
+    }
+
+    #[test]
+    fn limited_stream_reader_caps_clipboard_stderr() {
+        let input = std::io::Cursor::new("x".repeat(8192));
+        let (bytes, truncated) = read_limited_stream(input, 1024).expect("limited stream");
+
+        assert_eq!(bytes.len(), 1024);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn limited_stderr_text_marks_truncation() {
+        let output = limited_stderr_text(b"error", true);
+
+        assert!(output.contains("error"));
+        assert!(output.contains("[stderr truncated]"));
     }
 
     #[test]
