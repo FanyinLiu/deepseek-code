@@ -1,7 +1,12 @@
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
+
+const APPLY_PATCH_STDOUT_BYTES: usize = 256 * 1024;
+const APPLY_PATCH_STDERR_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone)]
 struct EditRecord {
@@ -247,12 +252,12 @@ fn apply_patch_with_git(
     patch: &str,
     git_program: &str,
 ) -> Result<(), anyhow::Error> {
-    let mut child = std::process::Command::new(git_program)
+    let mut child = Command::new(git_program)
         .args(["apply", "--whitespace=fix"])
         .current_dir(project_root)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -264,18 +269,91 @@ fn apply_patch_with_git(
             }
         })?;
 
-    use std::io::Write;
-    if let Some(stdin) = child.stdin.as_mut() {
+    if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(patch.as_bytes())?;
     }
 
-    let output = child.wait_with_output()?;
+    let output = wait_with_limited_output(child)?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = output_text(&output.stderr, output.stderr_truncated, "stderr");
         anyhow::bail!("patch apply failed: {stderr}");
     }
 
     Ok(())
+}
+
+struct LimitedApplyOutput {
+    status: ExitStatus,
+    stderr: Vec<u8>,
+    stderr_truncated: bool,
+}
+
+fn wait_with_limited_output(
+    mut child: std::process::Child,
+) -> Result<LimitedApplyOutput, std::io::Error> {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("failed to capture git apply stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("failed to capture git apply stderr"))?;
+
+    let stdout_handle =
+        std::thread::spawn(move || read_limited_stream(stdout, APPLY_PATCH_STDOUT_BYTES));
+    let stderr_handle =
+        std::thread::spawn(move || read_limited_stream(stderr, APPLY_PATCH_STDERR_BYTES));
+    let status = child.wait()?;
+    let (_stdout, _stdout_truncated) = stdout_handle
+        .join()
+        .unwrap_or_else(|_| Err(std::io::Error::other("git apply stdout reader panicked")))?;
+    let (stderr, stderr_truncated) = stderr_handle
+        .join()
+        .unwrap_or_else(|_| Err(std::io::Error::other("git apply stderr reader panicked")))?;
+
+    Ok(LimitedApplyOutput {
+        status,
+        stderr,
+        stderr_truncated,
+    })
+}
+
+fn read_limited_stream<R: Read>(
+    mut reader: R,
+    max_bytes: usize,
+) -> Result<(Vec<u8>, bool), std::io::Error> {
+    let mut collected = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0u8; 8192];
+
+    loop {
+        let bytes_read = reader.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        let remaining = max_bytes.saturating_sub(collected.len());
+        let keep = bytes_read.min(remaining);
+        if keep > 0 {
+            collected.extend_from_slice(&buffer[..keep]);
+        }
+        if keep < bytes_read || collected.len() >= max_bytes {
+            truncated = true;
+        }
+    }
+
+    Ok((collected, truncated))
+}
+
+fn output_text(bytes: &[u8], truncated: bool, stream: &str) -> String {
+    let mut text = String::from_utf8_lossy(bytes).to_string();
+    if truncated {
+        if !text.ends_with('\n') && !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&format!("[git apply {stream} truncated]"));
+    }
+    text
 }
 
 /// Extract affected workspace paths from a patch before it is approved.
@@ -411,6 +489,23 @@ rename to new.txt
                 "old.rs".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn limited_stream_reader_caps_git_apply_output() {
+        let input = std::io::Cursor::new("x".repeat(8192));
+        let (bytes, truncated) = read_limited_stream(input, 1024).expect("limited stream");
+
+        assert_eq!(bytes.len(), 1024);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn output_text_marks_git_apply_truncation() {
+        let output = output_text(b"error", true, "stderr");
+
+        assert!(output.contains("error"));
+        assert!(output.contains("[git apply stderr truncated]"));
     }
 }
 
