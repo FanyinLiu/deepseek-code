@@ -1,6 +1,6 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use chrono::Utc;
 
@@ -126,7 +126,17 @@ fn collect_file_snapshots(checkpoint_id: uuid::Uuid, project_root: &Path) -> Vec
         }
 
         let path = entry.path();
-        let relative = path.strip_prefix(project_root).unwrap_or(path);
+        let Ok(relative) = path.strip_prefix(project_root) else {
+            tracing::warn!(
+                "skipping checkpoint path outside project: {}",
+                path.display()
+            );
+            continue;
+        };
+        if !is_safe_relative_path(relative) {
+            tracing::warn!("skipping unsafe checkpoint path: {}", relative.display());
+            continue;
+        }
 
         // Skip .git and .octocode directories
         if relative.starts_with(".git") || relative.starts_with(".octocode") {
@@ -165,11 +175,15 @@ fn backup_small_file(
     if content.len() >= 100_000 {
         return None;
     }
+    if !is_safe_relative_path(relative) {
+        tracing::warn!(
+            "refusing unsafe checkpoint backup path: {}",
+            relative.display()
+        );
+        return None;
+    }
 
-    let backup_dir = project_root
-        .join(".octocode")
-        .join("checkpoints")
-        .join(checkpoint_id.to_string());
+    let backup_dir = checkpoint_backup_dir(project_root, &checkpoint_id);
     let backup_file = backup_dir.join(relative);
     if let Some(parent) = backup_file.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
@@ -204,8 +218,9 @@ fn find_checkpoint<'a>(
 fn restore_checkpoint(checkpoint: &Checkpoint, project_root: &Path) -> Result<(), anyhow::Error> {
     for snapshot in &checkpoint.file_snapshot {
         if let Some(ref backup) = snapshot.backup_path {
-            let target = project_root.join(&snapshot.path);
+            let target = resolve_snapshot_target(project_root, &snapshot.path)?;
             if backup.exists() {
+                ensure_backup_path_trusted(project_root, &checkpoint.id, backup)?;
                 if let Some(parent) = target.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
@@ -235,15 +250,104 @@ fn cleanup_checkpoint_backups(checkpoints: &[Checkpoint], project_root: &Path) {
     for checkpoint in checkpoints {
         for snapshot in &checkpoint.file_snapshot {
             if let Some(ref backup) = snapshot.backup_path {
-                let _ = std::fs::remove_file(backup);
+                if backup_path_is_trusted(project_root, &checkpoint.id, backup) {
+                    let _ = std::fs::remove_file(backup);
+                } else {
+                    tracing::warn!(
+                        "skipping untrusted checkpoint backup path: {}",
+                        backup.display()
+                    );
+                }
             }
         }
-        let checkpoint_dir = project_root
-            .join(".octocode")
-            .join("checkpoints")
-            .join(checkpoint.id.to_string());
+        let checkpoint_dir = checkpoint_backup_dir(project_root, &checkpoint.id);
         let _ = std::fs::remove_dir_all(&checkpoint_dir);
     }
+}
+
+fn checkpoint_backup_dir(project_root: &Path, checkpoint_id: &uuid::Uuid) -> PathBuf {
+    project_root
+        .join(".octocode")
+        .join("checkpoints")
+        .join(checkpoint_id.to_string())
+}
+
+fn is_safe_relative_path(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
+fn resolve_snapshot_target(project_root: &Path, relative: &Path) -> Result<PathBuf, anyhow::Error> {
+    if !is_safe_relative_path(relative) {
+        anyhow::bail!(
+            "checkpoint snapshot path escapes project: {}",
+            relative.display()
+        );
+    }
+
+    let target = project_root.join(relative);
+    let canonical_root =
+        std::fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    let canonical_target = canonicalize_existing_prefix(&target)?;
+    if !canonical_target.starts_with(&canonical_root) {
+        anyhow::bail!(
+            "checkpoint snapshot path escapes project: {}",
+            relative.display()
+        );
+    }
+    Ok(target)
+}
+
+fn canonicalize_existing_prefix(path: &Path) -> Result<PathBuf, anyhow::Error> {
+    if path.exists() {
+        return Ok(std::fs::canonicalize(path)?);
+    }
+
+    let mut missing = Vec::new();
+    let mut ancestor = path;
+    while !ancestor.exists() {
+        let name = ancestor
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("cannot canonicalize path: {}", path.display()))?;
+        missing.push(name.to_os_string());
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("cannot canonicalize path: {}", path.display()))?;
+    }
+
+    let mut canonical = std::fs::canonicalize(ancestor)?;
+    for component in missing.iter().rev() {
+        canonical.push(component);
+    }
+    Ok(canonical)
+}
+
+fn ensure_backup_path_trusted(
+    project_root: &Path,
+    checkpoint_id: &uuid::Uuid,
+    backup: &Path,
+) -> Result<(), anyhow::Error> {
+    if backup_path_is_trusted(project_root, checkpoint_id, backup) {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "checkpoint backup path escapes checkpoint dir: {}",
+            backup.display()
+        );
+    }
+}
+
+fn backup_path_is_trusted(project_root: &Path, checkpoint_id: &uuid::Uuid, backup: &Path) -> bool {
+    let root = checkpoint_backup_dir(project_root, checkpoint_id);
+    let Ok(canonical_root) = std::fs::canonicalize(root) else {
+        return false;
+    };
+    let Ok(canonical_backup) = std::fs::canonicalize(backup) else {
+        return false;
+    };
+    canonical_backup.starts_with(canonical_root)
 }
 
 fn hash_bytes(bytes: &[u8]) -> String {
@@ -349,5 +453,71 @@ mod tests {
 
         assert!(!first_dir.exists());
         assert!(second_dir.exists());
+    }
+
+    #[test]
+    fn rollback_rejects_checkpoint_path_escape() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let outside_name = format!("octo-outside-{}.txt", uuid::Uuid::new_v4());
+        let outside = root
+            .path()
+            .parent()
+            .expect("tempdir parent")
+            .join(&outside_name);
+        std::fs::write(&outside, "keep").expect("write outside file");
+
+        let checkpoint_id = uuid::Uuid::new_v4();
+        let backup = checkpoint_backup_dir(root.path(), &checkpoint_id).join("tracked.txt");
+        std::fs::create_dir_all(backup.parent().expect("backup parent")).expect("mkdir backup");
+        std::fs::write(&backup, "restored").expect("write backup");
+        let mut session = test_session(root.path());
+        session.checkpoints.push(Checkpoint {
+            id: checkpoint_id,
+            turn_id: TurnId::new_v4(),
+            label: "malicious".to_string(),
+            file_snapshot: vec![FileSnapshot {
+                path: PathBuf::from(format!("../{outside_name}")),
+                content_hash: "hash".to_string(),
+                backup_path: Some(backup),
+            }],
+            created_at: Utc::now(),
+        });
+
+        let error = CheckpointManager::rollback_to(&session, &checkpoint_id, root.path())
+            .expect_err("rollback should reject path escape");
+
+        assert!(error.to_string().contains("escapes project"));
+        assert_eq!(
+            std::fs::read_to_string(&outside).expect("read outside file"),
+            "keep"
+        );
+        let _ = std::fs::remove_file(outside);
+    }
+
+    #[test]
+    fn cleanup_skips_untrusted_backup_paths() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let outside = root.path().join("outside-backup.txt");
+        std::fs::write(&outside, "keep").expect("write outside backup");
+        let checkpoint_id = uuid::Uuid::new_v4();
+        let mut session = test_session(root.path());
+        session.checkpoints.push(Checkpoint {
+            id: checkpoint_id,
+            turn_id: TurnId::new_v4(),
+            label: "malicious".to_string(),
+            file_snapshot: vec![FileSnapshot {
+                path: PathBuf::from("tracked.txt"),
+                content_hash: "hash".to_string(),
+                backup_path: Some(outside.clone()),
+            }],
+            created_at: Utc::now(),
+        });
+
+        CheckpointManager::cleanup_checkpoints(&session, root.path(), 0);
+
+        assert_eq!(
+            std::fs::read_to_string(outside).expect("outside backup remains"),
+            "keep"
+        );
     }
 }
