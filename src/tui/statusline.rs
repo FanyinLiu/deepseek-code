@@ -241,10 +241,12 @@ fn compact_scaled_label(value: u64, unit: u64, suffix: &str) -> String {
 }
 
 fn compact_permissions(permissions: &str) -> &'static str {
+    // Match the CLI vocabulary (`--tool-approval ask`) and avoid the
+    // imperative "confirm" — the system is asking, not commanding.
     if permissions.contains("bypass") {
         "auto"
     } else {
-        "confirm"
+        "ask"
     }
 }
 
@@ -332,7 +334,7 @@ mod tests {
         assert!(!rendered.contains("↓"));
         assert!(!rendered.contains("web:on"));
         assert!(!rendered.contains("¥"));
-        assert!(rendered.contains("confirm"));
+        assert!(rendered.contains("ask"));
         let status_cell = terminal.backend().buffer().cell((2, 1)).expect("cell");
         assert_eq!(status_cell.bg, theme::palette().canvas);
     }
@@ -381,7 +383,7 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect();
-        assert!(rendered.contains("confirm"));
+        assert!(rendered.contains("ask"));
         assert!(rendered.contains("ds/flash"));
         assert!(rendered.contains("Context 128/12K (1.1%)"));
     }

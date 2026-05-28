@@ -35,7 +35,7 @@ fn preview_tui_works_with_dumb_non_tty_stdio() {
     );
     assert!(stdout.contains("Context") || stdout.contains("上下文"));
     assert!(stdout.contains("ready"));
-    assert!(stdout.contains("confirm"));
+    assert!(stdout.contains("ask"));
 }
 
 #[test]
