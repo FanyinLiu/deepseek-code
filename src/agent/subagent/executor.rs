@@ -111,6 +111,9 @@ impl SubagentExecutor {
             .lane
             .clone()
             .unwrap_or(ExecutionLane::ToolLoopThinking);
+        let runtime_config =
+            crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
+        let subagent_rules = self.effective_prompt_rules();
 
         // Determine effective tools based on allowed_tools config.
         // Subagents can spawn child agents when spawn_depth < MAX_SPAWN_DEPTH.
@@ -155,7 +158,6 @@ impl SubagentExecutor {
 
             // Build prompt
             let builder = PromptBuilder::new(model.clone(), lane.clone(), true);
-            let subagent_rules = self.effective_prompt_rules();
             let (_, messages) =
                 builder.build(&session, Some(&subagent_rules), None, &effective_tools);
 
@@ -239,6 +241,7 @@ impl SubagentExecutor {
                                 &stream_result.tool_calls,
                                 turn_id,
                                 &mut session,
+                                &runtime_config,
                                 event_tx,
                             )
                             .await;
@@ -327,11 +330,7 @@ impl SubagentExecutor {
             },
         );
 
-        // SubagentStop hook fires once per completed subagent. We load the
-        // config just-in-time because the executor doesn't hold a HooksConfig
-        // reference — this is fine since subagent completion is infrequent.
-        let config = crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
-        if !config.hooks.subagent_stop.is_empty() {
+        if !runtime_config.hooks.subagent_stop.is_empty() {
             let mut payload = crate::hooks::HookPayload::new(
                 crate::hooks::HookEvent::SubagentStop,
                 self.agent_id.clone(),
@@ -342,10 +341,10 @@ impl SubagentExecutor {
             payload.duration_ms = Some(result.duration_ms);
             let _ = crate::hooks::run_configured_hooks(
                 crate::hooks::HookEvent::SubagentStop,
-                &config.hooks,
+                &runtime_config.hooks,
                 &payload,
                 &self.project_root,
-                config.policy.command_timeout_seconds.max(5),
+                runtime_config.policy.command_timeout_seconds.max(5),
             )
             .await;
         }
@@ -409,12 +408,11 @@ impl SubagentExecutor {
         tool_calls: &[ToolCall],
         _turn_id: TurnId,
         session: &mut Session,
+        runtime_config: &crate::storage::Config,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
     ) -> Vec<(ToolCall, ToolResultRecord)> {
         let mut results = Vec::new();
         let mut audit_meta: HashMap<String, ToolAuditMeta> = HashMap::new();
-        let runtime_config =
-            crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
         let policy_config = runtime_config.policy.clone();
         let hooks_config = runtime_config.hooks.clone();
         let dispatch_config =
