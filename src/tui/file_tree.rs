@@ -243,7 +243,6 @@ pub fn render_file_tree(f: &mut Frame, area: Rect, tree: &FileTree) {
             ("  ", palette.secondary)
         };
 
-        let _text = format!("{}{}{}", indent, icon, node.name);
         let style = if is_selected {
             Style::default()
                 .fg(palette.text)
@@ -269,14 +268,12 @@ pub fn render_file_tree(f: &mut Frame, area: Rect, tree: &FileTree) {
 
     let visible = inner.height as usize;
     let start = tree.scroll_offset.min(lines.len().saturating_sub(1));
-    let end = (start + visible).min(lines.len());
-    let visible_lines = if start < end {
-        lines[start..end].to_vec()
-    } else {
-        Vec::new()
-    };
+    if start > 0 {
+        lines.drain(..start);
+    }
+    lines.truncate(visible);
 
-    let paragraph = Paragraph::new(Text::from(visible_lines)).style(theme::style_card());
+    let paragraph = Paragraph::new(Text::from(lines)).style(theme::style_card());
     f.render_widget(paragraph, inner);
 }
 

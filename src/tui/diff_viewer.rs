@@ -71,8 +71,6 @@ pub fn render_diff_viewer(
             DiffStatus::Rejected => palette.danger,
         };
 
-        // Header: path + stats + status
-        let _header = format!("{} {} ({})", status_icon, item.path, item.stats);
         let header_style = if is_selected {
             Style::default()
                 .fg(palette.warning)
@@ -85,16 +83,15 @@ pub fn render_diff_viewer(
         };
 
         all_lines.push(Line::from(vec![
-            Span::styled(status_icon.to_string(), Style::default().fg(status_color)),
+            Span::styled(status_icon, Style::default().fg(status_color)),
             Span::styled(" ", header_style),
             Span::styled(format!("{} ({})", item.path, item.stats), header_style),
         ]));
 
         // Diff lines with syntax highlighting attempt
         let lang = syntax_highlight::lang_from_path(&item.path);
-        let diff_lines: Vec<&str> = item.diff.lines().collect();
 
-        for line in &diff_lines {
+        for line in item.diff.lines() {
             let styled_line = if line.starts_with("+++ ") || line.starts_with("--- ") {
                 Line::from(Span::styled(
                     truncate(line, area.width as usize),
@@ -132,10 +129,12 @@ pub fn render_diff_viewer(
     let visible = area.height as usize;
     let max_start = all_lines.len().saturating_sub(visible);
     let start = diff_scroll.min(max_start);
-    let end = (start + visible).min(all_lines.len());
-    let visible_lines = all_lines[start..end].to_vec();
+    if start > 0 {
+        all_lines.drain(..start);
+    }
+    all_lines.truncate(visible);
 
-    let paragraph = Paragraph::new(Text::from(visible_lines))
+    let paragraph = Paragraph::new(Text::from(all_lines))
         .style(Style::default().bg(palette.canvas))
         .wrap(Wrap { trim: false });
 
@@ -144,7 +143,7 @@ pub fn render_diff_viewer(
 
 /// Try to syntax-highlight a diff line (with + or - prefix).
 fn try_highlight_diff_line(line: &str, lang: Option<&str>, is_add: bool) -> Vec<Span<'static>> {
-    let prefix = &line[..1];
+    let prefix = if is_add { "+" } else { "-" };
     let rest = &line[1..];
     let palette = theme::palette();
     let prefix_color = if is_add {
@@ -155,7 +154,7 @@ fn try_highlight_diff_line(line: &str, lang: Option<&str>, is_add: bool) -> Vec<
     let prefix_bg = palette.surface_alt;
 
     let mut spans = vec![Span::styled(
-        prefix.to_string(),
+        prefix,
         Style::default().fg(prefix_color).bg(prefix_bg),
     )];
 
