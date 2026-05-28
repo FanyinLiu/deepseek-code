@@ -186,27 +186,13 @@ fn ask_user_question_payload(args: &serde_json::Value) -> Result<String, anyhow:
         let parsed: crate::tools::ask_user::AskUserArgs = serde_json::from_value(args.clone())?;
         return crate::tools::ask_user::ask_user(parsed);
     }
-    let question = args
-        .get("question")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("question is required"))?;
-    let options = args
-        .get("options")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| anyhow::anyhow!("options must be an array"))?;
-    if options.len() < 2 {
-        anyhow::bail!("options needs at least 2 options");
-    }
+    let pending = crate::tools::ask_user::pending_question_from_question_value(args)?;
     let mut lines = vec![
         "User decision required".to_string(),
-        format!("question  {question}"),
+        format!("question  {}", pending.summary),
         format!(
             "select    {}",
-            if args
-                .get("multi_select")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-            {
+            if pending.multi_select {
                 "multiple"
             } else {
                 "one"
@@ -214,17 +200,14 @@ fn ask_user_question_payload(args: &serde_json::Value) -> Result<String, anyhow:
         ),
         String::new(),
     ];
-    for (idx, option) in options.iter().enumerate() {
-        let label = option
-            .get("label")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("option label is required"))?;
-        let description = option
-            .get("description")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
+    for (idx, label) in pending.options.iter().enumerate() {
+        let description = pending.descriptions.get(idx).map_or("", String::as_str);
         lines.push(format!("{}. {}  {}", idx + 1, label, description));
-        if let Some(preview) = option.get("preview").and_then(serde_json::Value::as_str) {
+        if let Some(preview) = pending
+            .previews
+            .get(idx)
+            .and_then(|preview| preview.as_ref())
+        {
             if !preview.trim().is_empty() {
                 lines.push(format!("   preview: {}", preview.trim()));
             }
@@ -753,6 +736,27 @@ mod tests {
 
         assert!(is_error);
         assert!(output.contains("task not found"));
+    }
+
+    #[tokio::test]
+    async fn ask_user_question_rejects_multi_select_previews() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tool = call(
+            "ask_user_question",
+            serde_json::json!({
+                "question": "Pick options?",
+                "multi_select": true,
+                "options": [
+                    {"label": "Fast", "preview": "skip validation"},
+                    {"label": "Safe"}
+                ]
+            }),
+        );
+
+        let (output, is_error) = execute_single_tool(&tool, temp.path()).await;
+
+        assert!(is_error);
+        assert!(output.contains("previews only supported"));
     }
 
     #[test]

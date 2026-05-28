@@ -39,6 +39,24 @@ pub struct QuestionOption {
     pub preview: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct SingleQuestionArgs {
+    pub question: String,
+    #[serde(default)]
+    pub header: Option<String>,
+    #[serde(default)]
+    pub multi_select: bool,
+    pub options: Vec<SingleQuestionOption>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SingleQuestionOption {
+    pub label: String,
+    #[serde(default)]
+    pub description: String,
+    pub preview: Option<String>,
+}
+
 pub fn ask_user(args: AskUserArgs) -> Result<String> {
     validate(&args)?;
     Ok(render_fallback(&args))
@@ -105,6 +123,40 @@ pub fn pending_question_from_value(value: &serde_json::Value) -> Result<PendingU
     })
 }
 
+pub fn pending_question_from_tool_value(
+    tool_name: &str,
+    value: &serde_json::Value,
+) -> Result<PendingUserQuestion> {
+    match tool_name {
+        "ask_user" => pending_question_from_value(value),
+        "ask_user_question" => pending_question_from_question_value(value),
+        _ => Err(anyhow!("unsupported question tool: {tool_name}")),
+    }
+}
+
+pub fn pending_question_from_question_value(
+    value: &serde_json::Value,
+) -> Result<PendingUserQuestion> {
+    let args: SingleQuestionArgs = serde_json::from_value(value.clone())
+        .map_err(|e| anyhow!("invalid ask_user_question arguments: {e}"))?;
+    validate_single_question(&args)?;
+    let title = args
+        .header
+        .as_deref()
+        .map(str::trim)
+        .filter(|header| !header.is_empty())
+        .unwrap_or("Question")
+        .to_string();
+    Ok(PendingUserQuestion {
+        title,
+        options: args.options.iter().map(|o| o.label.clone()).collect(),
+        summary: args.question,
+        descriptions: args.options.iter().map(|o| o.description.clone()).collect(),
+        previews: args.options.iter().map(|o| o.preview.clone()).collect(),
+        multi_select: args.multi_select,
+    })
+}
+
 fn validate(args: &AskUserArgs) -> Result<()> {
     if args.questions.is_empty() {
         return Err(anyhow!("must ask at least one question"));
@@ -135,6 +187,29 @@ fn validate(args: &AskUserArgs) -> Result<()> {
                 "question {i}: previews only supported for single-select"
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_single_question(args: &SingleQuestionArgs) -> Result<()> {
+    if args.question.trim().is_empty() {
+        return Err(anyhow!("question has empty text"));
+    }
+    if args.options.len() < 2 {
+        return Err(anyhow!("question needs at least 2 options"));
+    }
+    if args.options.len() > MAX_OPTIONS {
+        return Err(anyhow!("question has too many options (max {MAX_OPTIONS})"));
+    }
+    for (i, option) in args.options.iter().enumerate() {
+        if option.label.trim().is_empty() {
+            return Err(anyhow!("option {i} has empty label"));
+        }
+    }
+    if args.multi_select && args.options.iter().any(|o| o.preview.is_some()) {
+        return Err(anyhow!(
+            "question: previews only supported for single-select"
+        ));
     }
     Ok(())
 }
@@ -213,5 +288,42 @@ mod tests {
         .unwrap();
         assert!(text.contains("serde"));
         assert!(text.contains("Other"));
+    }
+
+    #[test]
+    fn pending_question_from_single_question_value_maps_ui_payload() {
+        let question = pending_question_from_question_value(&serde_json::json!({
+            "question": "Pick a direction?",
+            "options": [
+                {"label": "Fast"},
+                {"label": "Safe", "description": "More validation", "preview": "cargo test"}
+            ]
+        }))
+        .expect("single question should parse");
+
+        assert_eq!(question.title, "Question");
+        assert_eq!(question.summary, "Pick a direction?");
+        assert_eq!(question.options, vec!["Fast", "Safe"]);
+        assert_eq!(question.descriptions, vec!["", "More validation"]);
+        assert_eq!(
+            question.previews,
+            vec![None, Some("cargo test".to_string())]
+        );
+        assert!(!question.multi_select);
+    }
+
+    #[test]
+    fn pending_question_rejects_preview_with_multi_select() {
+        let err = pending_question_from_question_value(&serde_json::json!({
+            "question": "Pick directions?",
+            "multi_select": true,
+            "options": [
+                {"label": "Fast", "preview": "skip tests"},
+                {"label": "Safe"}
+            ]
+        }))
+        .expect_err("multi-select previews should be rejected");
+
+        assert!(err.to_string().contains("previews only supported"));
     }
 }

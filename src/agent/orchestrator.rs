@@ -3286,7 +3286,7 @@ fn question_prompt_for_tool_call(
         return None;
     }
     let value = serde_json::from_str::<serde_json::Value>(&tc.function.arguments).ok()?;
-    crate::tools::ask_user::pending_question_from_value(&value).ok()
+    crate::tools::ask_user::pending_question_from_tool_value(&tc.function.name, &value).ok()
 }
 
 fn should_force_swarm(user_input: &str) -> bool {
@@ -4191,6 +4191,33 @@ mod tests {
             event_changed_files_for_tool_result(&tool_result),
             vec!["src/from-runtime.rs".to_string()]
         );
+    }
+
+    #[test]
+    fn ask_user_question_tool_call_creates_pending_question() {
+        let call = ToolCall {
+            id: "call-ask".into(),
+            call_type: "function".into(),
+            function: ToolCallFunction {
+                name: "ask_user_question".into(),
+                arguments: serde_json::json!({
+                    "question": "Pick validation depth?",
+                    "options": [
+                        {"label": "Quick"},
+                        {"label": "Full", "description": "Run all tests"}
+                    ]
+                })
+                .to_string(),
+            },
+        };
+
+        let question =
+            super::question_prompt_for_tool_call(&call).expect("question payload should parse");
+
+        assert_eq!(question.title, "Question");
+        assert_eq!(question.summary, "Pick validation depth?");
+        assert_eq!(question.options, vec!["Quick", "Full"]);
+        assert_eq!(question.descriptions, vec!["", "Run all tests"]);
     }
 
     #[test]
