@@ -6004,7 +6004,7 @@ fn start_local_shell_command(
     root: &std::path::Path,
     command: String,
     action_tx: &mpsc::UnboundedSender<TuiAction>,
-    yolo_mode: bool,
+    auto_approve: bool,
 ) -> Option<JoinHandle<()>> {
     let policy_config = crate::storage::Config::load(Some(root))
         .map(|config| config.policy)
@@ -6023,7 +6023,7 @@ fn start_local_shell_command(
         return None;
     }
 
-    let approval_rx = if !yolo_mode
+    let approval_rx = if !auto_approve
         && matches!(
             decision.action,
             crate::policy::PolicyAction::AskOnce | crate::policy::PolicyAction::AskSession
@@ -6072,6 +6072,15 @@ fn start_local_shell_command(
             is_error,
         });
     }))
+}
+
+fn local_shell_auto_approve(app: &TuiApp, yolo_mode: bool) -> bool {
+    yolo_mode
+        || app.session_auto_approve
+        || matches!(
+            app.permission_mode,
+            crate::policy::PermissionMode::Bypass | crate::policy::PermissionMode::Auto
+        )
 }
 
 fn maybe_start_side_slash_task(
@@ -7671,8 +7680,13 @@ pub async fn run_tui(
                                 app.status_message = "A turn is already running".into();
                                 continue;
                             }
+                            let auto_approve = local_shell_auto_approve(&app, yolo_mode);
                             local_task = start_local_shell_command(
-                                &mut app, &root, command, &action_tx, yolo_mode,
+                                &mut app,
+                                &root,
+                                command,
+                                &action_tx,
+                                auto_approve,
                             );
                             continue;
                         }
@@ -9592,6 +9606,47 @@ mod tests {
         assert!(app.is_streaming);
         assert!(app.stream_buffer.contains("$ echo hi"));
         assert_eq!(app.status_message, "Approval needed: run command");
+    }
+
+    #[test]
+    fn local_shell_auto_approve_follows_full_access_mode() {
+        let mut app = test_app();
+
+        assert!(!local_shell_auto_approve(&app, false));
+
+        app.set_interaction_mode(InteractionMode::FullAccess);
+
+        assert!(local_shell_auto_approve(&app, false));
+    }
+
+    #[tokio::test]
+    async fn local_shell_mode_auto_approve_skips_command_approval() {
+        let mut app = test_app();
+        let root = tempfile::tempdir().expect("tempdir");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let handle =
+            start_local_shell_command(&mut app, root.path(), "echo hi".to_string(), &tx, true)
+                .expect("local shell task");
+
+        assert!(app.approval.is_none());
+        assert!(app.is_streaming);
+        assert_eq!(app.status_message, "Running shell command...");
+
+        handle.await.expect("local shell task joins");
+        let action = rx.try_recv().expect("local tool result");
+        match action {
+            TuiAction::LocalToolResult {
+                command,
+                output,
+                is_error,
+            } => {
+                assert_eq!(command, "echo hi");
+                assert!(!is_error, "{output}");
+                assert!(output.contains("hi"));
+            }
+            _ => panic!("unexpected action"),
+        }
     }
 
     #[test]
