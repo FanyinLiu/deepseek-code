@@ -1,4 +1,6 @@
+use std::io::{Read, Write};
 use std::path::{Component, Path};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{atomic::AtomicBool, Arc};
 
 use chrono::Utc;
@@ -30,6 +32,8 @@ use crate::storage::{EventLogStore, SessionEvent, SessionEventKind};
 /// chronically under-budget: complex prompts could burn the full budget on
 /// chain-of-thought and never get to write a final answer.
 const TURN_MAX_OUTPUT_TOKENS: u32 = 32_768;
+const PATCH_CHECK_STDOUT_BYTES: usize = 256 * 1024;
+const PATCH_CHECK_STDERR_BYTES: usize = 256 * 1024;
 
 use super::background::{BackgroundQueue, BackgroundTaskSnapshot};
 use super::compact::{
@@ -3514,28 +3518,100 @@ fn validate_swarm_patch_for_auto_apply(
 }
 
 fn validate_patch_applies_cleanly(project_root: &Path, patch: &str) -> Result<(), String> {
-    let mut child = std::process::Command::new("git")
+    let mut child = Command::new("git")
         .args(["apply", "--check"])
         .current_dir(project_root)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("failed to start git apply --check: {e}"))?;
-    if let Some(stdin) = child.stdin.as_mut() {
-        use std::io::Write;
+    if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(patch.as_bytes())
             .map_err(|e| format!("failed to write patch to git apply --check: {e}"))?;
     }
-    let output = child
-        .wait_with_output()
+    let output = wait_with_limited_patch_check_output(child)
         .map_err(|e| format!("git apply --check failed to run: {e}"))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = patch_check_output_text(&output.stderr, output.stderr_truncated, "stderr");
         return Err(format!("patch does not apply cleanly: {}", stderr.trim()));
     }
     Ok(())
+}
+
+struct LimitedPatchCheckOutput {
+    status: ExitStatus,
+    stderr: Vec<u8>,
+    stderr_truncated: bool,
+}
+
+fn wait_with_limited_patch_check_output(
+    mut child: std::process::Child,
+) -> Result<LimitedPatchCheckOutput, std::io::Error> {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("failed to capture patch check stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("failed to capture patch check stderr"))?;
+
+    let stdout_handle =
+        std::thread::spawn(move || read_limited_stream(stdout, PATCH_CHECK_STDOUT_BYTES));
+    let stderr_handle =
+        std::thread::spawn(move || read_limited_stream(stderr, PATCH_CHECK_STDERR_BYTES));
+    let status = child.wait()?;
+    let (_stdout, _stdout_truncated) = stdout_handle
+        .join()
+        .unwrap_or_else(|_| Err(std::io::Error::other("patch check stdout reader panicked")))?;
+    let (stderr, stderr_truncated) = stderr_handle
+        .join()
+        .unwrap_or_else(|_| Err(std::io::Error::other("patch check stderr reader panicked")))?;
+
+    Ok(LimitedPatchCheckOutput {
+        status,
+        stderr,
+        stderr_truncated,
+    })
+}
+
+fn read_limited_stream<R: Read>(
+    mut reader: R,
+    max_bytes: usize,
+) -> Result<(Vec<u8>, bool), std::io::Error> {
+    let mut collected = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0u8; 8192];
+
+    loop {
+        let bytes_read = reader.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        let remaining = max_bytes.saturating_sub(collected.len());
+        let keep = bytes_read.min(remaining);
+        if keep > 0 {
+            collected.extend_from_slice(&buffer[..keep]);
+        }
+        if keep < bytes_read || collected.len() >= max_bytes {
+            truncated = true;
+        }
+    }
+
+    Ok((collected, truncated))
+}
+
+fn patch_check_output_text(bytes: &[u8], truncated: bool, stream: &str) -> String {
+    let mut text = String::from_utf8_lossy(bytes).to_string();
+    if truncated {
+        if !text.ends_with('\n') && !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&format!("[patch check {stream} truncated]"));
+    }
+    text
 }
 
 fn contains_any(value: &str, needles: &[&str]) -> bool {
@@ -3948,6 +4024,23 @@ mod tests {
             .expect_err("protected path should be rejected");
 
         assert!(err.contains("protected path"));
+    }
+
+    #[test]
+    fn patch_check_stream_reader_caps_output() {
+        let input = std::io::Cursor::new("x".repeat(8192));
+        let (bytes, truncated) = super::read_limited_stream(input, 1024).expect("limited stream");
+
+        assert_eq!(bytes.len(), 1024);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn patch_check_output_marks_truncation() {
+        let output = super::patch_check_output_text(b"error", true, "stderr");
+
+        assert!(output.contains("error"));
+        assert!(output.contains("[patch check stderr truncated]"));
     }
 
     #[test]
