@@ -123,6 +123,35 @@ fn stable_hash<T: Hash>(value: &T) -> u64 {
     hasher.finish()
 }
 
+fn role_hash_tag(role: &Role) -> u8 {
+    match role {
+        Role::System => 0,
+        Role::User => 1,
+        Role::Assistant => 2,
+        Role::Tool => 3,
+    }
+}
+
+fn message_content_hash(content: &MessageContent) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    match content {
+        MessageContent::Text(text) => {
+            0u8.hash(&mut hasher);
+            text.hash(&mut hasher);
+        }
+        MessageContent::MultiPart(parts) => {
+            1u8.hash(&mut hasher);
+            for part in parts {
+                part.text.as_deref().hash(&mut hasher);
+            }
+        }
+        MessageContent::None => {
+            2u8.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
 fn animated_token_count(target: u64, elapsed_ms: u64) -> u64 {
     if target == 0 {
         return 0;
@@ -1119,8 +1148,8 @@ impl TuiApp {
             };
             stable_hash(&(
                 &message.id,
-                message.role.to_string(),
-                message.content.to_string_lossy(),
+                role_hash_tag(&message.role),
+                message_content_hash(&message.content),
                 message.tool_calls.len(),
                 message.tool_results.len(),
                 visibility_tag,
@@ -7649,6 +7678,28 @@ mod tests {
         assert!(!agent_event_can_throttle_render(&AgentEvent::Error(
             "boom".into()
         )));
+    }
+
+    #[test]
+    fn transcript_dirty_state_tracks_last_message_content_without_lossy_clone() {
+        let mut app = test_app();
+        let turn_id = uuid::Uuid::new_v4();
+        app.messages.push(ProtocolMessage {
+            id: uuid::Uuid::new_v4(),
+            role: Role::Assistant,
+            content: MessageContent::from("first"),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            tool_results: Vec::new(),
+            turn_id,
+            sub_turn_id: None,
+            visibility: MessageVisibility::UserVisible,
+        });
+        let before = app.render_dirty_state();
+
+        app.messages.last_mut().expect("message").content = MessageContent::from("second");
+
+        assert!(app.render_dirty_state().diff(before).transcript);
     }
 
     #[test]
