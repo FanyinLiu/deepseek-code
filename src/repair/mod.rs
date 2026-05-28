@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -23,6 +23,7 @@ use crate::workspace::apply::parse_patch_paths;
 use sha2::{Digest, Sha256};
 
 pub const REPAIR_DIR: &str = ".octocode/repair";
+const REPAIR_COMMAND_CAPTURE_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct RepairStore {
@@ -1100,28 +1101,35 @@ fn validate_patch_scope(allowed_paths: &[String], patch_paths: &[String]) -> Res
 fn validate_patch_applies(project_root: &Path, patch: &str) -> Result<()> {
     let path = std::env::temp_dir().join(format!("octocode-patch-check-{}.diff", Uuid::new_v4()));
     fs::write(&path, patch).with_context(|| format!("write {}", path.display()))?;
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args(["apply", "--check", "--whitespace=nowarn"])
         .arg(&path)
-        .current_dir(project_root)
-        .output()
+        .current_dir(project_root);
+    let output = run_limited_process(command)
         .with_context(|| format!("run git apply --check {}", path.display()));
     let _ = fs::remove_file(&path);
     let output = output?;
     if output.status.success() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = format_patch_check_log(&output.stderr, output.stderr_truncated);
+    let stdout = format_patch_check_log(&output.stdout, output.stdout_truncated);
     bail!(
         "model patch does not apply locally: {}{}",
-        truncate_patch_check_log(&stderr),
+        stderr,
         if stdout.is_empty() {
             String::new()
         } else {
-            format!("\n{}", truncate_patch_check_log(&stdout))
+            format!("\n{stdout}")
         }
     )
+}
+
+fn format_patch_check_log(bytes: &[u8], truncated: bool) -> String {
+    let mut text = String::from_utf8_lossy(bytes).to_string();
+    append_output_truncated_marker(&mut text, truncated);
+    truncate_patch_check_log(&text)
 }
 
 fn truncate_patch_check_log(text: &str) -> String {
@@ -1137,11 +1145,10 @@ fn patch_hash(patch: &str) -> String {
 
 fn run_command(root: &Path, name: &str, command: &[&str]) -> Result<RepairValidationResult> {
     let started = Instant::now();
-    let output = Command::new(command[0])
-        .args(&command[1..])
-        .current_dir(root)
-        .output()
-        .with_context(|| format!("run {}", command.join(" ")))?;
+    let mut process = Command::new(command[0]);
+    process.args(&command[1..]).current_dir(root);
+    let output =
+        run_limited_process(process).with_context(|| format!("run {}", command.join(" ")))?;
     let status = if output.status.success() {
         RepairGateStatus::Pass
     } else {
@@ -1153,9 +1160,94 @@ fn run_command(root: &Path, name: &str, command: &[&str]) -> Result<RepairValida
         command: command.iter().map(|part| (*part).to_string()).collect(),
         exit_code: output.status.code(),
         duration_ms: started.elapsed().as_millis(),
-        stdout_excerpt: excerpt(&String::from_utf8_lossy(&output.stdout)),
-        stderr_excerpt: excerpt(&String::from_utf8_lossy(&output.stderr)),
+        stdout_excerpt: format_validation_excerpt(&output.stdout, output.stdout_truncated),
+        stderr_excerpt: format_validation_excerpt(&output.stderr, output.stderr_truncated),
     })
+}
+
+struct LimitedRepairOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+}
+
+fn run_limited_process(mut command: Command) -> Result<LimitedRepairOutput, std::io::Error> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("failed to capture repair stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("failed to capture repair stderr"))?;
+
+    let stdout_handle =
+        std::thread::spawn(move || read_limited_stream(stdout, REPAIR_COMMAND_CAPTURE_BYTES));
+    let stderr_handle =
+        std::thread::spawn(move || read_limited_stream(stderr, REPAIR_COMMAND_CAPTURE_BYTES));
+    let status = child.wait()?;
+    let (stdout, stdout_truncated) = stdout_handle
+        .join()
+        .unwrap_or_else(|_| Err(std::io::Error::other("repair stdout reader panicked")))?;
+    let (stderr, stderr_truncated) = stderr_handle
+        .join()
+        .unwrap_or_else(|_| Err(std::io::Error::other("repair stderr reader panicked")))?;
+
+    Ok(LimitedRepairOutput {
+        status,
+        stdout,
+        stderr,
+        stdout_truncated,
+        stderr_truncated,
+    })
+}
+
+fn read_limited_stream<R: std::io::Read>(
+    mut reader: R,
+    max_bytes: usize,
+) -> Result<(Vec<u8>, bool), std::io::Error> {
+    let mut collected = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0u8; 8192];
+
+    loop {
+        let bytes_read = reader.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        let remaining = max_bytes.saturating_sub(collected.len());
+        let keep = bytes_read.min(remaining);
+        if keep > 0 {
+            collected.extend_from_slice(&buffer[..keep]);
+        }
+        if keep < bytes_read || collected.len() >= max_bytes {
+            truncated = true;
+        }
+    }
+
+    Ok((collected, truncated))
+}
+
+fn format_validation_excerpt(bytes: &[u8], truncated: bool) -> String {
+    let mut text = String::from_utf8_lossy(bytes).to_string();
+    append_output_truncated_marker(&mut text, truncated);
+    excerpt(&text)
+}
+
+fn append_output_truncated_marker(text: &mut String, truncated: bool) {
+    if !truncated {
+        return;
+    }
+    if !text.ends_with('\n') && !text.is_empty() {
+        text.push('\n');
+    }
+    text.push_str("[output truncated]");
 }
 
 fn excerpt(text: &str) -> String {
@@ -1433,5 +1525,22 @@ mod tests {
 
         assert_eq!(output.chars().count(), 4000);
         assert!(output.chars().all(|ch| ch == '界'));
+    }
+
+    #[test]
+    fn limited_stream_reader_caps_repair_output() {
+        let input = std::io::Cursor::new("界".repeat(2000).into_bytes());
+        let (bytes, truncated) = read_limited_stream(input, 4096).expect("limited stream");
+
+        assert_eq!(bytes.len(), 4096);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn validation_excerpt_marks_truncated_output() {
+        let output = format_validation_excerpt("hello".as_bytes(), true);
+
+        assert!(output.contains("hello"));
+        assert!(output.contains("[output truncated]"));
     }
 }
