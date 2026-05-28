@@ -10,6 +10,7 @@ use crate::policy::PolicyDecision;
 use crate::runtime::tool_runtime::{ApprovalFuture, ApprovalOutcome, ApprovalResolver, ToolCall};
 
 pub const DEFAULT_APPROVAL_TIMEOUT_SECONDS: u64 = 60;
+const APPROVAL_FILE_SIZE_CAP: u64 = crate::storage::TEXT_FILE_SIZE_CAP;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingApproval {
@@ -83,7 +84,7 @@ impl FileApprovalBridge {
         let deadline = tokio::time::Instant::now() + self.timeout;
         let resolution_path = resolution_path(&self.project_root, id);
         loop {
-            match fs::read_to_string(&resolution_path).await {
+            match read_approval_file_capped(&resolution_path).await {
                 Ok(contents) => match serde_json::from_str::<ApprovalResolution>(&contents) {
                     Ok(resolution) if resolution.id == id => {
                         let _ = fs::remove_file(pending_path(&self.project_root, id)).await;
@@ -144,7 +145,7 @@ pub async fn list_pending(project_root: &Path) -> Result<Vec<PendingApproval>> {
         if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
             continue;
         }
-        let contents = fs::read_to_string(entry.path()).await?;
+        let contents = read_approval_file_capped(entry.path()).await?;
         if let Ok(pending) = serde_json::from_str::<PendingApproval>(&contents) {
             approvals.push(pending);
         }
@@ -155,7 +156,7 @@ pub async fn list_pending(project_root: &Path) -> Result<Vec<PendingApproval>> {
 
 pub async fn show_pending(project_root: &Path, id: &str) -> Result<PendingApproval> {
     validate_id(id)?;
-    let contents = fs::read_to_string(pending_path(project_root, id))
+    let contents = read_approval_file_capped(pending_path(project_root, id))
         .await
         .with_context(|| format!("approval request not found: {id}"))?;
     serde_json::from_str(&contents).context("invalid approval request JSON")
@@ -212,6 +213,18 @@ async fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     }
     fs::rename(temp, path).await?;
     Ok(())
+}
+
+async fn read_approval_file_capped(path: impl AsRef<Path>) -> std::io::Result<String> {
+    let path = path.as_ref();
+    let size = fs::metadata(path).await?.len();
+    if size > APPROVAL_FILE_SIZE_CAP {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("file too large: {size} bytes, cap {APPROVAL_FILE_SIZE_CAP}"),
+        ));
+    }
+    fs::read_to_string(path).await
 }
 
 fn validate_id(id: &str) -> Result<()> {
@@ -275,5 +288,22 @@ mod tests {
             .expect("write response");
 
         assert_eq!(wait.await.expect("bridge task"), ApprovalOutcome::Approved);
+    }
+
+    #[tokio::test]
+    async fn approval_file_reads_reject_large_files() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = pending_path(root.path(), "approval-large");
+        fs::create_dir_all(path.parent().expect("pending parent"))
+            .await
+            .expect("create pending dir");
+        let file = std::fs::File::create(&path).expect("create approval file");
+        file.set_len(APPROVAL_FILE_SIZE_CAP + 1)
+            .expect("extend approval file");
+
+        let error = show_pending(root.path(), "approval-large")
+            .await
+            .expect_err("large approval file should be rejected before read");
+        assert!(format!("{error:#}").contains("file too large"));
     }
 }

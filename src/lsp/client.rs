@@ -3,6 +3,9 @@ use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 
+const MAX_LSP_CONTENT_LENGTH: usize = 8 * 1024 * 1024;
+const MAX_LSP_HEADER_LINE_LENGTH: usize = 8 * 1024;
+
 pub struct LspClient {
     child: Child,
     stdout: BufReader<ChildStdout>,
@@ -26,30 +29,38 @@ where
         if n == 0 {
             return Err(anyhow::anyhow!("EOF while reading LSP message headers"));
         }
+        if header_buf.len() > MAX_LSP_HEADER_LINE_LENGTH {
+            anyhow::bail!("LSP header line too long");
+        }
         if header_buf == "\r\n" || header_buf == "\n" {
             break;
         }
         let header = header_buf.trim_end();
-        if let Some((key, value)) = header.split_once(": ") {
+        if let Some((key, value)) = header.split_once(':') {
             if key.eq_ignore_ascii_case("Content-Length") {
-                content_length = Some(value.parse().context("parsing Content-Length")?);
+                if content_length.is_some() {
+                    anyhow::bail!("duplicate Content-Length header");
+                }
+                let len = value.trim().parse().context("parsing Content-Length")?;
+                if len == 0 {
+                    anyhow::bail!("invalid Content-Length header: zero-length frame");
+                }
+                if len > MAX_LSP_CONTENT_LENGTH {
+                    anyhow::bail!(
+                        "LSP frame too large: Content-Length {len} exceeds {MAX_LSP_CONTENT_LENGTH}"
+                    );
+                }
+                content_length = Some(len);
             }
         }
     }
 
     let len = content_length.ok_or_else(|| anyhow::anyhow!("Missing Content-Length header"))?;
-    let mut body_buf = Vec::with_capacity(len);
-    while body_buf.len() < len {
-        let mut chunk = vec![0u8; len - body_buf.len()];
-        let n = reader
-            .read(&mut chunk)
-            .await
-            .context("reading message body")?;
-        if n == 0 {
-            return Err(anyhow::anyhow!("EOF while reading message body"));
-        }
-        body_buf.extend_from_slice(&chunk[..n]);
-    }
+    let mut body_buf = vec![0u8; len];
+    reader
+        .read_exact(&mut body_buf)
+        .await
+        .context("reading message body")?;
     let msg = serde_json::from_slice(&body_buf).context("parsing JSON body")?;
     Ok(msg)
 }
@@ -256,6 +267,26 @@ mod tests {
         let msg = read_message(&mut reader).await.unwrap();
         assert_eq!(msg["jsonrpc"], "2.0");
         assert_eq!(msg["id"], 2);
+    }
+
+    #[tokio::test]
+    async fn read_message_rejects_oversized_frame() {
+        let data = format!("Content-Length: {}\r\n\r\n{{}}", MAX_LSP_CONTENT_LENGTH + 1);
+        let mut reader = BufReader::new(data.as_bytes());
+        let error = read_message(&mut reader)
+            .await
+            .expect_err("oversized LSP frame should fail before allocation");
+        assert!(error.to_string().contains("LSP frame too large"));
+    }
+
+    #[tokio::test]
+    async fn read_message_accepts_content_length_without_space() {
+        let data = b"Content-Length:24\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":3}";
+        let mut reader = BufReader::new(&data[..]);
+        let msg = read_message(&mut reader)
+            .await
+            .expect("compact LSP Content-Length header should parse");
+        assert_eq!(msg["id"], 3);
     }
 
     #[tokio::test]
