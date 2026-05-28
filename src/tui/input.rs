@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
@@ -136,15 +138,17 @@ fn render_context_suggestions(pending_options: Option<&[String]>, chinese: bool)
                 muted_style().add_modifier(Modifier::ITALIC),
             );
         }
-        let shown = opts.iter().take(3).cloned().collect::<Vec<_>>().join(" · ");
-        let mut label = format!("  {shown}");
-        if opts.len() > 3 {
-            label.push_str(&format!(" (+{})", opts.len() - 3));
+        let mut label = String::from("  ");
+        for (idx, option) in opts.iter().take(3).enumerate() {
+            if idx > 0 {
+                label.push_str(" · ");
+            }
+            label.push_str(option);
         }
-        return Span::styled(
-            format!("  {label}"),
-            muted_style().add_modifier(Modifier::ITALIC),
-        );
+        if opts.len() > 3 {
+            let _ = write!(label, " (+{})", opts.len() - 3);
+        }
+        return Span::styled(label, muted_style().add_modifier(Modifier::ITALIC));
     }
 
     let _ = chinese;
