@@ -3,10 +3,14 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 use crate::storage::config::HooksConfig;
+
+const HOOK_STDOUT_BYTES: usize = 128 * 1024;
+const HOOK_STDERR_BYTES: usize = 128 * 1024;
+const HOOK_KILL_WAIT: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -217,21 +221,9 @@ async fn run_hook_command(
 
     let child_pid = child.id();
     let timeout = Duration::from_secs(timeout_seconds.max(1));
-    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(error)) => {
-            return HookCommandOutcome {
-                command: command.to_string(),
-                success: false,
-                exit_code: None,
-                stdout: String::new(),
-                stderr: format!("failed to wait for hook: {error}"),
-                duration_ms: start.elapsed().as_millis() as u64,
-                timed_out: false,
-            };
-        }
-        Err(_) => {
-            terminate_hook_process_tree(child_pid);
+    let output = match wait_with_limited_hook_output(child, child_pid, timeout).await {
+        Ok(HookWaitResult::Output(output)) => output,
+        Ok(HookWaitResult::TimedOut) => {
             return HookCommandOutcome {
                 command: command.to_string(),
                 success: false,
@@ -242,21 +234,135 @@ async fn run_hook_command(
                 timed_out: true,
             };
         }
+        Err(error) => {
+            return HookCommandOutcome {
+                command: command.to_string(),
+                success: false,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: format!("failed to wait for hook: {error}"),
+                duration_ms: start.elapsed().as_millis() as u64,
+                timed_out: false,
+            };
+        }
     };
 
     HookCommandOutcome {
         command: command.to_string(),
         success: output.status.success(),
         exit_code: output.status.code(),
-        stdout: String::from_utf8_lossy(&output.stdout)
+        stdout: hook_output_text(&output.stdout, output.stdout_truncated, "stdout")
             .trim_end()
             .to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr)
+        stderr: hook_output_text(&output.stderr, output.stderr_truncated, "stderr")
             .trim_end()
             .to_string(),
         duration_ms: start.elapsed().as_millis() as u64,
         timed_out: false,
     }
+}
+
+struct LimitedHookOutput {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+}
+
+enum HookWaitResult {
+    Output(LimitedHookOutput),
+    TimedOut,
+}
+
+async fn wait_with_limited_hook_output(
+    mut child: tokio::process::Child,
+    child_pid: Option<u32>,
+    timeout: Duration,
+) -> Result<HookWaitResult, std::io::Error> {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("failed to capture hook stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("failed to capture hook stderr"))?;
+    let stdout_handle = tokio::spawn(read_limited_async_stream(stdout, HOOK_STDOUT_BYTES));
+    let stderr_handle = tokio::spawn(read_limited_async_stream(stderr, HOOK_STDERR_BYTES));
+
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => {
+            stdout_handle.abort();
+            stderr_handle.abort();
+            return Err(error);
+        }
+        Err(_) => {
+            terminate_hook_process_tree(child_pid);
+            let _ = tokio::time::timeout(HOOK_KILL_WAIT, child.wait()).await;
+            stdout_handle.abort();
+            stderr_handle.abort();
+            return Ok(HookWaitResult::TimedOut);
+        }
+    };
+
+    let (stdout, stdout_truncated) = join_reader(stdout_handle, "hook stdout").await?;
+    let (stderr, stderr_truncated) = join_reader(stderr_handle, "hook stderr").await?;
+
+    Ok(HookWaitResult::Output(LimitedHookOutput {
+        status,
+        stdout,
+        stderr,
+        stdout_truncated,
+        stderr_truncated,
+    }))
+}
+
+async fn join_reader(
+    handle: tokio::task::JoinHandle<Result<(Vec<u8>, bool), std::io::Error>>,
+    name: &str,
+) -> Result<(Vec<u8>, bool), std::io::Error> {
+    handle
+        .await
+        .map_err(|error| std::io::Error::other(format!("{name} reader panicked: {error}")))?
+}
+
+async fn read_limited_async_stream<R: AsyncRead + Unpin>(
+    mut reader: R,
+    max_bytes: usize,
+) -> Result<(Vec<u8>, bool), std::io::Error> {
+    let mut collected = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0u8; 8192];
+
+    loop {
+        let bytes_read = reader.read(&mut buffer).await?;
+        if bytes_read == 0 {
+            break;
+        }
+        let remaining = max_bytes.saturating_sub(collected.len());
+        let keep = bytes_read.min(remaining);
+        if keep > 0 {
+            collected.extend_from_slice(&buffer[..keep]);
+        }
+        if keep < bytes_read || collected.len() >= max_bytes {
+            truncated = true;
+        }
+    }
+
+    Ok((collected, truncated))
+}
+
+fn hook_output_text(bytes: &[u8], truncated: bool, stream: &str) -> String {
+    let mut text = String::from_utf8_lossy(bytes).to_string();
+    if truncated {
+        if !text.ends_with('\n') && !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&format!("[hook {stream} truncated]"));
+    }
+    text
 }
 
 #[cfg(unix)]
@@ -345,6 +451,48 @@ mod tests {
 
         assert!(!summary.success());
         assert_eq!(summary.outcomes[0].exit_code, Some(7));
+    }
+
+    #[tokio::test]
+    async fn limited_async_reader_caps_hook_output() {
+        let (mut writer, reader) = tokio::io::duplex(16 * 1024);
+        let writer_task = tokio::spawn(async move {
+            writer.write_all(&vec![b'x'; 8192]).await.expect("write");
+        });
+
+        let (bytes, truncated) = read_limited_async_stream(reader, 1024)
+            .await
+            .expect("limited stream");
+        writer_task.await.expect("writer task");
+
+        assert_eq!(bytes.len(), 1024);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn hook_output_text_marks_truncation() {
+        let output = hook_output_text(b"hello", true, "stdout");
+
+        assert!(output.contains("hello"));
+        assert!(output.contains("[hook stdout truncated]"));
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn hook_stdout_is_capped() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let payload = HookPayload::new(HookEvent::PreToolUse, "session-1", temp.path());
+        let command =
+            "python3 - <<'PY'\nimport sys\nsys.stdout.write('x' * 200000)\nPY".to_string();
+
+        let summary =
+            run_hook_commands(HookEvent::PreToolUse, &[command], &payload, temp.path(), 5).await;
+
+        assert!(summary.success(), "{summary:?}");
+        assert!(summary.outcomes[0].stdout.len() < 140_000);
+        assert!(summary.outcomes[0]
+            .stdout
+            .contains("[hook stdout truncated]"));
     }
 
     #[cfg(unix)]
