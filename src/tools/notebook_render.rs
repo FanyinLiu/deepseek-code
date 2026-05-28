@@ -272,7 +272,7 @@ pub fn edit_cell(
     }
 
     let pretty = serde_json::to_string_pretty(&notebook)?;
-    std::fs::write(path, &pretty)?;
+    crate::storage::atomic::write_text_atomic(path, &pretty)?;
     Ok(format!(
         "Notebook updated: {} (mode={:?}, target cell={cell_id_or_index})",
         path.display(),
