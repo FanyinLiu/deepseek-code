@@ -175,6 +175,7 @@ impl<'a> CommandEntry<'a> {
 #[derive(Clone)]
 pub struct CommandRegistry {
     commands: HashMap<&'static str, &'static SlashCommand>,
+    primary_commands: Vec<&'static SlashCommand>,
     prompt_commands: HashMap<String, PromptCommand>,
 }
 
@@ -188,7 +189,8 @@ impl CommandRegistry {
     #[must_use]
     pub fn new() -> Self {
         let mut registry = Self {
-            commands: HashMap::new(),
+            commands: HashMap::with_capacity(96),
+            primary_commands: Vec::with_capacity(64),
             prompt_commands: HashMap::new(),
         };
         registry.register_all();
@@ -196,6 +198,7 @@ impl CommandRegistry {
     }
 
     fn register(&mut self, cmd: &'static SlashCommand) {
+        self.primary_commands.push(cmd);
         self.commands.insert(cmd.name, cmd);
         for &alias in cmd.aliases {
             self.commands.insert(alias, cmd);
@@ -293,9 +296,7 @@ impl CommandRegistry {
             return None;
         }
 
-        let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
-        let name = parts[0];
-        let args = parts.get(1).copied().unwrap_or("");
+        let (name, args) = trimmed.split_once(' ').unwrap_or((trimmed, ""));
 
         if let Some(cmd) = self.commands.get(name) {
             return Some((cmd.handler)(args, ctx));
@@ -352,27 +353,21 @@ impl CommandRegistry {
 
     /// Get a list of all primary commands for help display.
     #[must_use]
-    pub fn list_commands(&self) -> Vec<&&'static SlashCommand> {
-        let mut seen = std::collections::HashSet::new();
-        let mut list: Vec<&&'static SlashCommand> = self
-            .commands
-            .values()
-            .filter(|cmd| seen.insert(cmd.name))
-            .collect();
+    pub fn list_commands(&self) -> Vec<&'static SlashCommand> {
+        let mut list = self.primary_commands.clone();
         list.sort_by_key(|cmd| cmd.name);
         list
     }
 
     /// Find commands matching a prefix (for autocomplete).
     #[must_use]
-    pub fn match_prefix(&self, prefix: &str) -> Vec<&&'static SlashCommand> {
-        let mut seen = std::collections::HashSet::new();
-        let mut list: Vec<&&'static SlashCommand> = self
-            .commands
-            .values()
+    pub fn match_prefix(&self, prefix: &str) -> Vec<&'static SlashCommand> {
+        let mut list: Vec<&'static SlashCommand> = self
+            .primary_commands
+            .iter()
+            .copied()
             .filter(|cmd| {
-                (cmd.name.starts_with(prefix) || cmd.aliases.iter().any(|a| a.starts_with(prefix)))
-                    && seen.insert(cmd.name)
+                cmd.name.starts_with(prefix) || cmd.aliases.iter().any(|a| a.starts_with(prefix))
             })
             .collect();
         list.sort_by_key(|cmd| (slash_priority(cmd.name), cmd.name));
@@ -385,7 +380,7 @@ impl CommandRegistry {
         let mut entries: Vec<CommandEntry<'_>> = self
             .list_commands()
             .into_iter()
-            .map(|cmd| CommandEntry::Builtin(cmd))
+            .map(CommandEntry::Builtin)
             .collect();
         entries.extend(self.prompt_commands().into_iter().map(CommandEntry::Prompt));
         entries.sort_by(|a, b| {
@@ -402,7 +397,7 @@ impl CommandRegistry {
         let mut entries: Vec<CommandEntry<'_>> = self
             .match_prefix(prefix)
             .into_iter()
-            .map(|cmd| CommandEntry::Builtin(cmd))
+            .map(CommandEntry::Builtin)
             .collect();
         for prompt in self.prompt_commands.values() {
             if prompt.name.starts_with(prefix) {
