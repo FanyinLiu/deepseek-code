@@ -493,6 +493,12 @@ pub struct Orchestrator {
     /// turn. Picked up at the start of `run_turn_inner`, applied to every
     /// policy clone the turn consults, and cleared on turn exit.
     current_turn_allowed_tools: Option<Vec<String>>,
+    /// Memoized `storage::Config` for the lifetime of a single turn.
+    /// `Config::load` does 3 `fs::read_to_string` calls + TOML parse + merge
+    /// each time; without this cache the orchestrator was hitting disk
+    /// 9× per turn (policy decisions, hook lookups, mcp setup, sandbox
+    /// rebuilds, …). Reset at turn entry, populated lazily on first read.
+    cached_turn_config: Option<crate::storage::Config>,
 }
 
 impl Orchestrator {
@@ -515,7 +521,23 @@ impl Orchestrator {
             lifecycle_hooks_started: false,
             pending_allowed_tools: None,
             current_turn_allowed_tools: None,
+            cached_turn_config: None,
         }
+    }
+
+    /// Get the project config for the current turn. Loaded once on first
+    /// call within a turn and reused for the rest; `run_turn_inner` resets
+    /// the cache so the next turn picks up edits to `.octocode/config.toml`.
+    /// Falls back to `Config::default()` on read errors, matching the
+    /// previous inline `unwrap_or_default()` callers' contract.
+    fn turn_config(&mut self) -> &crate::storage::Config {
+        if self.cached_turn_config.is_none() {
+            let config = crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
+            self.cached_turn_config = Some(config);
+        }
+        self.cached_turn_config
+            .as_ref()
+            .expect("just populated above")
     }
 
     /// Stage an allowed-tools allowlist that the next turn must enforce.
@@ -630,8 +652,7 @@ impl Orchestrator {
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
         summary: Option<String>,
     ) {
-        let runtime_config =
-            crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
+        let runtime_config = self.turn_config().clone();
         let mut payload = HookPayload::new(
             hook_event,
             self.session.id.to_string(),
@@ -693,7 +714,7 @@ impl Orchestrator {
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
         turn_id: TurnId,
     ) -> Result<(), anyhow::Error> {
-        let config = crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
+        let config = self.turn_config().clone();
         let coordinator = SwarmCoordinator::new(
             Arc::new(self.client.clone()),
             self.project_root.clone(),
@@ -926,6 +947,7 @@ impl Orchestrator {
                 arguments: serde_json::json!({ "patch": combined_patch }).to_string(),
             },
         };
+        // `&self` method — fresh load instead of turn cache.
         let runtime_config =
             crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
         let mut policy_config = runtime_config.policy.clone();
@@ -1117,6 +1139,8 @@ impl Orchestrator {
         if result.validation_commands.is_empty() {
             return None;
         }
+        // `&self` method — can't reach into the turn cache. Load fresh.
+        // Acceptable because this path runs at most once per swarm turn.
         let runtime_config =
             crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
         let mut policy_config = runtime_config.policy.clone();
@@ -1462,10 +1486,14 @@ impl Orchestrator {
         force_lane: Option<ExecutionLane>,
     ) -> Result<(), anyhow::Error> {
         self.current_turn_allowed_tools = self.pending_allowed_tools.take();
+        // Fresh config snapshot for this turn — edits to
+        // `.octocode/config.toml` since the last turn take effect now.
+        self.cached_turn_config = None;
         let result = self
             .run_turn_inner_body(user_input, images, event_tx, force_lane)
             .await;
         self.current_turn_allowed_tools = None;
+        self.cached_turn_config = None;
         result
     }
 
@@ -1540,9 +1568,7 @@ impl Orchestrator {
             // Respect explicit user intent
             (None, false)
         } else {
-            let router_config = crate::storage::Config::load(Some(&self.project_root))
-                .map(|c| c.router)
-                .unwrap_or_default();
+            let router_config = self.turn_config().router.clone();
             let shadow_mode = router_config.shadow_mode;
             let router = if router_config.enabled {
                 ComplexityRouter::from(&router_config)
@@ -1645,8 +1671,7 @@ impl Orchestrator {
             },
         );
 
-        let runtime_config =
-            crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
+        let runtime_config = self.turn_config().clone();
         let budget = crate::provider::context_budget_for(
             runtime_config.provider.default,
             &self.session.reasoning_state.effective_model(),
@@ -2366,8 +2391,7 @@ impl Orchestrator {
             ReasoningManager::begin_tool_turn(&mut self.session.reasoning_state, last_msg);
         }
 
-        let runtime_config =
-            crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
+        let runtime_config = self.turn_config().clone();
         let mut policy_config = runtime_config.policy.clone();
         self.apply_active_allowed_tools(&mut policy_config);
         let hooks_config = runtime_config.hooks.clone();
