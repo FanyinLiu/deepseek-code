@@ -17,6 +17,10 @@ use std::path::Path;
 const DEFAULT_HEAD_LIMIT: usize = 250;
 const MAX_HEAD_LIMIT: usize = 2000;
 const MAX_CONTEXT_LINES: usize = 20;
+const MAX_GREP_FILE_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_CONTENT_LINES_PER_FILE: usize = 1000;
+const MAX_OUTPUT_LINE_CHARS: usize = 4096;
+const TRUNCATED_LINE_MARKER: &str = " ... [line truncated]";
 
 #[derive(Debug, Clone, Copy, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -91,6 +95,12 @@ pub fn grep(project_root: &Path, args: GrepArgs) -> Result<String> {
                 continue;
             }
         }
+        if std::fs::metadata(path)
+            .map(|metadata| metadata.len() > MAX_GREP_FILE_BYTES)
+            .unwrap_or(false)
+        {
+            continue;
+        }
 
         let Ok(f) = File::open(path) else { continue };
         let reader = BufReader::new(f);
@@ -98,13 +108,15 @@ pub fn grep(project_root: &Path, args: GrepArgs) -> Result<String> {
             path: path.to_path_buf(),
             matches: Vec::new(),
             count: 0,
+            content_truncated: false,
         };
 
         let mut prev: VecDeque<(usize, String)> = VecDeque::with_capacity(before);
         let mut pending_after: usize = 0;
         let mut staged_context: Vec<(usize, String, bool)> = Vec::new();
+        let mut content_truncated = false;
 
-        for (i, line) in reader.lines().enumerate() {
+        'lines: for (i, line) in reader.lines().enumerate() {
             let Ok(line) = line else { break };
             let lineno = i + 1;
             let is_match = regex.is_match(&line);
@@ -116,26 +128,45 @@ pub fn grep(project_root: &Path, args: GrepArgs) -> Result<String> {
                     OutputMode::Count => {}
                     OutputMode::Content => {
                         for (n, l) in prev.drain(..) {
-                            staged_context.push((n, l, false));
+                            if !push_content_line(
+                                &mut staged_context,
+                                (n, l, false),
+                                &mut content_truncated,
+                            ) {
+                                break 'lines;
+                            }
                         }
-                        staged_context.push((lineno, line.clone(), true));
+                        if !push_content_line(
+                            &mut staged_context,
+                            (lineno, truncate_output_line(&line), true),
+                            &mut content_truncated,
+                        ) {
+                            break 'lines;
+                        }
                         pending_after = after;
                     }
                 }
             } else if pending_after > 0 {
-                staged_context.push((lineno, line.clone(), false));
+                if !push_content_line(
+                    &mut staged_context,
+                    (lineno, truncate_output_line(&line), false),
+                    &mut content_truncated,
+                ) {
+                    break;
+                }
                 pending_after -= 1;
             } else if before > 0 {
                 if prev.len() == before {
                     prev.pop_front();
                 }
-                prev.push_back((lineno, line));
+                prev.push_back((lineno, truncate_output_line(&line)));
             }
         }
 
         if !staged_context.is_empty() {
             hit.matches = staged_context;
         }
+        hit.content_truncated = content_truncated;
 
         let counted = match args.output_mode {
             OutputMode::FilesWithMatches => hit.count > 0,
@@ -166,6 +197,7 @@ struct FileHit {
     path: std::path::PathBuf,
     matches: Vec<(usize, String, bool)>,
     count: usize,
+    content_truncated: bool,
 }
 
 fn format_output(
@@ -224,6 +256,11 @@ fn format_output(
                         out.push_str(&format!("{marker} {text}\n"));
                     }
                 }
+                if h.content_truncated {
+                    out.push_str(&format!(
+                        "... truncated after {MAX_CONTENT_LINES_PER_FILE} content lines in this file; refine pattern or path for more.\n"
+                    ));
+                }
             }
         }
     }
@@ -231,6 +268,31 @@ fn format_output(
         out.push_str(&format!(
             "\n... truncated at {head_limit} files; refine pattern or path for more.\n"
         ));
+    }
+    out
+}
+
+fn push_content_line(
+    lines: &mut Vec<(usize, String, bool)>,
+    line: (usize, String, bool),
+    truncated: &mut bool,
+) -> bool {
+    if lines.len() >= MAX_CONTENT_LINES_PER_FILE {
+        *truncated = true;
+        return false;
+    }
+    lines.push(line);
+    true
+}
+
+fn truncate_output_line(line: &str) -> String {
+    let mut chars = line.chars();
+    let mut out = chars
+        .by_ref()
+        .take(MAX_OUTPUT_LINE_CHARS)
+        .collect::<String>();
+    if chars.next().is_some() {
+        out.push_str(TRUNCATED_LINE_MARKER);
     }
     out
 }
@@ -274,5 +336,102 @@ mod tests {
         assert!(output.contains(">     31 | needle\n"), "{output}");
         assert!(output.contains("| line 51\n"), "{output}");
         assert!(!output.contains("| line 52\n"), "{output}");
+    }
+
+    #[test]
+    fn grep_caps_content_lines_per_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let lines = (0..1200).map(|i| format!("needle {i}")).collect::<Vec<_>>();
+        std::fs::write(temp.path().join("many.txt"), lines.join("\n")).expect("write many");
+
+        let output = grep(
+            temp.path(),
+            GrepArgs {
+                pattern: "needle".to_string(),
+                path: None,
+                glob: None,
+                output_mode: OutputMode::Content,
+                case_insensitive: false,
+                multiline: false,
+                before: None,
+                after: None,
+                head_limit: None,
+                show_line_numbers: false,
+            },
+        )
+        .expect("grep output");
+
+        let emitted_matches = output
+            .lines()
+            .filter(|line| line.starts_with("> needle"))
+            .count();
+        assert_eq!(emitted_matches, MAX_CONTENT_LINES_PER_FILE, "{output}");
+        assert!(
+            output.contains("truncated after 1000 content lines in this file"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn grep_truncates_long_content_lines() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let long_line = format!("needle {}", "x".repeat(MAX_OUTPUT_LINE_CHARS + 100));
+        std::fs::write(temp.path().join("long.txt"), long_line).expect("write long");
+
+        let output = grep(
+            temp.path(),
+            GrepArgs {
+                pattern: "needle".to_string(),
+                path: None,
+                glob: None,
+                output_mode: OutputMode::Content,
+                case_insensitive: false,
+                multiline: false,
+                before: None,
+                after: None,
+                head_limit: None,
+                show_line_numbers: false,
+            },
+        )
+        .expect("grep output");
+
+        assert!(output.contains(TRUNCATED_LINE_MARKER), "{output}");
+        assert!(
+            output.len() < MAX_OUTPUT_LINE_CHARS + 512,
+            "output should be bounded, got {} bytes",
+            output.len()
+        );
+    }
+
+    #[test]
+    fn grep_skips_files_over_size_cap() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("huge.txt");
+        std::fs::write(&path, "needle").expect("write huge prefix");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open huge file");
+        file.set_len(MAX_GREP_FILE_BYTES + 1)
+            .expect("extend huge file");
+
+        let output = grep(
+            temp.path(),
+            GrepArgs {
+                pattern: "needle".to_string(),
+                path: None,
+                glob: None,
+                output_mode: OutputMode::Content,
+                case_insensitive: false,
+                multiline: false,
+                before: None,
+                after: None,
+                head_limit: None,
+                show_line_numbers: false,
+            },
+        )
+        .expect("grep output");
+
+        assert_eq!(output, "No matches for /needle/");
     }
 }
