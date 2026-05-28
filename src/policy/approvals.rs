@@ -946,26 +946,54 @@ fn evaluate_path_risk(
         .unwrap_or_else(|_| strip_unc_prefix(project_root));
     let project_root_raw_norm = strip_unc_prefix(project_root);
 
-    if let Ok(canonical) = std::fs::canonicalize(&absolute) {
-        let canonical_norm = strip_unc_prefix(&canonical);
-        if canonical_norm.starts_with(&project_root_norm)
-            || canonical_norm.starts_with(&project_root_raw_norm)
-        {
-            RiskLevel::SafeRead
-        } else {
-            RiskLevel::SensitiveRead
-        }
+    let normalized = normalize_policy_path(&absolute);
+    if normalized.starts_with(&project_root_norm) || normalized.starts_with(&project_root_raw_norm)
+    {
+        RiskLevel::SafeRead
     } else {
-        // Path doesn't exist yet — for writes, this is normal
-        let absolute_norm = strip_unc_prefix(&absolute);
-        if absolute_norm.starts_with(&project_root_norm)
-            || absolute_norm.starts_with(&project_root_raw_norm)
-        {
-            RiskLevel::SafeRead
-        } else {
-            RiskLevel::SensitiveRead
+        RiskLevel::SensitiveRead
+    }
+}
+
+fn normalize_policy_path(path: &Path) -> std::path::PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return strip_unc_prefix(&canonical);
+    }
+    canonicalize_existing_prefix(path)
+        .map(|path| strip_unc_prefix(&path))
+        .unwrap_or_else(|| strip_unc_prefix(&lexically_normalize(path)))
+}
+
+fn canonicalize_existing_prefix(path: &Path) -> Option<std::path::PathBuf> {
+    let mut ancestor = path;
+    let mut missing = Vec::new();
+    while !ancestor.exists() {
+        let name = ancestor.file_name()?;
+        missing.push(name.to_os_string());
+        ancestor = ancestor.parent()?;
+    }
+
+    let mut canonical = std::fs::canonicalize(ancestor).ok()?;
+    for component in missing.iter().rev() {
+        canonical.push(component);
+    }
+    Some(canonical)
+}
+
+fn lexically_normalize(path: &Path) -> std::path::PathBuf {
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(part) => normalized.push(part),
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
         }
     }
+    normalized
 }
 
 #[cfg(test)]
@@ -1370,6 +1398,26 @@ mod tests {
         );
 
         assert_eq!(decision.action, PolicyAction::Allow);
+        assert_eq!(decision.display.risk_level, RiskLevel::WriteProject);
+    }
+
+    #[test]
+    fn auto_workspace_write_does_not_treat_parent_dir_escape_as_safe() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let policy = PolicyConfig {
+            autonomy_level: crate::storage::config::AutonomyLevel::Low,
+            require_approval_for_write: true,
+            ..PolicyConfig::default()
+        };
+
+        let decision = evaluate_tool(
+            "write_file",
+            &args(serde_json::json!({ "path": "../outside/new.txt", "content": "x" })),
+            temp.path(),
+            &policy,
+        );
+
+        assert_eq!(decision.action, PolicyAction::AskOnce);
         assert_eq!(decision.display.risk_level, RiskLevel::WriteProject);
     }
 
