@@ -17,8 +17,9 @@ pub fn render_canvas(f: &mut Frame, area: Rect) {
 
     let p = theme::palette();
     let line = " ".repeat(area.width as usize);
+    let line_style = Style::default().bg(p.canvas);
     let lines = (0..area.height)
-        .map(|_| Line::from(Span::styled(line.clone(), Style::default().bg(p.canvas))))
+        .map(|_| Line::from(Span::styled(line.as_str(), line_style)))
         .collect::<Vec<_>>();
     f.render_widget(
         Paragraph::new(Text::from(lines)).style(Style::default().fg(p.text).bg(p.canvas)),
