@@ -202,13 +202,13 @@ pub fn apply_edit(
 
     // Apply
     let modified = original.replacen(old_string, new_string, 1);
-    push_history(file_path.clone(), file_existed.then_some(original.clone()));
     std::fs::create_dir_all(
         file_path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("invalid path: no parent directory"))?,
     )?;
     std::fs::write(&file_path, &modified)?;
+    push_history(file_path.clone(), file_existed.then_some(original.clone()));
 
     let diff = super::diff::unified_diff(&original, &modified, relative_path);
     let stats = super::diff::diff_stats(&diff);
@@ -233,14 +233,13 @@ pub fn apply_write(
     } else {
         None
     };
-    push_history(file_path.clone(), original.clone());
-
     std::fs::create_dir_all(
         file_path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("invalid path: no parent directory"))?,
     )?;
     std::fs::write(&file_path, content)?;
+    push_history(file_path.clone(), original.clone());
 
     let diff = super::diff::unified_diff(original.as_deref().unwrap_or(""), content, relative_path);
     let stats = super::diff::diff_stats(&diff);
@@ -537,6 +536,31 @@ rename to new.txt
         assert_eq!(
             std::fs::read_to_string(&path).expect("read original"),
             "original"
+        );
+        clear_history();
+    }
+
+    #[test]
+    fn failed_write_does_not_add_undo_history() {
+        let _guard = history_test_guard();
+        clear_history();
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("parent"), "not a directory").expect("write parent file");
+
+        let error = apply_write(root.path(), "parent/child.txt", "content")
+            .expect_err("write should fail because parent is a file");
+
+        assert!(
+            error.to_string().contains("Not a directory")
+                || error.to_string().contains("File exists")
+                || error.to_string().contains("not a directory"),
+            "unexpected error: {error}"
+        );
+        let undo_error = undo_last_change(root.path()).expect_err("history should be empty");
+        assert_eq!(undo_error.to_string(), "no changes to undo");
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("parent")).expect("read parent file"),
+            "not a directory"
         );
         clear_history();
     }
