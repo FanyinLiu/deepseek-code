@@ -454,10 +454,17 @@ fn collect_custom_commands(
         let Some(name) = command_name_for(base, &path) else {
             continue;
         };
-        let description = read_custom_description(&path).ok().flatten();
-        let argument_hint = read_custom_argument_hint(&path).ok().flatten();
-        let model = read_custom_model(&path).ok().flatten();
-        let allowed_tools = read_custom_allowed_tools(&path).ok().flatten();
+        let (description, argument_hint, model, allowed_tools) =
+            read_custom_command_metadata(&path)
+                .map(|metadata| {
+                    (
+                        metadata.description,
+                        metadata.argument_hint,
+                        metadata.model,
+                        metadata.allowed_tools,
+                    )
+                })
+                .unwrap_or_default();
         out.push(CustomCommandPayload {
             conflicts_builtin: builtin_names.contains(&name),
             name,
@@ -662,14 +669,7 @@ fn read_custom_command_document(
 ) -> Result<CustomCommandDocument, anyhow::Error> {
     let content = crate::storage::read_text_file_capped(path)
         .with_context(|| format!("read {}", path.display()))?;
-    let parsed = if matches!(
-        path.extension().and_then(|value| value.to_str()),
-        Some("toml")
-    ) {
-        custom_command_from_toml(&content)?
-    } else {
-        custom_command_from_markdown(&content)
-    };
+    let parsed = parse_custom_command(path, &content)?;
     if parsed.prompt_template.trim().is_empty() {
         bail!(
             "custom command {name} has no prompt body: {}",
@@ -695,6 +695,22 @@ struct ParsedCustomCommand {
     model: Option<String>,
     allowed_tools: Option<Vec<String>>,
     prompt_template: String,
+}
+
+fn read_custom_command_metadata(path: &Path) -> Result<ParsedCustomCommand, anyhow::Error> {
+    let content = crate::storage::read_text_file_capped(path)?;
+    parse_custom_command(path, &content)
+}
+
+fn parse_custom_command(path: &Path, content: &str) -> Result<ParsedCustomCommand, anyhow::Error> {
+    if matches!(
+        path.extension().and_then(|value| value.to_str()),
+        Some("toml")
+    ) {
+        custom_command_from_toml(content)
+    } else {
+        Ok(custom_command_from_markdown(content))
+    }
 }
 
 fn custom_command_from_toml(content: &str) -> Result<ParsedCustomCommand, anyhow::Error> {
@@ -799,51 +815,6 @@ fn model_from_markdown(content: &str) -> Option<String> {
         }
     }
     None
-}
-
-fn read_custom_argument_hint(path: &Path) -> Result<Option<String>, anyhow::Error> {
-    let content = crate::storage::read_text_file_capped(path)?;
-    if matches!(
-        path.extension().and_then(|value| value.to_str()),
-        Some("toml")
-    ) {
-        let value: toml::Value = content.parse()?;
-        return Ok(value
-            .get("argument_hint")
-            .or_else(|| value.get("argument-hint"))
-            .and_then(toml::Value::as_str)
-            .map(trim_description)
-            .filter(|value| !value.is_empty()));
-    }
-    Ok(argument_hint_from_markdown(&content))
-}
-
-fn read_custom_allowed_tools(path: &Path) -> Result<Option<Vec<String>>, anyhow::Error> {
-    let content = crate::storage::read_text_file_capped(path)?;
-    if matches!(
-        path.extension().and_then(|value| value.to_str()),
-        Some("toml")
-    ) {
-        let value: toml::Value = content.parse()?;
-        return Ok(allowed_tools_from_toml(&value));
-    }
-    Ok(allowed_tools_from_markdown(&content))
-}
-
-fn read_custom_model(path: &Path) -> Result<Option<String>, anyhow::Error> {
-    let content = crate::storage::read_text_file_capped(path)?;
-    if matches!(
-        path.extension().and_then(|value| value.to_str()),
-        Some("toml")
-    ) {
-        let value: toml::Value = content.parse()?;
-        return Ok(value
-            .get("model")
-            .and_then(toml::Value::as_str)
-            .map(trim_description)
-            .filter(|value| !value.is_empty()));
-    }
-    Ok(model_from_markdown(&content))
 }
 
 fn read_custom_description(path: &Path) -> Result<Option<String>, anyhow::Error> {
