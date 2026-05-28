@@ -6459,51 +6459,44 @@ fn file_mention_candidates(
     let mut candidates = indexed_paths
         .iter()
         .filter(|path| allow_whitespace || !path.chars().any(char::is_whitespace))
-        .filter(|path| file_mention_matches(path, &prefix))
-        .cloned()
+        .filter_map(|path| {
+            file_mention_score_if_match(path, &prefix, recent_paths)
+                .map(|score| (path.clone(), score))
+        })
         .collect::<Vec<_>>();
-    candidates.sort_by(|a, b| {
-        file_mention_score(a, &prefix, recent_paths)
-            .cmp(&file_mention_score(b, &prefix, recent_paths))
-            .then_with(|| a.cmp(b))
-    });
+    candidates.sort_by(|(a, a_score), (b, b_score)| a_score.cmp(b_score).then_with(|| a.cmp(b)));
     candidates.truncate(limit);
-    candidates
+    candidates.into_iter().map(|(path, _)| path).collect()
 }
 
-fn file_mention_score(path: &str, prefix: &str, recent_paths: &[String]) -> (u8, usize) {
+fn file_mention_score_if_match(
+    path: &str,
+    prefix: &str,
+    recent_paths: &[String],
+) -> Option<(u8, usize)> {
     let lower = path.to_lowercase();
     let basename = lower.rsplit('/').next().unwrap_or(&lower);
+    if !prefix.is_empty() && !lower.starts_with(prefix) && !basename.starts_with(prefix) {
+        return None;
+    }
     if !prefix.ends_with('/') {
         let recent_rank = recent_paths
             .iter()
             .position(|recent| recent.eq_ignore_ascii_case(path));
         if let Some(rank) = recent_rank {
-            return (0, rank);
+            return Some((0, rank));
         }
     }
     if lower == prefix {
-        return (1, 0);
+        return Some((1, 0));
     }
     if lower.starts_with(prefix) {
-        return (2, 0);
+        return Some((2, 0));
     }
     if basename.starts_with(prefix) {
-        return (3, 0);
+        return Some((3, 0));
     }
-    (4, lower.len())
-}
-
-fn file_mention_matches(rel: &str, prefix: &str) -> bool {
-    if prefix.is_empty() {
-        return true;
-    }
-    let lower = rel.to_lowercase();
-    lower.starts_with(prefix)
-        || lower
-            .rsplit('/')
-            .next()
-            .is_some_and(|name| name.starts_with(prefix))
+    Some((4, lower.len()))
 }
 
 fn common_string_prefix(values: &[String]) -> String {
