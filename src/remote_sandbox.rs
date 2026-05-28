@@ -2,6 +2,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use futures::StreamExt;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -19,6 +20,9 @@ const DEFAULT_WORKSPACE_WORKFLOW: &str = "candidate-validation-workspace.yml";
 const DEFAULT_WORKSPACE_RELEASE_TAG: &str = "octocode-workspace-cache";
 const DEFAULT_MAX_WORKFLOW_INPUT_BYTES: usize = 60_000;
 const DEFAULT_MAX_WORKSPACE_ARCHIVE_BYTES: usize = 25 * 1024 * 1024;
+const MAX_GITHUB_ERROR_BODY_BYTES: usize = 64 * 1024;
+const MAX_VALIDATION_ARTIFACT_ZIP_BYTES: usize = 5 * 1024 * 1024;
+const MAX_VALIDATION_RESULT_JSON_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SandboxValidationResult {
@@ -500,7 +504,7 @@ async fn validate_with_github_actions_git(
         .context("dispatch GitHub Actions git sandbox workflow")?;
     if response.status() != reqwest::StatusCode::NO_CONTENT {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let body = response_text_capped(response, MAX_GITHUB_ERROR_BODY_BYTES).await;
         bail!("GitHub Actions git dispatch failed: {status} {body}");
     }
 
@@ -598,7 +602,7 @@ async fn dispatch_workspace_validation(
         .context("dispatch GitHub Actions workspace sandbox workflow")?;
     if response.status() != reqwest::StatusCode::NO_CONTENT {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let body = response_text_capped(response, MAX_GITHUB_ERROR_BODY_BYTES).await;
         bail!("GitHub Actions workspace dispatch failed: {status} {body}");
     }
 
@@ -644,7 +648,7 @@ async fn upload_workspace_asset(
         .context("upload workspace archive asset")?;
     if response.status() != reqwest::StatusCode::CREATED {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let body = response_text_capped(response, MAX_GITHUB_ERROR_BODY_BYTES).await;
         bail!("workspace asset upload failed: {status} {body}");
     }
     response
@@ -669,7 +673,7 @@ async fn ensure_release(
     }
     if response.status() != reqwest::StatusCode::NOT_FOUND {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let body = response_text_capped(response, MAX_GITHUB_ERROR_BODY_BYTES).await;
         bail!("workspace cache release lookup failed: {status} {body}");
     }
     let create_url = format!("{api_base}/repos/{repo}/releases");
@@ -687,7 +691,7 @@ async fn ensure_release(
         .context("create workspace cache release")?;
     if response.status() != reqwest::StatusCode::CREATED {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let body = response_text_capped(response, MAX_GITHUB_ERROR_BODY_BYTES).await;
         bail!("workspace cache release creation failed: {status} {body}");
     }
     response
@@ -706,7 +710,7 @@ async fn delete_release_asset(
     let response = client.delete(url).send().await?;
     if response.status() != reqwest::StatusCode::NO_CONTENT {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let body = response_text_capped(response, MAX_GITHUB_ERROR_BODY_BYTES).await;
         bail!("workspace asset cleanup failed: {status} {body}");
     }
     Ok(())
@@ -769,7 +773,7 @@ async fn validate_with_github_actions(
         .context("dispatch GitHub Actions sandbox workflow")?;
     if response.status() != reqwest::StatusCode::NO_CONTENT {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let body = response_text_capped(response, MAX_GITHUB_ERROR_BODY_BYTES).await;
         bail!("GitHub Actions dispatch failed: {status} {body}");
     }
 
@@ -876,21 +880,63 @@ async fn download_validation_artifact(
         .into_iter()
         .find(|artifact| artifact.name == expected)
         .ok_or_else(|| anyhow!("validation artifact not found: {expected}"))?;
-    let bytes = client
+    let response = client
         .get(artifact.archive_download_url)
         .send()
         .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
+        .error_for_status()?;
+    let bytes = response_bytes_capped(response, MAX_VALIDATION_ARTIFACT_ZIP_BYTES).await?;
+    parse_validation_artifact_zip(bytes)
+}
+
+fn parse_validation_artifact_zip(bytes: Vec<u8>) -> Result<SandboxValidationResult> {
     let cursor = Cursor::new(bytes);
     let mut archive = zip::ZipArchive::new(cursor).context("open validation artifact zip")?;
-    let mut file = archive
+    let file = archive
         .by_name("validation-result.json")
         .context("read validation-result.json from artifact")?;
+    if file.size() > MAX_VALIDATION_RESULT_JSON_BYTES as u64 {
+        bail!(
+            "validation-result.json too large: {} bytes exceeds {MAX_VALIDATION_RESULT_JSON_BYTES} byte limit",
+            file.size()
+        );
+    }
     let mut data = String::new();
-    file.read_to_string(&mut data)?;
+    let bytes_read = file
+        .take((MAX_VALIDATION_RESULT_JSON_BYTES + 1) as u64)
+        .read_to_string(&mut data)?;
+    if bytes_read > MAX_VALIDATION_RESULT_JSON_BYTES {
+        bail!(
+            "validation-result.json too large: {bytes_read} bytes exceeds {MAX_VALIDATION_RESULT_JSON_BYTES} byte limit"
+        );
+    }
     serde_json::from_str(&data).context("parse validation-result.json")
+}
+
+async fn response_text_capped(response: reqwest::Response, max_bytes: usize) -> String {
+    match response_bytes_capped(response, max_bytes).await {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+        Err(error) => format!("[response body unavailable: {error}]"),
+    }
+}
+
+async fn response_bytes_capped(response: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>> {
+    if let Some(content_length) = response.content_length() {
+        if content_length > max_bytes as u64 {
+            bail!("response too large: {content_length} bytes exceeds {max_bytes} byte limit");
+        }
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            bail!("response too large: exceeds {max_bytes} byte limit");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn github_client(token: &str) -> Result<reqwest::Client> {
@@ -1026,4 +1072,59 @@ fn parse_env_u64(key: &str, default: u64) -> u64 {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn zip_with_validation_json(content: &[u8]) -> Vec<u8> {
+        use std::io::Write as _;
+
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        writer
+            .start_file(
+                "validation-result.json",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .expect("start zip file");
+        writer.write_all(content).expect("write zip content");
+        writer.finish().expect("finish zip").into_inner()
+    }
+
+    #[test]
+    fn parse_validation_artifact_zip_reads_result() {
+        let json = serde_json::json!({
+            "run_id": "run-1",
+            "candidate_id": null,
+            "status": "passed",
+            "summary": "ok",
+            "command_results": [],
+            "risk_flags": [],
+            "started_at_unix_ms": 1,
+            "finished_at_unix_ms": 2
+        });
+
+        let result =
+            parse_validation_artifact_zip(zip_with_validation_json(json.to_string().as_bytes()))
+                .expect("parse validation artifact");
+
+        assert_eq!(result.run_id, "run-1");
+        assert_eq!(result.status, SandboxStatus::Passed);
+    }
+
+    #[test]
+    fn parse_validation_artifact_zip_rejects_large_result_json() {
+        let oversized = vec![b' '; MAX_VALIDATION_RESULT_JSON_BYTES + 1];
+        let error = parse_validation_artifact_zip(zip_with_validation_json(&oversized))
+            .expect_err("large validation result should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("validation-result.json too large"),
+            "{error:?}"
+        );
+    }
 }
