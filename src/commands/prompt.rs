@@ -1,5 +1,10 @@
 use std::path::Path;
 
+#[cfg(not(test))]
+const BANG_COMMAND_TIMEOUT_SECONDS: u64 = 10;
+#[cfg(test)]
+const BANG_COMMAND_TIMEOUT_SECONDS: u64 = 1;
+
 /// A user-defined prompt-type slash command. Loaded from
 /// `.octocode/commands/*.md` (project) and `~/.octocode/commands/*.md` (user).
 /// When invoked, the body is rendered (with `$ARGUMENTS` substitution) and
@@ -179,28 +184,76 @@ fn bang_command_allowed(command: &str, allowed_tools: Option<&[String]>) -> bool
 }
 
 fn run_bang_line(command: &str, project_root: &Path) -> String {
-    match std::process::Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(project_root)
-        .output()
+    let command_owned = command.to_string();
+    let project_root = project_root.to_path_buf();
+    match std::thread::spawn(move || run_bang_line_with_runtime(command_owned, project_root)).join()
     {
-        Ok(output) => {
-            if output.status.success() {
-                String::from_utf8_lossy(&output.stdout)
-                    .trim_end_matches('\n')
-                    .to_string()
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                format!(
-                    "[!{command} failed (exit {}): {}]",
-                    output.status.code().unwrap_or(-1),
-                    stderr.trim()
-                )
-            }
-        }
-        Err(error) => format!("[!{command} error: {error}]"),
+        Ok(Ok(result)) => format_bang_result(command, result),
+        Ok(Err(error)) => format!("[!{command} error: {error}]"),
+        Err(_) => format!("[!{command} error: command runner panicked]"),
     }
+}
+
+fn run_bang_line_with_runtime(
+    command: String,
+    project_root: std::path::PathBuf,
+) -> Result<crate::tools::run_command::CommandResult, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("failed to create command runtime: {error}"))?;
+    runtime
+        .block_on(crate::tools::run_command::run_command(
+            &project_root,
+            &command,
+            None,
+            BANG_COMMAND_TIMEOUT_SECONDS,
+        ))
+        .map_err(|error| error.to_string())
+}
+
+fn format_bang_result(command: &str, result: crate::tools::run_command::CommandResult) -> String {
+    if result.is_success() {
+        let mut stdout = result.stdout.trim_end_matches('\n').to_string();
+        append_truncation_note(
+            &mut stdout,
+            "stdout",
+            result.stdout_truncated,
+            result.stdout_original_bytes,
+        );
+        return stdout;
+    }
+
+    let mut detail = result.stderr.trim().to_string();
+    if detail.is_empty() {
+        detail = result.stdout.trim().to_string();
+    }
+    append_truncation_note(
+        &mut detail,
+        "stdout",
+        result.stdout_truncated,
+        result.stdout_original_bytes,
+    );
+    append_truncation_note(
+        &mut detail,
+        "stderr",
+        result.stderr_truncated,
+        result.stderr_original_bytes,
+    );
+    if detail.is_empty() {
+        detail = "no output".to_string();
+    }
+    format!("[!{command} failed (exit {}): {detail}]", result.exit_code)
+}
+
+fn append_truncation_note(text: &mut String, stream: &str, truncated: bool, original_bytes: u64) {
+    if !truncated {
+        return;
+    }
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    text.push_str(&format!("[{stream} truncated: {original_bytes} bytes]"));
 }
 
 /// Parse the value of an `allowed-tools:` frontmatter line.

@@ -2981,6 +2981,27 @@ mod tests {
     }
 
     #[test]
+    fn expand_bang_lines_uses_run_command_safety_lint() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let allowed = vec!["Bash".to_string()];
+        let out = expand_bang_lines("!rm -rf /", temp.path(), Some(&allowed));
+
+        assert!(out.contains("dangerous command blocked"), "{out}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expand_bang_lines_times_out_long_running_command() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let allowed = vec!["Bash".to_string()];
+        let started = std::time::Instant::now();
+        let out = expand_bang_lines("!sleep 30", temp.path(), Some(&allowed));
+
+        assert!(out.contains("[timed out after 1s]"), "{out}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
     fn expand_bang_lines_honors_bash_allowed_tools_pattern() {
         let temp = tempfile::tempdir().expect("tempdir");
         let allowed = vec!["Bash(echo:*)".to_string()];
