@@ -431,6 +431,8 @@ fn ask_user_question_def() -> ToolDefinition {
                     "question": { "type": "string", "description": "Question shown to the user" },
                     "options": {
                         "type": "array",
+                        "minItems": 2,
+                        "maxItems": 4,
                         "items": {
                             "type": "object",
                             "properties": {
@@ -441,7 +443,7 @@ fn ask_user_question_def() -> ToolDefinition {
                             "required": ["label"]
                         }
                     },
-                    "multi_select": { "type": "boolean", "description": "Whether multiple options may be selected" }
+                    "multi_select": { "type": "boolean", "description": "Whether multiple options may be selected. Do not include option previews when this is true." }
                 },
                 "required": ["question", "options"]
             }),
@@ -976,5 +978,24 @@ mod tests {
             .expect("task_list registry entry");
         assert_eq!(task_list.display_name, "TaskList");
         assert_eq!(task_list.permission, ToolPermissionProfile::SafeRead);
+    }
+
+    #[test]
+    fn ask_user_question_schema_matches_runtime_limits() {
+        let tools = standard_tool_definitions();
+        let ask = tools
+            .iter()
+            .find(|tool| tool.function.name == "ask_user_question")
+            .expect("ask_user_question tool");
+        let options = &ask.function.parameters["properties"]["options"];
+
+        assert_eq!(options["minItems"], 2);
+        assert_eq!(options["maxItems"], 4);
+        assert!(
+            ask.function.parameters["properties"]["multi_select"]["description"]
+                .as_str()
+                .expect("multi_select description")
+                .contains("Do not include option previews")
+        );
     }
 }
