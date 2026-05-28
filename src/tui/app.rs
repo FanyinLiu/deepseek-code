@@ -257,6 +257,7 @@ pub struct TuiApp {
     pub latest_compact_reason: Option<String>,
     compact_notice: Option<String>,
     pub selected_option_index: usize,
+    pub selected_multi_options: Vec<bool>,
     pub selected_slash_index: usize,
     pub selected_file_mention_index: usize,
     pub pending_images: Vec<String>,
@@ -927,6 +928,7 @@ impl TuiApp {
             latest_compact_reason: None,
             compact_notice: None,
             selected_option_index: 0,
+            selected_multi_options: Vec::new(),
             selected_slash_index: 0,
             selected_file_mention_index: 0,
             pending_images: Vec::new(),
@@ -1937,6 +1939,7 @@ impl TuiApp {
                                 .map(|r| r.multi_select)
                                 .unwrap_or(false);
                             self.pending_question_rich = None;
+                            self.selected_multi_options.clear();
                             if is_multi {
                                 if let Some(picks) = try_match_multi_options(&input, &options) {
                                     let labels =
@@ -2137,6 +2140,7 @@ impl TuiApp {
                     self.diff_focused = false;
                     self.pending_options = None;
                     self.pending_question_rich = None;
+                    self.selected_multi_options.clear();
                     self.activity_log.clear();
                     crate::workspace::apply::clear_history();
                     self.status_message = "Screen cleared".into();
@@ -2290,8 +2294,13 @@ impl TuiApp {
             KeyCode::Esc => {
                 self.pending_options = None;
                 self.pending_question_rich = None;
+                self.selected_multi_options.clear();
                 self.selected_option_index = 0;
                 self.status_message = "Option picker dismissed".into();
+                true
+            }
+            KeyCode::Char(' ') if self.pending_question_is_multi_select() => {
+                self.toggle_selected_multi_option(option_count);
                 true
             }
             KeyCode::Char(c) => {
@@ -2705,17 +2714,71 @@ impl TuiApp {
         self.selected_option_index = (self.selected_option_index + 1) % option_count;
     }
 
+    fn pending_question_is_multi_select(&self) -> bool {
+        self.pending_question_rich
+            .as_ref()
+            .is_some_and(|rich| rich.multi_select)
+    }
+
+    fn toggle_selected_multi_option(&mut self, option_count: usize) {
+        if option_count == 0 {
+            self.selected_multi_options.clear();
+            self.selected_option_index = 0;
+            return;
+        }
+        if self.selected_multi_options.len() != option_count {
+            self.selected_multi_options.resize(option_count, false);
+        }
+        let idx = self.selected_option_index.min(option_count - 1);
+        self.selected_option_index = idx;
+        self.selected_multi_options[idx] = !self.selected_multi_options[idx];
+        self.status_message = if self.selected_multi_options[idx] {
+            format!("Selected option {}", idx + 1)
+        } else {
+            format!("Unselected option {}", idx + 1)
+        };
+    }
+
     fn submit_selected_pending_option(&mut self, tx: &mpsc::UnboundedSender<TuiAction>) {
         let Some((_, options)) = self.pending_options.take() else {
             return;
         };
+        let is_multi = self.pending_question_is_multi_select();
+        self.pending_question_rich = None;
         if options.is_empty() {
             self.selected_option_index = 0;
+            self.selected_multi_options.clear();
             return;
         }
         let idx = self.selected_option_index.min(options.len() - 1);
         let selected = options[idx].clone();
         self.selected_option_index = 0;
+        if is_multi {
+            let mut picks = options
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| {
+                    self.selected_multi_options
+                        .get(*index)
+                        .copied()
+                        .unwrap_or(false)
+                })
+                .map(|(index, option)| (index + 1, option.clone()))
+                .collect::<Vec<_>>();
+            if picks.is_empty() {
+                picks.push((idx + 1, selected));
+            }
+            self.selected_multi_options.clear();
+            let labels = picks
+                .iter()
+                .map(|(_, label)| label.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.status_message = format!("Selected {} options: {labels}", picks.len());
+            let _ = tx.send(TuiAction::Submit(format_pending_multi_reply(&picks)));
+            return;
+        }
+        self.selected_multi_options.clear();
         self.status_message = format!("Selected: {selected}");
         let _ = tx.send(TuiAction::Submit(format_pending_option_reply(
             idx + 1,
@@ -3266,6 +3329,7 @@ impl TuiApp {
             {
                 self.pending_options = Some((title, options));
                 self.selected_option_index = 0;
+                self.selected_multi_options.clear();
             }
         }
     }
@@ -3438,6 +3502,7 @@ impl TuiApp {
         self.stream_buffer.clear();
         self.pending_options = None;
         self.pending_question_rich = None;
+        self.selected_multi_options.clear();
         self.compact_notice = None;
         self.selected_option_index = 0;
         self.push_activity(format!("turn started: {}", self.current_task_title));
@@ -3482,6 +3547,7 @@ impl TuiApp {
         }
         self.pending_options = None;
         self.pending_question_rich = None;
+        self.selected_multi_options.clear();
         self.selected_option_index = 0;
         self.is_streaming = false;
         self.stream_start = None;
@@ -3763,8 +3829,14 @@ impl TuiApp {
                 } else {
                     None
                 };
+                let option_count = options.len();
                 self.pending_options = Some((title.clone(), options));
                 self.selected_option_index = 0;
+                self.selected_multi_options = if multi_select {
+                    vec![false; option_count]
+                } else {
+                    Vec::new()
+                };
                 self.is_streaming = false;
                 self.stream_start = None;
                 self.status_message = format!(
@@ -4730,7 +4802,11 @@ impl TuiApp {
                         options: &rich_opts,
                         selected_index: self.selected_option_index,
                         multi_select: rich.multi_select,
-                        checked: &[],
+                        checked: if rich.multi_select {
+                            &self.selected_multi_options
+                        } else {
+                            &[]
+                        },
                     };
                     select_popup::render_select_popup_rich(f, area, &state);
                 } else {
@@ -10771,6 +10847,61 @@ exit = "ctrl+q"
     }
 
     #[test]
+    fn pending_multi_option_picker_toggles_and_submits_checked_options() {
+        let mut app = test_app();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.pending_options = Some((
+            "Choose tasks".into(),
+            vec![
+                "Generate code".into(),
+                "Review code".into(),
+                "Debug issue".into(),
+            ],
+        ));
+        app.pending_question_rich = Some(PendingQuestionRich {
+            title: "Choose tasks".into(),
+            question: "Pick one or more".into(),
+            options: vec![
+                PendingQuestionOption {
+                    label: "Generate code".into(),
+                    description: String::new(),
+                    preview: None,
+                },
+                PendingQuestionOption {
+                    label: "Review code".into(),
+                    description: String::new(),
+                    preview: None,
+                },
+                PendingQuestionOption {
+                    label: "Debug issue".into(),
+                    description: String::new(),
+                    preview: None,
+                },
+            ],
+            multi_select: true,
+        });
+        app.selected_multi_options = vec![false; 3];
+
+        app.handle_key(key(KeyCode::Down, KeyEventKind::Press), &tx);
+        app.handle_key(key(KeyCode::Char(' '), KeyEventKind::Press), &tx);
+        app.handle_key(key(KeyCode::Down, KeyEventKind::Press), &tx);
+        app.handle_key(key(KeyCode::Char(' '), KeyEventKind::Press), &tx);
+        assert_eq!(app.selected_multi_options, vec![false, true, true]);
+
+        app.handle_key(key(KeyCode::Enter, KeyEventKind::Press), &tx);
+
+        assert!(app.pending_options.is_none());
+        assert!(app.pending_question_rich.is_none());
+        assert!(app.selected_multi_options.is_empty());
+        match rx.try_recv().expect("submit action") {
+            TuiAction::Submit(input) => {
+                assert_eq!(input, "Selected options: Review code, Debug issue");
+            }
+            _ => panic!("expected submit action"),
+        }
+    }
+
+    #[test]
     fn ask_user_event_sets_pending_options_panel() {
         let mut app = test_app();
 
@@ -10794,6 +10925,26 @@ exit = "ctrl+q"
             Some("2 options for Library")
         );
         assert!(!app.is_streaming);
+    }
+
+    #[test]
+    fn ask_user_multi_event_initializes_checkbox_state() {
+        let mut app = test_app();
+
+        app.apply_agent_event(AgentEvent::UserQuestionRequested {
+            title: "Pick checks".into(),
+            options: vec!["unit".into(), "integration".into(), "smoke".into()],
+            summary: "3 checks".into(),
+            descriptions: Vec::new(),
+            previews: Vec::new(),
+            multi_select: true,
+        });
+
+        assert_eq!(app.selected_multi_options, vec![false, false, false]);
+        assert!(app
+            .pending_question_rich
+            .as_ref()
+            .is_some_and(|rich| rich.multi_select));
     }
 
     #[test]
