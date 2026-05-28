@@ -7749,12 +7749,10 @@ pub async fn run_tui(
                     app.begin_running_turn(&input);
 
                     let images = std::mem::take(&mut app.pending_images);
+                    let mcp_config = app.config.mcp.clone();
                     let handle = tokio::spawn(async move {
                         if !turn_orchestrator.mcp_initialized() {
-                            let config =
-                                crate::storage::Config::load(Some(&turn_orchestrator.project_root))
-                                    .unwrap_or_default();
-                            turn_orchestrator.init_mcp(&config.mcp).await;
+                            turn_orchestrator.init_mcp(&mcp_config).await;
                         }
 
                         let run_error = turn_orchestrator
