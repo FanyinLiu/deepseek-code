@@ -85,13 +85,20 @@ pub(crate) fn project_storage_keys(project_root: &Path) -> Vec<String> {
 pub const TEXT_FILE_SIZE_CAP: u64 = 50 * 1024 * 1024;
 
 pub fn read_text_file_capped(path: impl AsRef<Path>) -> Result<String, anyhow::Error> {
+    read_text_file_with_cap(path, TEXT_FILE_SIZE_CAP)
+}
+
+pub(crate) fn read_text_file_with_cap(
+    path: impl AsRef<Path>,
+    cap: u64,
+) -> Result<String, anyhow::Error> {
     let path = path.as_ref();
     let size = std::fs::metadata(path)?.len();
-    if size > TEXT_FILE_SIZE_CAP {
-        anyhow::bail!("file too large: {size} bytes, cap {TEXT_FILE_SIZE_CAP}");
+    if size > cap {
+        anyhow::bail!("file too large: {size} bytes, cap {cap}");
     }
     let file = std::fs::File::open(path)?;
-    read_text_capped(file, TEXT_FILE_SIZE_CAP)
+    read_text_capped(file, cap)
 }
 
 fn read_text_capped(reader: impl Read, cap: u64) -> Result<String, anyhow::Error> {

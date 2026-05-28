@@ -1,5 +1,7 @@
 use std::path::Path;
 
+const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
+
 /// Execute a `ReadFile` tool call.
 /// For code files, automatically appends a structural overview (functions, classes, etc.)
 /// before the content to help the model navigate large files.
@@ -15,7 +17,6 @@ pub fn read_file(
     let display_path = crate::workspace::paths::display_path(project_root, &resolved);
 
     let metadata = std::fs::metadata(&resolved)?;
-    const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
     if metadata.len() > MAX_FILE_SIZE {
         anyhow::bail!(
             "file too large ({} bytes, max {} MiB): {}",
@@ -41,7 +42,7 @@ pub fn read_file(
         _ => {}
     }
 
-    let content = std::fs::read_to_string(&resolved)?;
+    let content = crate::storage::read_text_file_with_cap(&resolved, MAX_FILE_SIZE)?;
 
     // Extract code structure for supported languages
     let ext = resolved.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -235,5 +236,22 @@ async def async_func():
     #[test]
     fn test_extract_structure_empty() {
         assert!(extract_structure("", "rs").is_none());
+    }
+
+    #[test]
+    fn read_file_rejects_large_text_file_before_reading() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("large.txt");
+        let file = std::fs::File::create(&path).expect("create large file");
+        file.set_len(MAX_FILE_SIZE + 1).expect("extend large file");
+        drop(file);
+
+        let error = read_file(root.path(), "large.txt", None, None)
+            .expect_err("large text file should be rejected");
+
+        let message = error.to_string();
+        assert!(message.contains("file too large"));
+        assert!(message.contains("max 10 MiB"));
+        assert!(message.contains("large.txt"));
     }
 }
