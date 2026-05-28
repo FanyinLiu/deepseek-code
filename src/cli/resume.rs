@@ -9,8 +9,8 @@ use crate::storage::{self, EventLogStore, SessionStore, TranscriptFormat};
 /// `~/.octocode/<project-key>/sessions/` and `SessionStore::list` already
 /// sorts by `updated_at` descending, so the head of the list is the latest.
 pub fn resolve_latest_session_id(project_root: &Path) -> Result<Option<String>, anyhow::Error> {
-    let home = storage::user_home_dir()
-        .ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?;
+    let home =
+        storage::user_home_dir().ok_or_else(|| anyhow::anyhow!("cannot find home directory"))?;
     let store = SessionStore::new(home.join(".octocode"));
     latest_session_id_from_store(&store, project_root)
 }

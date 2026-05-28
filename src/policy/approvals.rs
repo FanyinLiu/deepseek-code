@@ -275,18 +275,6 @@ fn evaluate_tool_inner(
     project_root: &Path,
     policy: &PolicyConfig,
 ) -> PolicyDecision {
-    if let Some(allowed) = &policy.allowed_tools {
-        if !allowed.iter().any(|name| name == tool_name) {
-            let allowlist = allowed.join(", ");
-            return PolicyDecision::deny(
-                format!("tool {tool_name} blocked by command allowed-tools"),
-                format!("Blocked: {tool_name}"),
-                "Tool not in the active command's allowed-tools list",
-                RiskLevel::Blocked,
-                format!("active allowed-tools: {allowlist}"),
-            );
-        }
-    }
     let auto_approve_safe_read = policy.auto_approve_safe_read || policy.auto_mode;
     let args: serde_json::Value = match serde_json::from_str(arguments) {
         Ok(args) => args,
@@ -300,6 +288,21 @@ fn evaluate_tool_inner(
             );
         }
     };
+    if let Some(allowed) = &policy.allowed_tools {
+        if !allowed
+            .iter()
+            .any(|entry| matches_allowed_entry(entry, tool_name, &args))
+        {
+            let allowlist = allowed.join(", ");
+            return PolicyDecision::deny(
+                format!("tool {tool_name} blocked by command allowed-tools"),
+                format!("Blocked: {tool_name}"),
+                "Tool not in the active command's allowed-tools list",
+                RiskLevel::Blocked,
+                format!("active allowed-tools: {allowlist}"),
+            );
+        }
+    }
     if let Some(violation) =
         crate::defense::BehavioralPerimeter.check_tool_call(tool_name, arguments, project_root)
     {
@@ -611,6 +614,46 @@ fn evaluate_tool_inner(
             RiskLevel::Blocked,
             String::new(),
         ),
+    }
+}
+
+fn matches_allowed_entry(entry: &str, tool_name: &str, args: &serde_json::Value) -> bool {
+    let (name, pattern) = parse_allowed_entry(entry);
+    if name != tool_name {
+        return false;
+    }
+    let Some(pattern) = pattern else {
+        return true;
+    };
+    let Some(primary_arg) = primary_arg_for_tool(tool_name, args) else {
+        return false;
+    };
+    glob::Pattern::new(pattern)
+        .map(|pattern| pattern.matches(primary_arg))
+        .unwrap_or(false)
+}
+
+fn parse_allowed_entry(entry: &str) -> (&str, Option<&str>) {
+    let trimmed = entry.trim();
+    if let Some(open) = trimmed.find('(') {
+        if trimmed.ends_with(')') {
+            let name = trimmed[..open].trim();
+            let pattern = trimmed[open + 1..trimmed.len() - 1].trim();
+            return (name, Some(pattern));
+        }
+    }
+    (trimmed, None)
+}
+
+fn primary_arg_for_tool<'a>(tool: &str, args: &'a serde_json::Value) -> Option<&'a str> {
+    match tool {
+        "run_command" => args.get("command").and_then(serde_json::Value::as_str),
+        "bash_output" => args.get("shell_id").and_then(serde_json::Value::as_str),
+        "read_file" | "write_file" | "edit_file" | "list_dir" => {
+            args.get("path").and_then(serde_json::Value::as_str)
+        }
+        "glob" | "grep" => args.get("pattern").and_then(serde_json::Value::as_str),
+        _ => None,
     }
 }
 
@@ -934,6 +977,65 @@ mod tests {
         );
         // Without an allowlist, glob still passes through (it is a SafeRead).
         assert_ne!(decision.action, PolicyAction::Deny);
+    }
+
+    #[test]
+    fn allowed_tools_name_only_entry_permits_matching_tool() {
+        let policy = PolicyConfig {
+            require_approval_for_command: true,
+            allowed_tools: Some(vec!["run_command".to_string()]),
+            ..PolicyConfig::default()
+        };
+        let decision = evaluate_tool(
+            "run_command",
+            &args(serde_json::json!({ "command": "cargo test" })),
+            Path::new("."),
+            &policy,
+        );
+        assert_eq!(decision.action, PolicyAction::AskOnce);
+        assert_eq!(decision.display.risk_level, RiskLevel::CommandExecution);
+    }
+
+    #[test]
+    fn allowed_tools_pattern_entry_permits_primary_arg_match() {
+        let policy = PolicyConfig {
+            require_approval_for_command: true,
+            allowed_tools: Some(vec!["run_command(cargo*)".to_string()]),
+            ..PolicyConfig::default()
+        };
+        let decision = evaluate_tool(
+            "run_command",
+            &args(serde_json::json!({ "command": "cargo test --workspace" })),
+            Path::new("."),
+            &policy,
+        );
+        assert_eq!(decision.action, PolicyAction::AskOnce);
+        assert_eq!(decision.display.risk_level, RiskLevel::CommandExecution);
+    }
+
+    #[test]
+    fn allowed_tools_pattern_entry_blocks_primary_arg_miss() {
+        let policy = PolicyConfig {
+            require_approval_for_command: true,
+            allowed_tools: Some(vec!["run_command(git*)".to_string()]),
+            ..PolicyConfig::default()
+        };
+        let decision = evaluate_tool(
+            "run_command",
+            &args(serde_json::json!({ "command": "cargo test" })),
+            Path::new("."),
+            &policy,
+        );
+        assert_eq!(decision.action, PolicyAction::Deny);
+        assert_eq!(decision.display.risk_level, RiskLevel::Blocked);
+        assert_eq!(
+            decision.reason,
+            "tool run_command blocked by command allowed-tools"
+        );
+        assert_eq!(
+            decision.display.details,
+            "active allowed-tools: run_command(git*)"
+        );
     }
 
     fn mcp_metadata(

@@ -2177,9 +2177,7 @@ fn cmd_mode(args: &str, ctx: &mut CommandContext) -> CommandResult {
             )));
         }
         "ask" | "default" | "permissions" => crate::tui::app::InteractionMode::Ask,
-        "plan" | "read-only" | "read_only" | "readonly" => {
-            crate::tui::app::InteractionMode::Plan
-        }
+        "plan" | "read-only" | "read_only" | "readonly" => crate::tui::app::InteractionMode::Plan,
         "review" | "auto-review" | "auto_review" | "accept-edits" | "accept_edits" => {
             crate::tui::app::InteractionMode::AutoReview
         }

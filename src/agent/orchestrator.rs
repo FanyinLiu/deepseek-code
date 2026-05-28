@@ -3059,10 +3059,12 @@ impl ApprovalResolver for OrchestratorApprovalResolver<'_> {
             );
             match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
                 Ok(Ok(true)) => ApprovalOutcome::Approved,
-                Ok(Ok(false)) => ApprovalOutcome::denied("Not this one — please pick another approach"),
-                Ok(Err(_)) => ApprovalOutcome::denied(
-                    "Approval flow ended before a response arrived",
-                ),
+                Ok(Ok(false)) => {
+                    ApprovalOutcome::denied("Not this one — please pick another approach")
+                }
+                Ok(Err(_)) => {
+                    ApprovalOutcome::denied("Approval flow ended before a response arrived")
+                }
                 Err(_) => ApprovalOutcome::denied(
                     "No approval came in within 60s — moving on without this call",
                 ),
