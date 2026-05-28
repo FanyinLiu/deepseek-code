@@ -4678,7 +4678,11 @@ impl TuiApp {
 
         if self.is_streaming {
             let mut activity = self.streaming_status_activity();
-            activity.title = "Thinking";
+            activity.title = if self.is_chinese_ui() {
+                "思考中"
+            } else {
+                "Thinking"
+            };
             status_bar::render_status_bar(
                 f,
                 area,

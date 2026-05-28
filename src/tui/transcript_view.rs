@@ -157,7 +157,7 @@ pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) 
             lines.push(Line::from(""));
         }
         if props.stream_buffer.trim().is_empty() && props.is_streaming {
-            lines.push(streaming_status_line(frame));
+            lines.push(streaming_status_line(frame, props.chinese));
         } else {
             render_assistant_content(
                 &mut lines,
@@ -167,7 +167,7 @@ pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) 
                 palette.text,
             );
             if props.is_streaming && props.show_streaming_placeholder {
-                lines.push(streaming_status_line(frame));
+                lines.push(streaming_status_line(frame, props.chinese));
             }
         }
     }
@@ -190,6 +190,7 @@ pub fn render_transcript(f: &mut Frame, area: Rect, props: TranscriptProps<'_>) 
             props.show_reasoning,
             props.reasoning_elapsed_ms,
             props.reasoning_tokens,
+            props.chinese,
         );
     }
 
@@ -1014,9 +1015,15 @@ fn render_thinking_panel(
     expanded: bool,
     elapsed_ms: u64,
     tokens: u64,
+    chinese: bool,
 ) {
     let p = theme::palette();
-    let state = if expanded { "expanded" } else { "collapsed" };
+    let state = match (expanded, chinese) {
+        (true, true) => "展开",
+        (false, true) => "收起",
+        (true, false) => "expanded",
+        (false, false) => "collapsed",
+    };
     let mut metadata = Vec::new();
     if elapsed_ms > 0 {
         metadata.push(format_duration(elapsed_ms));
@@ -1024,15 +1031,16 @@ fn render_thinking_panel(
     if tokens > 0 {
         metadata.push(format!("{tokens} tokens"));
     }
+    let toggle = if chinese { "T 切换" } else { "T toggles" };
     let suffix = if metadata.is_empty() {
-        format!(" · {state} · T toggles")
+        format!(" · {state} · {toggle}")
     } else {
-        format!(" · {state} · {} · T toggles", metadata.join(" · "))
+        format!(" · {state} · {} · {toggle}", metadata.join(" · "))
     };
 
     lines.push(Line::from(vec![
         Span::styled(
-            "Thinking",
+            if chinese { "思考中" } else { "Thinking" },
             transcript_style(p.text).add_modifier(Modifier::BOLD),
         ),
         Span::styled(suffix, transcript_style(p.dim)),
@@ -1054,10 +1062,11 @@ fn render_thinking_panel(
     }
 }
 
-fn streaming_status_line(frame: motion::MotionFrame) -> Line<'static> {
+fn streaming_status_line(frame: motion::MotionFrame, chinese: bool) -> Line<'static> {
     let p = theme::palette();
+    let label = if chinese { "思考中" } else { "Thinking" };
     Line::from(vec![Span::styled(
-        format!("Thinking{}", frame.dots()),
+        format!("{label}{}", frame.dots()),
         Style::default().fg(p.dim).bg(p.canvas),
     )])
 }
@@ -3565,6 +3574,61 @@ mod tests {
         assert!(rendered.contains("1.5s"));
         assert!(rendered.contains("12 tokens"));
         assert!(!rendered.contains("private reasoning"));
+        theme::set_active_theme(theme::ThemeMode::Light);
+    }
+
+    #[test]
+    fn thinking_panel_uses_chinese_labels_when_requested() {
+        theme::set_active_theme(theme::ThemeMode::Light);
+        let mut terminal = Terminal::new(TestBackend::new(90, 6)).expect("terminal");
+
+        terminal
+            .draw(|f| {
+                render_transcript(
+                    f,
+                    f.area(),
+                    TranscriptProps {
+                        messages: &[],
+                        pending_user_message: Some("修复输入框"),
+                        queued_user_messages: &[],
+                        scroll_offset: 0,
+                        plan_summary: None,
+                        plan_steps: &[],
+                        plan_current_step: 0,
+                        plan_total_steps: 0,
+                        plan_warnings: &[],
+                        todo_summary: &todo_state::TodoSummary::default(),
+                        todo_items: &[],
+                        subagents: &[],
+                        global_elapsed_ms: 0,
+                        diffs: &[],
+                        selected_diff: None,
+                        is_streaming: true,
+                        show_streaming_placeholder: true,
+                        stream_buffer: "",
+                        reasoning_buffer: "private reasoning",
+                        reasoning_elapsed_ms: 1_500,
+                        reasoning_tokens: 12,
+                        show_reasoning: false,
+                        chinese: true,
+                    },
+                );
+            })
+            .expect("draw");
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        let compact = rendered.replace(' ', "");
+        assert!(compact.contains("思考中"));
+        assert!(compact.contains("收起"));
+        assert!(compact.contains("T切换"));
+        assert!(!rendered.contains("Thinking"));
+        assert!(!rendered.contains("collapsed"));
         theme::set_active_theme(theme::ThemeMode::Light);
     }
 
