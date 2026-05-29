@@ -620,6 +620,31 @@ impl Orchestrator {
         }
     }
 
+    /// Fold one model response's usage into the session totals exactly once
+    /// (persisted event + tokens + cost + cache) and return its cache split.
+    ///
+    /// Must be called for every model call in a turn — including the
+    /// tool-emitting calls. Previously only the final no-tool response was
+    /// counted, so multi-tool turns under-reported tokens, cost, and cache.
+    fn accrue_usage(&mut self, usage: &Usage) -> CacheUsage {
+        self.record_usage_event(usage);
+        let cache = CacheUsage::from_usage(usage);
+        self.session.metadata.total_tokens += u64::from(usage.total_tokens);
+        self.session.metadata.total_cost_estimate += usage
+            .estimate_cost_cny(&self.session.reasoning_state.effective_model());
+        self.session.metadata.prompt_cache_hit_tokens = self
+            .session
+            .metadata
+            .prompt_cache_hit_tokens
+            .saturating_add(cache.prompt_cache_hit_tokens);
+        self.session.metadata.prompt_cache_miss_tokens = self
+            .session
+            .metadata
+            .prompt_cache_miss_tokens
+            .saturating_add(cache.prompt_cache_miss_tokens);
+        cache
+    }
+
     pub fn set_swarm_cancel_token(&mut self, token: Arc<AtomicBool>) {
         self.swarm_cancel_token = Some(token);
     }
@@ -1877,21 +1902,7 @@ impl Orchestrator {
                         send_event(event_tx, AgentEvent::ContentDelta(visible_content.clone()));
                     }
                     if let Some(ref usage) = stream_result.usage {
-                        self.record_usage_event(usage);
-                        let cache = CacheUsage::from_usage(usage);
-                        self.session.metadata.total_tokens += u64::from(usage.total_tokens);
-                        self.session.metadata.total_cost_estimate += usage
-                            .estimate_cost_cny(&self.session.reasoning_state.effective_model());
-                        self.session.metadata.prompt_cache_hit_tokens = self
-                            .session
-                            .metadata
-                            .prompt_cache_hit_tokens
-                            .saturating_add(cache.prompt_cache_hit_tokens);
-                        self.session.metadata.prompt_cache_miss_tokens = self
-                            .session
-                            .metadata
-                            .prompt_cache_miss_tokens
-                            .saturating_add(cache.prompt_cache_miss_tokens);
+                        let cache = self.accrue_usage(usage);
                         send_event(
                             event_tx,
                             AgentEvent::StreamDone {
@@ -2311,13 +2322,7 @@ impl Orchestrator {
                                 ),
                             );
                             if let Some(ref usage) = stream_result.usage {
-                                self.record_usage_event(usage);
-                                let cache = CacheUsage::from_usage(usage);
-                                self.session.metadata.total_tokens += u64::from(usage.total_tokens);
-                                self.session.metadata.total_cost_estimate += usage
-                                    .estimate_cost_cny(
-                                        &self.session.reasoning_state.effective_model(),
-                                    );
+                                let cache = self.accrue_usage(usage);
                                 send_event(
                                     event_tx,
                                     AgentEvent::StreamDone {
@@ -2432,6 +2437,13 @@ impl Orchestrator {
             true,
         );
         self.session.messages.push(assistant_msg);
+        // Count this tool-emitting response's tokens now. The turn continues
+        // with a follow-up call below, so without recording here the usage of
+        // every tool-emitting call is dropped (only the final no-tool response
+        // was previously counted).
+        if let Some(ref usage) = stream_result.usage {
+            let _ = self.accrue_usage(usage);
+        }
         send_reasoning_delta(event_tx, &stream_result.reasoning_content);
         for tc in &stream_result.tool_calls {
             self.emit_event(
@@ -3022,21 +3034,7 @@ impl Orchestrator {
                         send_event(event_tx, AgentEvent::ContentDelta(visible_content));
                     }
                     if let Some(ref usage) = followup_result.usage {
-                        self.record_usage_event(usage);
-                        let cache = CacheUsage::from_usage(usage);
-                        self.session.metadata.total_tokens += u64::from(usage.total_tokens);
-                        self.session.metadata.total_cost_estimate += usage
-                            .estimate_cost_cny(&self.session.reasoning_state.effective_model());
-                        self.session.metadata.prompt_cache_hit_tokens = self
-                            .session
-                            .metadata
-                            .prompt_cache_hit_tokens
-                            .saturating_add(cache.prompt_cache_hit_tokens);
-                        self.session.metadata.prompt_cache_miss_tokens = self
-                            .session
-                            .metadata
-                            .prompt_cache_miss_tokens
-                            .saturating_add(cache.prompt_cache_miss_tokens);
+                        let cache = self.accrue_usage(usage);
                         send_event(
                             event_tx,
                             AgentEvent::StreamDone {
@@ -4438,6 +4436,77 @@ mod tests {
                 .iter()
                 .any(|m| m.content.to_string_lossy().contains("All set")),
             "the streamed final answer should land in the session"
+        );
+    }
+
+    fn usage(total: u32) -> crate::deepseek::models::Usage {
+        crate::deepseek::models::Usage {
+            prompt_tokens: total,
+            completion_tokens: 0,
+            total_tokens: total,
+            prompt_cache_hit_tokens: None,
+            prompt_cache_miss_tokens: None,
+            prompt_tokens_details: None,
+        }
+    }
+
+    fn final_answer_with_usage(
+        content: &str,
+        usage: crate::deepseek::models::Usage,
+    ) -> crate::deepseek::models::StreamResult {
+        let mut result = final_answer(content);
+        result.usage = Some(usage);
+        result
+    }
+
+    fn list_dir_tool_call(
+        usage: crate::deepseek::models::Usage,
+    ) -> crate::deepseek::models::StreamResult {
+        crate::deepseek::models::StreamResult {
+            content: String::new(),
+            reasoning_content: String::new(),
+            tool_calls: vec![crate::deepseek::models::ToolCall {
+                id: "tc-1".into(),
+                call_type: "function".into(),
+                function: crate::deepseek::models::ToolCallFunction {
+                    name: "list_dir".into(),
+                    arguments: r#"{"path":"."}"#.into(),
+                },
+            }],
+            finish_reason: Some("tool_calls".into()),
+            usage: Some(usage),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_emitting_turn_counts_every_model_call_usage() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut session = session_with_user_messages(&[]);
+        session.project_root = root.path().to_path_buf();
+        // Call 1 emits a tool call (100 tokens); the follow-up is the final
+        // answer (40 tokens). Both must be counted — previously only the final
+        // no-tool response (40) landed in the totals.
+        let mock = std::sync::Arc::new(MockStreamClient::new(vec![
+            list_dir_tool_call(usage(100)),
+            final_answer_with_usage("done", usage(40)),
+        ]));
+        let mut orchestrator = super::Orchestrator::new(
+            crate::deepseek::client::DeepSeekClient::new("test-key".to_string()),
+            root.path().to_path_buf(),
+            session,
+        )
+        .with_stream_client(mock);
+        orchestrator.yolo_mode = true; // auto-approve the list_dir call
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        orchestrator
+            .run_turn("你好", tx)
+            .await
+            .expect("turn should succeed");
+
+        assert_eq!(
+            orchestrator.session.metadata.total_tokens, 140,
+            "both the tool-emitting call (100) and the final answer (40) must be counted, not just the final answer"
         );
     }
 }

@@ -1633,13 +1633,47 @@ fn mark_patch_conflicts(patches: &mut [SwarmPendingPatch]) -> Vec<String> {
 }
 
 fn extract_pending_patch(output: &str) -> Option<String> {
+    // Preferred: the explicit wrapper the worker prompt asks for.
     if let Some(marked) = extract_between(output, "BEGIN_PENDING_PATCH", "END_PENDING_PATCH") {
-        return normalize_patch(marked);
+        if let Some(patch) = normalize_patch(marked) {
+            return Some(patch);
+        }
     }
-    let start = output.find("*** Begin Patch")?;
-    let rest = &output[start..];
-    let end = rest.find("*** End Patch")? + "*** End Patch".len();
-    normalize_patch(&rest[..end])
+    // apply_patch-style envelope.
+    if let Some(start) = output.find("*** Begin Patch") {
+        let rest = &output[start..];
+        if let Some(end_rel) = rest.find("*** End Patch") {
+            let end = end_rel + "*** End Patch".len();
+            if let Some(patch) = normalize_patch(&rest[..end]) {
+                return Some(patch);
+            }
+        }
+    }
+    // Fallback: the model dropped the wrapper and emitted a raw patch — very
+    // common. Recognize a ```diff / ```patch fenced block first (bounded), then
+    // a bare `diff --git` block to end of message. Each candidate is validated
+    // by normalize_patch, so a false marker simply falls through.
+    for fence in ["```diff", "```patch"] {
+        if let Some(open) = output.find(fence) {
+            let after = &output[open + fence.len()..];
+            if let Some(close) = after.find("```") {
+                if let Some(patch) = normalize_patch(&after[..close]) {
+                    return Some(patch);
+                }
+            }
+        }
+    }
+    if let Some(pos) = output.find("diff --git ") {
+        let line_start = output[..pos].rfind('\n').map_or(0, |n| n + 1);
+        // If the diff was wrapped in a bare ``` fence, stop at the closer so
+        // trailing prose doesn't leak into the patch body.
+        let body = output[line_start..]
+            .split("\n```")
+            .next()
+            .unwrap_or(&output[line_start..]);
+        return normalize_patch(body);
+    }
+    None
 }
 
 fn extract_between<'a>(value: &'a str, start_marker: &str, end_marker: &str) -> Option<&'a str> {
@@ -1658,7 +1692,9 @@ fn normalize_patch(value: &str) -> Option<String> {
         .trim_end_matches("```")
         .trim();
     if patch.starts_with("diff --git ")
-        || (patch.contains("\n--- ") && patch.contains("\n+++ ") && patch.contains("\n@@"))
+        || ((patch.starts_with("--- ") || patch.contains("\n--- "))
+            && patch.contains("\n+++ ")
+            && patch.contains("\n@@"))
     {
         Some(format!("{patch}\n"))
     } else {
@@ -2217,6 +2253,37 @@ END_PENDING_PATCH";
             crate::workspace::apply::parse_patch_paths(&patch),
             vec!["src/lib.rs".to_string()]
         );
+    }
+
+    #[test]
+    fn extract_pending_patch_recovers_bare_diff_git_without_wrapper() {
+        // Model dropped the BEGIN_PENDING_PATCH wrapper and emitted a raw diff —
+        // the common failure mode. It must still be captured, not lost.
+        let output = "Here is the change I propose:\n\ndiff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let patch = extract_pending_patch(output).expect("bare diff --git must be recovered");
+        assert!(patch.starts_with("diff --git"));
+        assert_eq!(
+            crate::workspace::apply::parse_patch_paths(&patch),
+            vec!["src/lib.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_pending_patch_recovers_fenced_headerless_diff() {
+        // No wrapper, no `diff --git` header — just a ```diff fenced unified diff.
+        let output =
+            "Proposed patch:\n\n```diff\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n```\n";
+        let patch = extract_pending_patch(output).expect("fenced diff must be recovered");
+        assert!(patch.contains("+++ b/src/lib.rs"));
+        assert!(patch.contains("@@"));
+    }
+
+    #[test]
+    fn normalize_patch_accepts_headerless_unified_diff() {
+        let patch = normalize_patch("--- a/f.rs\n+++ b/f.rs\n@@ -1 +1 @@\n-a\n+b")
+            .expect("headerless unified diff must be accepted");
+        assert!(patch.contains("--- a/f.rs"));
+        assert!(patch.ends_with('\n'));
     }
 
     #[test]
