@@ -193,8 +193,24 @@ impl LspClient {
             .context("writing LSP request")?;
         self.stdin.flush().await.context("flushing LSP request")?;
 
-        read_message(&mut self.stdout).await
+        // LSP servers interleave notifications (diagnostics, $/progress,
+        // window/logMessage) with responses. Skip anything that isn't the
+        // reply to our request id, or we'd return a notification as the result.
+        const MAX_SKIPPED_MESSAGES: usize = 256;
+        for _ in 0..=MAX_SKIPPED_MESSAGES {
+            let message = read_message(&mut self.stdout).await?;
+            if is_response_to(&message, id) {
+                return Ok(message);
+            }
+        }
+        anyhow::bail!("LSP server sent too many messages without a reply to request {id}")
     }
+}
+
+/// True if a JSON-RPC message is the response to the request with `id`.
+/// Notifications (no `id`) and replies to other requests return false.
+fn is_response_to(message: &serde_json::Value, id: i64) -> bool {
+    message.get("id").and_then(serde_json::Value::as_i64) == Some(id)
 }
 
 fn extract_hover_contents(value: &serde_json::Value) -> Option<String> {
@@ -249,6 +265,24 @@ fn location_to_string(value: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_matching_skips_notifications_and_other_ids() {
+        assert!(is_response_to(
+            &json!({"jsonrpc":"2.0","id":4,"result":{}}),
+            4
+        ));
+        // Diagnostics/progress notifications have no id and must be skipped.
+        assert!(!is_response_to(
+            &json!({"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{}}),
+            4
+        ));
+        // A reply to a different request must be skipped.
+        assert!(!is_response_to(
+            &json!({"jsonrpc":"2.0","id":3,"result":{}}),
+            4
+        ));
+    }
 
     #[tokio::test]
     async fn test_lsp_message_parsing() {

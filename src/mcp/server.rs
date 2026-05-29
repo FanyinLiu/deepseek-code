@@ -48,12 +48,12 @@ pub async fn serve_stdio(project_root: PathBuf, allow_destructive: bool) -> Resu
         allow_destructive
     );
 
-    while let Some(message) = read_stdio_message(&mut reader).await? {
+    while let Some((message, framing)) = read_stdio_message(&mut reader).await? {
         if let Some(response) =
             handle_message(&message, &project_root, allow_destructive, &policy).await
         {
             writer
-                .write_all(encode_stdio_frame(&response).as_bytes())
+                .write_all(encode_stdio_frame(&response, framing).as_bytes())
                 .await?;
             writer.flush().await?;
         }
@@ -221,11 +221,23 @@ async fn call_tool(
     serde_json::to_value(result).map_err(|e| e.to_string())
 }
 
-fn encode_stdio_frame(body: &str) -> String {
-    format!("Content-Length: {}\r\n\r\n{}", body.len(), body)
+/// How an inbound stdio message was framed. Responses are encoded the same
+/// way so octocode interoperates both with newline-delimited MCP clients (the
+/// stdio spec default) and with `Content-Length`-framed (LSP-style) ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StdioFraming {
+    Line,
+    ContentLength,
 }
 
-async fn read_stdio_message<R>(reader: &mut R) -> Result<Option<String>>
+fn encode_stdio_frame(body: &str, framing: StdioFraming) -> String {
+    match framing {
+        StdioFraming::Line => format!("{body}\n"),
+        StdioFraming::ContentLength => format!("Content-Length: {}\r\n\r\n{}", body.len(), body),
+    }
+}
+
+async fn read_stdio_message<R>(reader: &mut R) -> Result<Option<(String, StdioFraming)>>
 where
     R: AsyncBufRead + Unpin,
 {
@@ -236,7 +248,7 @@ async fn read_stdio_message_with_limits<R>(
     reader: &mut R,
     max_content_length: usize,
     max_header_line_length: usize,
-) -> Result<Option<String>>
+) -> Result<Option<(String, StdioFraming)>>
 where
     R: AsyncBufRead + Unpin,
 {
@@ -252,7 +264,7 @@ where
 
     let trimmed = first_line.trim_start();
     if trimmed.starts_with('{') {
-        return Ok(Some(first_line.trim().to_string()));
+        return Ok(Some((first_line.trim().to_string(), StdioFraming::Line)));
     }
     if first_line.len() > max_header_line_length {
         anyhow::bail!("MCP header line too long");
@@ -281,7 +293,7 @@ where
     }
     let mut buf = vec![0; len];
     reader.read_exact(&mut buf).await?;
-    Ok(Some(String::from_utf8(buf)?))
+    Ok(Some((String::from_utf8(buf)?, StdioFraming::ContentLength)))
 }
 
 async fn read_limited_line<R>(reader: &mut R, max_len: usize) -> Result<Option<String>>
@@ -416,15 +428,16 @@ mod tests {
     #[tokio::test]
     async fn stdio_reader_accepts_content_length_frame() {
         let body = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
-        let frame = encode_stdio_frame(body);
+        let frame = encode_stdio_frame(body, StdioFraming::ContentLength);
         let mut reader = BufReader::new(frame.as_bytes());
 
-        let message = read_stdio_message(&mut reader)
+        let (message, framing) = read_stdio_message(&mut reader)
             .await
             .expect("read frame")
             .expect("message");
 
         assert_eq!(message, body);
+        assert_eq!(framing, StdioFraming::ContentLength);
     }
 
     #[tokio::test]
@@ -433,18 +446,31 @@ mod tests {
         let bytes = format!("{body}\n").into_bytes();
         let mut reader = BufReader::new(bytes.as_slice());
 
-        let message = read_stdio_message(&mut reader)
+        let (message, framing) = read_stdio_message(&mut reader)
             .await
             .expect("read line")
             .expect("message");
 
         assert_eq!(message, body);
+        assert_eq!(framing, StdioFraming::Line);
+    }
+
+    #[test]
+    fn response_framing_mirrors_request_framing() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+        // Newline-delimited clients (the MCP stdio default) must get a
+        // newline-delimited reply, not a Content-Length frame they can't read.
+        let line = encode_stdio_frame(body, StdioFraming::Line);
+        assert_eq!(line, format!("{body}\n"));
+        assert!(!line.contains("Content-Length"));
+        let cl = encode_stdio_frame(body, StdioFraming::ContentLength);
+        assert!(cl.starts_with("Content-Length: "));
     }
 
     #[tokio::test]
     async fn stdio_reader_rejects_oversized_first_header_line() {
         let body = "{}";
-        let frame = encode_stdio_frame(body);
+        let frame = encode_stdio_frame(body, StdioFraming::ContentLength);
         let mut reader = BufReader::new(frame.as_bytes());
 
         let err = read_stdio_message_with_limits(&mut reader, MAX_MCP_CONTENT_LENGTH, 8)

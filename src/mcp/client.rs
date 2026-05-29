@@ -284,14 +284,28 @@ impl StdioMcpClient {
         let body = make_request(id, method, params)?;
         self.send_raw_with_timeout(method, &body).await?;
 
-        let response_text = self.read_message().await?;
-        let response: JsonRpcResponse<R> = serde_json::from_str(&response_text)
-            .map_err(|e| anyhow::anyhow!("failed to parse response: {e}\nraw: {response_text}"))?;
-
-        match response.result {
-            JsonRpcResult::Result(r) => Ok(r),
-            JsonRpcResult::Error(err) => Err(anyhow::anyhow!("{}: {}", err.code, err.message)),
+        // Skip server-initiated notifications (e.g. `notifications/message`,
+        // progress) and any stale/non-matching frames until the response
+        // carrying our request id arrives. Without this, a server that logs
+        // before replying would make every request fail to parse.
+        const MAX_SKIPPED_FRAMES: usize = 64;
+        for _ in 0..=MAX_SKIPPED_FRAMES {
+            let response_text = self.read_message().await?;
+            // A notification has no `id`; a reply to a different request has a
+            // mismatched `id`. Skip anything that isn't the reply to our id.
+            if !is_matching_response(&response_text, id) {
+                continue;
+            }
+            let response: JsonRpcResponse<R> =
+                serde_json::from_str(&response_text).map_err(|e| {
+                    anyhow::anyhow!("failed to parse response: {e}\nraw: {response_text}")
+                })?;
+            return match response.result {
+                JsonRpcResult::Result(r) => Ok(r),
+                JsonRpcResult::Error(err) => Err(anyhow::anyhow!("{}: {}", err.code, err.message)),
+            };
         }
+        anyhow::bail!("MCP server sent too many frames without a reply to request {id}")
     }
 
     async fn notify<T: serde::Serialize>(
@@ -328,6 +342,16 @@ impl StdioMcpClient {
     async fn read_message(&mut self) -> Result<String, anyhow::Error> {
         read_mcp_message_with_timeout(&mut self.reader, self.timeout, self.max_content_length).await
     }
+}
+
+/// True if a JSON-RPC frame is the response to the request with `id`. A
+/// notification frame (no `id`) or a reply to a different request returns
+/// false, so the caller can skip it and keep reading.
+fn is_matching_response(frame: &str, id: i64) -> bool {
+    serde_json::from_str::<serde_json::Value>(frame)
+        .ok()
+        .and_then(|value| value.get("id").and_then(serde_json::Value::as_i64))
+        == Some(id)
 }
 
 fn configure_stdio_environment(cmd: &mut Command, explicit_env: Option<&HashMap<String, String>>) {
@@ -746,6 +770,27 @@ mod tests {
     use tokio::io::BufReader as TokioBufReader;
     use wiremock::matchers::{body_partial_json, method};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn matching_response_skips_notifications_and_other_ids() {
+        // The reply we are waiting for.
+        assert!(is_matching_response(
+            r#"{"jsonrpc":"2.0","id":7,"result":{}}"#,
+            7
+        ));
+        // A server-initiated notification (no id) must be skipped.
+        assert!(!is_matching_response(
+            r#"{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info"}}"#,
+            7
+        ));
+        // A reply to a different request id must be skipped.
+        assert!(!is_matching_response(
+            r#"{"jsonrpc":"2.0","id":6,"result":{}}"#,
+            7
+        ));
+        // Garbage is not our response.
+        assert!(!is_matching_response("not json", 7));
+    }
 
     #[test]
     fn test_mcp_server_config_clone() {
