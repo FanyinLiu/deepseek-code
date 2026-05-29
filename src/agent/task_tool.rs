@@ -8,7 +8,7 @@ use crate::deepseek::client::DeepSeekClient;
 use super::background::BackgroundQueue;
 use super::orchestrator::AgentEvent;
 use super::subagent::{
-    MergeStrategy, PermissionMode, SubagentConfig, SubagentTask, SubagentToolArgs, SubagentType,
+    PermissionMode, SubagentConfig, SubagentTask, SubagentToolArgs, SubagentType,
 };
 use super::supervisor::Supervisor;
 use super::swarm::SwarmCoordinator;
@@ -125,11 +125,14 @@ impl TaskToolHandler {
             .await
         {
             if batch.tasks.len() > 1 && batch.independent {
+                // Honor the decomposer's chosen merge strategy instead of always
+                // synthesizing; capture it before `batch` is moved into the run.
+                let merge_strategy = batch.merge_strategy.clone();
                 let results = self.supervisor.run_parallel(batch, event_tx).await;
                 let has_failed_subagent = results.iter().any(|result| !result.success);
                 let merged = self
                     .supervisor
-                    .synthesize_results(&results, &MergeStrategy::Synthesize);
+                    .synthesize_results(&results, &merge_strategy);
                 return (merged, has_failed_subagent);
             }
         }

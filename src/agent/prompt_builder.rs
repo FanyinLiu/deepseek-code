@@ -303,12 +303,46 @@ impl PromptBuilder {
              the user provides a different absolute path.\n\n",
         );
 
+        // Environment context (constant per session): platform so the agent
+        // generates OS-appropriate shell commands, and whether this is a git
+        // repository so it reasons about version-control state.
+        prompt.push_str(&format!(
+            "Platform: {} ({}).\n",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ));
+        if session.project_root.join(".git").exists() {
+            prompt.push_str("This workspace is a git repository.\n");
+        }
+        prompt.push('\n');
+
+        // Recognized stack (detected from marker files) so the agent uses
+        // project-native build/test commands rather than guessing.
+        if let Some(profile) =
+            crate::agent::project_profile::ProjectProfile::detect(&session.project_root).render()
+        {
+            prompt.push_str(&profile);
+            prompt.push('\n');
+        }
+
         // Project rules (stable part)
         if let Some(rules) = project_rules {
             prompt.push_str("## Project Rules\n\n");
             prompt.push_str(rules);
             prompt.push_str("\n\n");
         }
+
+        // Default response style (a configured Output Style below may override).
+        prompt.push_str("## Response Style\n\n");
+        prompt.push_str(
+            "- Be concise and direct. Give the shortest answer that fully addresses the request; \
+             skip filler preamble (\"Here's what I'll do\") and postamble (\"Let me know if...\").\n\
+             - Don't narrate what you're about to do or summarize what you did afterward unless the \
+             user asks.\n\
+             - Answer the actual question; don't pad with unrequested background.\n\
+             - Reference code locations as `path:line` so the user can navigate.\n\
+             - Reply in the user's language (use Chinese when they write Chinese).\n\n",
+        );
 
         if let Some(output_style) = load_output_style_policy(&session.project_root) {
             prompt.push_str("## Output Style\n\n");
@@ -372,6 +406,11 @@ impl PromptBuilder {
             prompt.push_str("- After receiving tool results, synthesize an answer immediately.\n");
             prompt
                 .push_str("- Never call a tool that you just called with identical parameters.\n");
+            prompt.push_str(
+                "- For multi-step work (roughly 3+ steps), use `todo_write` to plan and track \
+                 progress, marking each step done as you finish it. Skip it for trivial \
+                 single-step tasks.\n",
+            );
             prompt.push_str(&format!(
                 "- You have {} tools available. Use them when truly needed.\n\n",
                 tool_defs.len()
@@ -387,6 +426,11 @@ impl PromptBuilder {
             "Current configured model label: {}.\n",
             self.model
         ));
+        // Branch is volatile (the user may switch mid-session), so it lives in
+        // the volatile suffix to keep the stable prefix cacheable.
+        if let Some(branch) = current_git_branch(&session.project_root) {
+            prompt.push_str(&format!("Current git branch: {branch}.\n"));
+        }
         match self.lane {
             ExecutionLane::ChatNonThinking => {
                 prompt.push_str("Mode: CHAT (non-thinking). Be concise.\n");
@@ -430,6 +474,35 @@ impl PromptBuilder {
             Some(prev) => prev == current_prefix,
             None => false,
         }
+    }
+}
+
+/// Read the current git branch (or a short detached-HEAD marker) by reading
+/// `.git/HEAD` — no subprocess. Handles worktrees, where `.git` is a file
+/// pointing at the real git dir. Returns `None` when not a git repo.
+#[must_use]
+pub fn current_git_branch(project_root: &Path) -> Option<String> {
+    let git = project_root.join(".git");
+    let head_path = if git.is_dir() {
+        git.join("HEAD")
+    } else if git.is_file() {
+        let content = std::fs::read_to_string(&git).ok()?;
+        let gitdir = content.lines().find_map(|line| {
+            line.strip_prefix("gitdir:")
+                .map(|rest| rest.trim().to_string())
+        })?;
+        Path::new(&gitdir).join("HEAD")
+    } else {
+        return None;
+    };
+    let head = std::fs::read_to_string(head_path).ok()?;
+    let head = head.trim();
+    if let Some(branch) = head.strip_prefix("ref: refs/heads/") {
+        (!branch.is_empty()).then(|| branch.to_string())
+    } else if head.len() >= 7 {
+        Some(format!("detached at {}", &head[..7]))
+    } else {
+        None
     }
 }
 
@@ -776,6 +849,70 @@ mod tests {
         let a = builder.build_system_prompt(&session, None, &tools);
         let b = builder.build_system_prompt(&session, None, &tools);
         assert_eq!(a, b, "system prompt must be byte-identical across calls");
+    }
+
+    #[test]
+    fn system_prompt_carries_environment_and_response_style() {
+        let session = Session {
+            id: crate::deepseek::SessionId::new_v4(),
+            name: None,
+            project_root: std::path::PathBuf::from("."),
+            messages: Vec::new(),
+            reasoning_state: crate::deepseek::ReasoningState::default(),
+            tool_call_history: Vec::new(),
+            checkpoints: Vec::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            metadata: crate::deepseek::SessionMetadata::default(),
+        };
+        let tools = crate::deepseek::tools::standard_tool_definitions();
+        let builder =
+            PromptBuilder::new(DeepSeekModel::Flash, ExecutionLane::ToolLoopThinking, true);
+        let prompt = builder.build_system_prompt(&session, None, &tools);
+        assert!(prompt.contains("Platform:"), "should state the platform");
+        assert!(
+            prompt.contains("## Response Style"),
+            "should set a default response style"
+        );
+        assert!(
+            prompt.contains("todo_write"),
+            "should nudge todo tracking for multi-step work"
+        );
+    }
+
+    #[test]
+    fn current_git_branch_reads_head_ref_and_worktree() {
+        // Normal repo: .git/ dir with a HEAD ref.
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir(repo.path().join(".git")).unwrap();
+        std::fs::write(repo.path().join(".git/HEAD"), "ref: refs/heads/feature-x\n").unwrap();
+        assert_eq!(
+            current_git_branch(repo.path()).as_deref(),
+            Some("feature-x")
+        );
+
+        // Detached HEAD: raw SHA.
+        std::fs::write(repo.path().join(".git/HEAD"), "0123456789abcdef\n").unwrap();
+        assert_eq!(
+            current_git_branch(repo.path()).as_deref(),
+            Some("detached at 0123456")
+        );
+
+        // Worktree: .git is a file pointing at the real git dir.
+        let wt = tempfile::tempdir().unwrap();
+        let gitdir = repo.path().join(".git/worktrees/wt");
+        std::fs::create_dir_all(&gitdir).unwrap();
+        std::fs::write(gitdir.join("HEAD"), "ref: refs/heads/wt-branch\n").unwrap();
+        std::fs::write(
+            wt.path().join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .unwrap();
+        assert_eq!(current_git_branch(wt.path()).as_deref(), Some("wt-branch"));
+
+        // Not a repo.
+        let plain = tempfile::tempdir().unwrap();
+        assert_eq!(current_git_branch(plain.path()), None);
     }
 
     #[test]

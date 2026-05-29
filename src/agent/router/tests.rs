@@ -322,3 +322,51 @@ fn safe_reason_codes_allow_direct() {
     assert!(!ReasonCode::MultiFile.is_safe_for_direct());
     assert!(!ReasonCode::HighRisk.is_safe_for_direct());
 }
+
+// ---------------------------------------------------------------------------
+// End-to-end routing tests (score + confidence -> Route).
+//
+// These exercise `ComplexityRouter::assess` (rules-only) so a regression in
+// the score/confidence thresholds in `determine_route_from_score` is caught,
+// not just the rule-engine sub-component above.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn route_hard_risk_task_goes_to_plan_review() {
+    let route = ComplexityRouter::new()
+        .rules_only()
+        .assess("部署到生产环境", None, None)
+        .await
+        .route;
+    assert_eq!(route, Route::PlanReview);
+}
+
+#[tokio::test]
+async fn route_simple_greeting_executes_directly() {
+    let route = ComplexityRouter::new()
+        .rules_only()
+        .assess("你好", None, None)
+        .await
+        .route;
+    assert_eq!(route, Route::DirectExecute);
+}
+
+#[tokio::test]
+async fn route_read_only_question_executes_directly() {
+    let route = ComplexityRouter::new()
+        .rules_only()
+        .assess("解释一下这个函数为什么重试3次", None, None)
+        .await
+        .route;
+    assert_eq!(route, Route::DirectExecute);
+}
+
+#[tokio::test]
+async fn route_multi_file_feature_goes_to_plan_review() {
+    let route = ComplexityRouter::new()
+        .rules_only()
+        .assess("重构登录模块，添加邮箱验证码并补测试", None, None)
+        .await
+        .route;
+    assert_eq!(route, Route::PlanReview);
+}

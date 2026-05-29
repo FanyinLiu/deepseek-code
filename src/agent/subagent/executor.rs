@@ -11,7 +11,7 @@ use crate::agent::bus::MessageBus;
 use crate::agent::orchestrator::AgentEvent;
 use crate::agent::prompt_builder::{load_project_rules, PromptBuilder};
 use crate::agent::reasoning::ReasoningManager;
-use crate::deepseek::client::DeepSeekClient;
+use crate::deepseek::client::{ChatStreamClient, DeepSeekClient};
 use crate::deepseek::models::StreamChunk;
 use crate::deepseek::tools as ds_tools;
 use crate::deepseek::{
@@ -79,12 +79,33 @@ impl SubagentExecutor {
             parts.push(format!("## Project Rules\n\n{project_rules}"));
         }
 
+        // Detected stack, so a subagent (e.g. test-runner) uses project-native
+        // commands instead of guessing — mirrors the main agent's prompt.
+        if let Some(profile) =
+            crate::agent::project_profile::ProjectProfile::detect(&self.project_root).render()
+        {
+            parts.push(profile);
+        }
+
         parts.join("\n\n")
     }
 
     /// Run the subagent task and return the result.
     pub async fn run(
         &self,
+        task: &SubagentTask,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) -> SubagentResult {
+        self.run_with_client(&*self.client, task, event_tx).await
+    }
+
+    /// Run the subagent's tool loop against an injected streaming client. The
+    /// public [`run`] delegates here with the real client; tests pass a mock so
+    /// the loop (turns, max-turn limit, tool follow-up) runs without a network
+    /// call.
+    pub async fn run_with_client(
+        &self,
+        client: &dyn ChatStreamClient,
         task: &SubagentTask,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
     ) -> SubagentResult {
@@ -181,9 +202,8 @@ impl SubagentExecutor {
             };
 
             send_request_token_delta(event_tx, &request);
-            match self
-                .client
-                .chat_stream_accumulated_with_deltas(&request, |chunk| {
+            match client
+                .stream_chat(&request, &mut |chunk| {
                     emit_subagent_chunk_delta(event_tx, &self.agent_id, chunk);
                 })
                 .await
@@ -262,18 +282,28 @@ impl SubagentExecutor {
                             }
                         }
 
-                        // Add tool results
+                        // Add tool results, trimming any single oversized
+                        // result so one huge read can't dominate the context.
                         for (_tc, record) in &results {
+                            let trimmed = trim_tool_result(&record.result);
                             let tool_msg = ReasoningManager::new_tool_result_message(
                                 &record.tool_call_id,
                                 &record.name,
-                                &record.result,
+                                &trimmed,
                                 record.is_error,
                                 turn_id,
                                 sub_turn_id,
                             );
                             session.messages.push(tool_msg);
                         }
+
+                        // Keep the running history within the model's context
+                        // budget so long tool loops don't overflow before the
+                        // subagent can finish.
+                        compact_subagent_messages(
+                            &mut session.messages,
+                            subagent_context_budget(&model),
+                        );
 
                         // Continue loop for follow-up
                         continue;
@@ -1047,6 +1077,128 @@ fn dedupe_preserving_order(values: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+/// Largest single tool result (in chars) kept verbatim in a subagent's
+/// history. A pathologically large result is clipped with a marker so one
+/// read can't crowd out the rest of the conversation.
+const MAX_SUBAGENT_TOOL_RESULT_CHARS: usize = 12_000;
+
+fn trim_tool_result(result: &str) -> String {
+    if result.chars().count() <= MAX_SUBAGENT_TOOL_RESULT_CHARS {
+        return result.to_string();
+    }
+    let kept: String = result
+        .chars()
+        .take(MAX_SUBAGENT_TOOL_RESULT_CHARS)
+        .collect();
+    let dropped = result.chars().count() - MAX_SUBAGENT_TOOL_RESULT_CHARS;
+    format!("{kept}\n[... {dropped} more chars trimmed to fit context ...]")
+}
+
+/// Token budget for a subagent's running message history, kept under the
+/// prompt builder's hard prune limit so compaction happens gracefully first.
+fn subagent_context_budget(model: &crate::deepseek::DeepSeekModel) -> usize {
+    use crate::deepseek::DeepSeekModel;
+    match model {
+        DeepSeekModel::Pro => 40_000,
+        DeepSeekModel::Flash => 18_000,
+        DeepSeekModel::LegacyChat | DeepSeekModel::LegacyReasoner => 16_000,
+    }
+}
+
+fn estimate_message_tokens(message: &ProtocolMessage) -> usize {
+    let content = message.content.to_string_lossy().len();
+    let tool_results = message
+        .tool_results
+        .iter()
+        .map(|tr| tr.result.len())
+        .sum::<usize>();
+    (content + tool_results) / 4
+}
+
+/// Compact a subagent's running message history when it exceeds `budget_tokens`.
+///
+/// The first message (the task) is always kept. Older tool iterations are
+/// dropped in whole `assistant + its tool results` groups — never splitting a
+/// `tool_call`/`tool_result` pair — and replaced by a short system summary,
+/// while the most recent groups within budget are retained. Returns whether
+/// any compaction happened.
+fn compact_subagent_messages(messages: &mut Vec<ProtocolMessage>, budget_tokens: usize) -> bool {
+    let total: usize = messages.iter().map(estimate_message_tokens).sum();
+    if total <= budget_tokens || messages.len() < 3 {
+        return false;
+    }
+
+    let task = messages[0].clone();
+    let task_turn_id = task.turn_id;
+
+    // Split everything after the task into groups starting at each assistant.
+    let mut groups: Vec<Vec<ProtocolMessage>> = Vec::new();
+    for msg in &messages[1..] {
+        if msg.role == Role::Assistant || groups.is_empty() {
+            groups.push(vec![msg.clone()]);
+        } else {
+            groups.last_mut().expect("group present").push(msg.clone());
+        }
+    }
+
+    // Keep the most recent groups that fit, always keeping at least one.
+    let task_tokens: usize = estimate_message_tokens(&task);
+    let mut used = task_tokens;
+    let mut keep_from = groups.len();
+    for (idx, group) in groups.iter().enumerate().rev() {
+        let group_tokens: usize = group.iter().map(estimate_message_tokens).sum();
+        if used + group_tokens > budget_tokens && keep_from < groups.len() {
+            break;
+        }
+        used += group_tokens;
+        keep_from = idx;
+    }
+
+    if keep_from == 0 {
+        return false;
+    }
+
+    let dropped = &groups[..keep_from];
+    let mut tool_names: Vec<String> = Vec::new();
+    for group in dropped {
+        for msg in group {
+            for tc in &msg.tool_calls {
+                tool_names.push(tc.function.name.clone());
+            }
+        }
+    }
+    let tool_summary = if tool_names.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " Tools used: {}.",
+            dedupe_preserving_order(tool_names).join(", ")
+        )
+    };
+    let summary = ProtocolMessage {
+        id: MessageId::new_v4(),
+        role: Role::System,
+        content: MessageContent::from(format!(
+            "[Compacted {} earlier tool iteration(s) to stay within context.{}]",
+            dropped.len(),
+            tool_summary
+        )),
+        reasoning_content: None,
+        tool_calls: Vec::new(),
+        tool_results: Vec::new(),
+        turn_id: task_turn_id,
+        sub_turn_id: None,
+        visibility: MessageVisibility::UserVisible,
+    };
+
+    let mut new_messages = vec![task, summary];
+    for group in &groups[keep_from..] {
+        new_messages.extend(group.iter().cloned());
+    }
+    *messages = new_messages;
+    true
+}
+
 // helpers moved to crate::agent::utils
 
 #[cfg(test)]
@@ -1057,11 +1209,100 @@ mod tests {
         structured_subagent_limit_message, subagent_allows_tool_call, subagent_allows_tool_name,
         SubagentExecutor,
     };
+    use super::{compact_subagent_messages, trim_tool_result, MAX_SUBAGENT_TOOL_RESULT_CHARS};
     use crate::agent::orchestrator::AgentEvent;
     use crate::agent::subagent::types::{SubagentConfig, SubagentTask};
     use crate::deepseek::client::DeepSeekClient;
     use crate::deepseek::models::{DeepSeekModel, StreamChunk};
+    use crate::deepseek::{
+        MessageContent, MessageId, MessageVisibility, ProtocolMessage, Role, TurnId,
+    };
     use std::sync::Arc;
+
+    fn proto(
+        role: Role,
+        content: &str,
+        tool_calls: Vec<crate::deepseek::ToolCall>,
+    ) -> ProtocolMessage {
+        ProtocolMessage {
+            id: MessageId::new_v4(),
+            role,
+            content: MessageContent::from(content.to_string()),
+            reasoning_content: None,
+            tool_calls,
+            tool_results: Vec::new(),
+            turn_id: TurnId::new_v4(),
+            sub_turn_id: None,
+            visibility: MessageVisibility::UserVisible,
+        }
+    }
+
+    #[test]
+    fn trim_tool_result_clips_oversized_output() {
+        let big = "x".repeat(MAX_SUBAGENT_TOOL_RESULT_CHARS + 500);
+        let trimmed = trim_tool_result(&big);
+        assert!(trimmed.chars().count() < big.chars().count());
+        assert!(trimmed.contains("more chars trimmed"));
+
+        let small = "ok";
+        assert_eq!(trim_tool_result(small), "ok");
+    }
+
+    #[test]
+    fn compact_keeps_task_and_drops_oldest_groups() {
+        let mut messages = vec![proto(Role::User, "TASK: do the thing", Vec::new())];
+        // 5 tool iterations, each an assistant + a fat tool result.
+        for i in 0..5 {
+            messages.push(proto(
+                Role::Assistant,
+                &format!("calling tool {i}"),
+                vec![tool_call("read_file", serde_json::json!({"path": "a"}))],
+            ));
+            messages.push(proto(Role::Tool, &"r".repeat(400), Vec::new()));
+        }
+        let before = messages.len();
+
+        let compacted = compact_subagent_messages(&mut messages, 200);
+
+        assert!(compacted);
+        assert!(messages.len() < before);
+        // Task is preserved verbatim as the first message.
+        assert_eq!(messages[0].role, Role::User);
+        assert!(messages[0]
+            .content
+            .to_string_lossy()
+            .contains("TASK: do the thing"));
+        // A summary marker sits right after the task.
+        assert_eq!(messages[1].role, Role::System);
+        assert!(messages[1].content.to_string_lossy().contains("Compacted"));
+        // Groups stay intact: each kept assistant(tool_calls) is followed by its tool result.
+        for (idx, msg) in messages.iter().enumerate() {
+            if msg.role == Role::Assistant && !msg.tool_calls.is_empty() {
+                assert_eq!(
+                    messages[idx + 1].role,
+                    Role::Tool,
+                    "tool result must follow its call"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compact_is_noop_under_budget() {
+        let mut messages = vec![
+            proto(Role::User, "small task", Vec::new()),
+            proto(
+                Role::Assistant,
+                "hi",
+                vec![tool_call("read_file", serde_json::json!({}))],
+            ),
+            proto(Role::Tool, "tiny", Vec::new()),
+        ];
+        let before = messages.clone();
+        let compacted = compact_subagent_messages(&mut messages, 100_000);
+        assert!(!compacted);
+        assert_eq!(messages.len(), before.len());
+    }
 
     fn tool_call(name: &str, arguments: serde_json::Value) -> crate::deepseek::ToolCall {
         crate::deepseek::ToolCall {
@@ -1107,6 +1348,24 @@ mod tests {
             rx.try_recv().expect("subagent hidden token delta"),
             AgentEvent::TokenDelta { input_tokens: 0, output_tokens } if output_tokens > 0
         ));
+    }
+
+    #[test]
+    fn subagent_prompt_includes_detected_project_stack() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("Cargo.toml"), "[package]\nname=\"x\"\n")
+            .expect("write Cargo.toml");
+        let executor = SubagentExecutor::new(
+            Arc::new(DeepSeekClient::new("test-key".to_string())),
+            root.path().to_path_buf(),
+            SubagentConfig::default(),
+        );
+
+        let rules = executor.effective_prompt_rules();
+        assert!(
+            rules.contains("Detected Project") && rules.contains("cargo test"),
+            "subagent prompt should carry the detected stack, got: {rules}"
+        );
     }
 
     #[test]
@@ -1334,5 +1593,181 @@ mod tests {
 
         assert!(is_error);
         assert!(text.contains("Failed to parse run_subagent arguments"));
+    }
+
+    // A scripted streaming client: returns one canned StreamResult per turn so
+    // the subagent loop runs end-to-end without a network round-trip.
+    struct MockStreamClient {
+        turns: std::sync::Mutex<std::collections::VecDeque<crate::deepseek::models::StreamResult>>,
+    }
+
+    impl MockStreamClient {
+        fn new(turns: Vec<crate::deepseek::models::StreamResult>) -> Self {
+            Self {
+                turns: std::sync::Mutex::new(turns.into()),
+            }
+        }
+    }
+
+    impl crate::deepseek::client::ChatStreamClient for MockStreamClient {
+        fn stream_chat<'a>(
+            &'a self,
+            _req: &'a crate::deepseek::ChatRequest,
+            _on_chunk: &'a mut (dyn FnMut(&StreamChunk) + Send + 'a),
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            crate::deepseek::models::StreamResult,
+                            crate::deepseek::errors::DeepSeekError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            let next = self.turns.lock().expect("mock lock").pop_front();
+            Box::pin(async move {
+                next.ok_or_else(|| {
+                    crate::deepseek::errors::DeepSeekError::Other("mock stream exhausted".into())
+                })
+            })
+        }
+    }
+
+    fn final_answer(content: &str) -> crate::deepseek::models::StreamResult {
+        crate::deepseek::models::StreamResult {
+            content: content.to_string(),
+            reasoning_content: String::new(),
+            tool_calls: Vec::new(),
+            finish_reason: Some("stop".to_string()),
+            usage: None,
+        }
+    }
+
+    fn tool_call_turn(name: &str) -> crate::deepseek::models::StreamResult {
+        crate::deepseek::models::StreamResult {
+            content: String::new(),
+            reasoning_content: String::new(),
+            tool_calls: vec![tool_call(name, serde_json::json!({}))],
+            finish_reason: Some("tool_calls".to_string()),
+            usage: None,
+        }
+    }
+
+    fn big_tool_call_turn() -> crate::deepseek::models::StreamResult {
+        crate::deepseek::models::StreamResult {
+            // Large assistant content so the running session crosses the
+            // subagent context budget and forces in-loop compaction.
+            content: "x".repeat(40_000),
+            reasoning_content: String::new(),
+            tool_calls: vec![tool_call("definitely_unknown_tool", serde_json::json!({}))],
+            finish_reason: Some("tool_calls".to_string()),
+            usage: None,
+        }
+    }
+
+    fn loop_task() -> SubagentTask {
+        SubagentTask {
+            description: "task".into(),
+            prompt: "do the task".into(),
+            context: None,
+            focus_files: Vec::new(),
+            expected_output: None,
+        }
+    }
+
+    fn loop_executor() -> (SubagentExecutor, tempfile::TempDir) {
+        let root = tempfile::tempdir().expect("tempdir");
+        let executor = SubagentExecutor::new(
+            Arc::new(DeepSeekClient::new("test-key".to_string())),
+            root.path().to_path_buf(),
+            SubagentConfig::default(),
+        );
+        (executor, root)
+    }
+
+    #[tokio::test]
+    async fn run_loop_returns_final_answer_with_no_network() {
+        let (executor, _root) = loop_executor();
+        let mock = MockStreamClient::new(vec![final_answer("All done — refactor complete.")]);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let result = executor.run_with_client(&mock, &loop_task(), &tx).await;
+
+        assert!(
+            result.success,
+            "a no-tool-call turn ends the loop successfully"
+        );
+        assert!(result.output.contains("All done"));
+    }
+
+    #[tokio::test]
+    async fn run_loop_fails_when_max_turns_exhausted() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let config = SubagentConfig {
+            max_turns: 1,
+            ..SubagentConfig::default()
+        };
+        let executor = SubagentExecutor::new(
+            Arc::new(DeepSeekClient::new("test-key".to_string())),
+            root.path().to_path_buf(),
+            config,
+        );
+        // Every turn asks for another tool call, so the loop never reaches a
+        // final answer and must terminate at the max-turn limit.
+        let mock = MockStreamClient::new(vec![tool_call_turn("definitely_unknown_tool")]);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let result = executor.run_with_client(&mock, &loop_task(), &tx).await;
+
+        assert!(!result.success, "exhausting max_turns must report failure");
+    }
+
+    #[tokio::test]
+    async fn run_loop_continues_after_tool_turn_then_finalizes() {
+        let (executor, _root) = loop_executor();
+        // Turn 1 asks for a tool (which errors), turn 2 produces the answer.
+        let mock = MockStreamClient::new(vec![
+            tool_call_turn("definitely_unknown_tool"),
+            final_answer("Investigated and fixed."),
+        ]);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let result = executor.run_with_client(&mock, &loop_task(), &tx).await;
+
+        assert!(
+            result.success,
+            "the loop should follow up after a tool turn and reach the answer"
+        );
+        assert!(result.output.contains("Investigated and fixed"));
+        assert!(result
+            .tool_calls_used
+            .contains(&"definitely_unknown_tool".to_string()));
+        // The failed tool was recovered (not fatal) and surfaced as a note.
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Recovered tool errors"));
+    }
+
+    #[tokio::test]
+    async fn run_loop_survives_context_pressure_with_compaction() {
+        let (executor, _root) = loop_executor();
+        // Many large turns push the session past the context budget, exercising
+        // the in-loop compaction path; the loop must still reach the answer.
+        let mut turns: Vec<crate::deepseek::models::StreamResult> =
+            (0..6).map(|_| big_tool_call_turn()).collect();
+        turns.push(final_answer("Synthesized after many large turns."));
+        let mock = MockStreamClient::new(turns);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let result = executor.run_with_client(&mock, &loop_task(), &tx).await;
+
+        assert!(
+            result.success,
+            "compaction should keep a long loop runnable"
+        );
+        assert!(result.output.contains("Synthesized after many large turns"));
     }
 }

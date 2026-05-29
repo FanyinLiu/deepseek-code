@@ -46,17 +46,27 @@ pub fn assess_with_rules(task_input: &str, _project_context: Option<&str>) -> Ru
     if has_high_risk_action(&lower) {
         hard_triggers.push("HIGH_RISK".into());
         reasons.push(ReasonCode::HighRisk);
-        if lower.contains("delete") || lower.contains("移除") || lower.contains("删除") {
+        if lower.contains("delete")
+            || lower.contains("remove ")
+            || lower.contains("移除")
+            || lower.contains("删除")
+        {
             risks.push(RiskFlag::Delete);
         }
         if lower.contains("deploy") || lower.contains("部署") || lower.contains("发布") {
             risks.push(RiskFlag::Deploy);
         }
-        if lower.contains("migrate") || lower.contains("迁移") {
+        if lower.contains("migrate") || lower.contains("migration") || lower.contains("迁移") {
             risks.push(RiskFlag::Migration);
         }
-        if lower.contains("permission") || lower.contains("权限") {
+        if lower.contains("permission") || lower.contains("chmod") || lower.contains("权限") {
             risks.push(RiskFlag::PermissionChange);
+        }
+        if lower.contains("push to main")
+            || lower.contains("force push")
+            || lower.contains("主分支")
+        {
+            risks.push(RiskFlag::MainBranchPush);
         }
     }
 

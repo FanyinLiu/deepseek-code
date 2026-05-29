@@ -1,0 +1,46 @@
+{"input":"delete the old authentication module","expect_reason_codes":["HIGH_RISK"],"expect_risk_flags":["DELETE"],"expect_hard_trigger":true,"notes":"destructive delete flags HIGH_RISK + DELETE"}
+{"input":"deploy the service to production","expect_reason_codes":["HIGH_RISK"],"expect_risk_flags":["DEPLOY"],"expect_hard_trigger":true,"notes":"deploy is high risk"}
+{"input":"run the database migration now","expect_reason_codes":["HIGH_RISK"],"expect_risk_flags":["MIGRATION"],"expect_hard_trigger":true,"notes":"migration is high risk"}
+{"input":"chmod the config files to change their permission bits","expect_reason_codes":["HIGH_RISK"],"expect_risk_flags":["PERMISSION_CHANGE"],"expect_hard_trigger":true,"notes":"permission change flagged"}
+{"input":"force push to main to overwrite the remote","expect_reason_codes":["HIGH_RISK"],"expect_risk_flags":["MAIN_BRANCH_PUSH"],"expect_hard_trigger":true,"notes":"force push to main flags MAIN_BRANCH_PUSH"}
+{"input":"git push to main","expect_reason_codes":["HIGH_RISK"],"expect_risk_flags":["MAIN_BRANCH_PUSH"],"expect_hard_trigger":true,"notes":"push to main flags MAIN_BRANCH_PUSH"}
+{"input":"chmod 755 the deploy script","expect_reason_codes":["HIGH_RISK"],"expect_risk_flags":["PERMISSION_CHANGE","DEPLOY"],"expect_hard_trigger":true,"notes":"bare chmod flags PERMISSION_CHANGE even without the word permission"}
+{"input":"drop the users table from the schema","expect_reason_codes":["HIGH_RISK"],"expect_hard_trigger":true,"notes":"drop is destructive / high risk"}
+{"input":"remove the deprecated helper functions","expect_reason_codes":["HIGH_RISK"],"expect_risk_flags":["DELETE"],"expect_hard_trigger":true,"notes":"remove is a delete synonym -> DELETE flag"}
+{"input":"remove the legacy logging code","expect_reason_codes":["HIGH_RISK"],"expect_risk_flags":["DELETE"],"expect_hard_trigger":true,"notes":"remove is a delete synonym -> DELETE flag"}
+{"input":"grant write permission to the service account","expect_reason_codes":["HIGH_RISK"],"expect_risk_flags":["PERMISSION_CHANGE"],"expect_hard_trigger":true,"notes":"permission grant flagged"}
+{"input":"npm install lodash and wire it in","expect_reason_codes":["NETWORK_REQUIRED"],"expect_hard_trigger":true,"notes":"install requires network"}
+{"input":"pip install requests","expect_reason_codes":["NETWORK_REQUIRED"],"expect_hard_trigger":true,"notes":"pip install requires network"}
+{"input":"cargo add serde to the project","expect_reason_codes":["NETWORK_REQUIRED"],"expect_hard_trigger":true,"notes":"cargo add fetches a crate"}
+{"input":"fetch the latest data from the REST API","expect_reason_codes":["NETWORK_REQUIRED"],"expect_hard_trigger":true,"notes":"fetch requires network"}
+{"input":"下载并安装新的依赖","expect_reason_codes":["NETWORK_REQUIRED"],"expect_hard_trigger":true,"notes":"chinese download/install requires network"}
+{"input":"更新依赖到最新版本","expect_reason_codes":["NETWORK_REQUIRED"],"expect_hard_trigger":true,"notes":"chinese dependency update requires network"}
+{"input":"删除旧的鉴权模块和相关测试","expect_reason_codes":["HIGH_RISK"],"expect_risk_flags":["DELETE"],"expect_hard_trigger":true,"notes":"chinese delete is high risk"}
+{"input":"移除过时的接口","expect_reason_codes":["HIGH_RISK"],"expect_risk_flags":["DELETE"],"expect_hard_trigger":true,"notes":"chinese remove maps to DELETE"}
+{"input":"部署到生产环境","expect_reason_codes":["HIGH_RISK"],"expect_risk_flags":["DEPLOY"],"expect_hard_trigger":true,"notes":"chinese deploy is high risk"}
+{"input":"迁移数据库到新的 schema","expect_reason_codes":["HIGH_RISK"],"expect_risk_flags":["MIGRATION"],"expect_hard_trigger":true,"notes":"chinese migration is high risk"}
+{"input":"refactor the auth module across all the request handlers","expect_reason_codes":["MULTI_FILE"],"expect_hard_trigger":false,"notes":"cross-module refactor is multi-file, not hard-risk"}
+{"input":"update the shared config used across all modules","expect_reason_codes":["MULTI_FILE"],"expect_hard_trigger":false,"notes":"shared/across/module is cross-module"}
+{"input":"global rename of the legacy API surface","expect_reason_codes":["MULTI_FILE"],"expect_hard_trigger":false,"notes":"global change is cross-module"}
+{"input":"write unit tests for the json parser","expect_reason_codes":["TEST_REQUIRED"],"expect_hard_trigger":false,"notes":"testing work"}
+{"input":"add assertions to cover the edge cases","expect_reason_codes":["TEST_REQUIRED"],"expect_hard_trigger":false,"notes":"assertions imply testing"}
+{"input":"get the test suite passing","expect_reason_codes":["TEST_REQUIRED"],"expect_hard_trigger":false,"notes":"test suite implies testing"}
+{"input":"补测试覆盖 cli 模块","expect_reason_codes":["TEST_REQUIRED","MULTI_FILE"],"expect_hard_trigger":false,"notes":"chinese add tests for a module"}
+{"input":"build the project with cargo","expect_reason_codes":["SHELL_REQUIRED"],"expect_hard_trigger":false,"notes":"build implies shell"}
+{"input":"execute the integration test suite","expect_reason_codes":["SHELL_REQUIRED","TEST_REQUIRED"],"expect_hard_trigger":false,"notes":"execute + integration test"}
+{"input":"用 docker 构建镜像","expect_reason_codes":["SHELL_REQUIRED"],"expect_hard_trigger":false,"notes":"chinese docker build implies shell"}
+{"input":"explain what src/main.rs does","expect_reason_codes":["READ_ONLY"],"expect_hard_trigger":false,"expect_max_score":20,"notes":"read-only explanation, low complexity"}
+{"input":"review the current diff for bugs","expect_reason_codes":["READ_ONLY"],"expect_hard_trigger":false,"notes":"review is read-only"}
+{"input":"audit the codebase for hardcoded secrets","expect_reason_codes":["READ_ONLY"],"expect_hard_trigger":false,"notes":"audit is read-only"}
+{"input":"how does the reasoning state machine work","expect_reason_codes":["READ_ONLY"],"expect_hard_trigger":false,"notes":"how-does question is read-only"}
+{"input":"describe the architecture of the agent module","expect_reason_codes":["READ_ONLY"],"expect_hard_trigger":false,"notes":"describe is read-only"}
+{"input":"解释一下这段代码的作用","expect_reason_codes":["READ_ONLY"],"expect_hard_trigger":false,"notes":"chinese explain is read-only"}
+{"input":"审查这次改动有没有安全问题","expect_reason_codes":["READ_ONLY"],"expect_hard_trigger":false,"notes":"chinese review/audit is read-only"}
+{"input":"只读地看一下日志文件","expect_reason_codes":["READ_ONLY"],"expect_hard_trigger":false,"notes":"chinese read-only intent"}
+{"input":"hello","expect_hard_trigger":false,"expect_max_score":15,"notes":"greeting is trivial"}
+{"input":"您好","expect_hard_trigger":false,"expect_max_score":15,"notes":"chinese greeting is trivial"}
+{"input":"嗨","expect_hard_trigger":false,"expect_max_score":15,"notes":"chinese greeting is trivial"}
+{"input":"improve something in here","expect_reason_codes":["AMBIGUOUS_TASK"],"expect_hard_trigger":false,"notes":"vague 'something' request is ambiguous"}
+{"input":"clean this up or whatever","expect_reason_codes":["AMBIGUOUS_TASK"],"expect_hard_trigger":false,"notes":"vague 'whatever' request is ambiguous"}
+{"input":"do whatever you think is best","expect_reason_codes":["AMBIGUOUS_TASK"],"expect_hard_trigger":false,"notes":"vague 'whatever' request is ambiguous"}
+{"input":"随便改改吧","expect_reason_codes":["AMBIGUOUS_TASK"],"expect_hard_trigger":false,"notes":"chinese vague request is ambiguous"}

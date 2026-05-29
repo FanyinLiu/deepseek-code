@@ -6,7 +6,7 @@ use std::sync::{atomic::AtomicBool, Arc};
 use chrono::Utc;
 use tokio::sync::mpsc;
 
-use crate::deepseek::client::DeepSeekClient;
+use crate::deepseek::client::{ChatStreamClient, DeepSeekClient};
 use crate::deepseek::tools as ds_tools;
 use crate::deepseek::{
     thinking_config_for_lane, CacheUsage, ChatRequest, DeepSeekModel, ExecutionLane, FinishReason,
@@ -503,6 +503,10 @@ pub struct Orchestrator {
     /// 9× per turn (policy decisions, hook lookups, mcp setup, sandbox
     /// rebuilds, …). Reset at turn entry, populated lazily on first read.
     cached_turn_config: Option<crate::storage::Config>,
+    /// Test-only override for the streaming model client. When set, all model
+    /// turns stream through it instead of `client`, so the turn loop can be
+    /// exercised without a network round-trip. `None` in production.
+    stream_override: Option<Arc<dyn ChatStreamClient>>,
 }
 
 impl Orchestrator {
@@ -526,6 +530,24 @@ impl Orchestrator {
             pending_allowed_tools: None,
             current_turn_allowed_tools: None,
             cached_turn_config: None,
+            stream_override: None,
+        }
+    }
+
+    /// Inject the streaming model client used for model turns (tests only).
+    /// Production keeps the default, which streams through `self.client`.
+    #[must_use]
+    pub fn with_stream_client(mut self, client: Arc<dyn ChatStreamClient>) -> Self {
+        self.stream_override = Some(client);
+        self
+    }
+
+    /// The streaming client to use for a model turn: the injected override if
+    /// present, otherwise the real `client`.
+    fn stream_client(&self) -> &dyn ChatStreamClient {
+        match &self.stream_override {
+            Some(client) => client.as_ref(),
+            None => &self.client,
         }
     }
 
@@ -1362,6 +1384,27 @@ impl Orchestrator {
     /// Get all tool definitions, including standard tools and MCP tools.
     fn get_all_tools(&self) -> Vec<ToolDefinition> {
         let mut tools = ds_tools::standard_tool_definitions();
+        // Replace the static run_subagent definition with one that knows the
+        // project's custom agents (and their descriptions), so the model can
+        // delegate to them, not just the built-ins.
+        let agent_registry =
+            crate::agent::subagent::SubagentRegistry::load_from_project(&self.project_root);
+        let mut roster: Vec<(String, String)> = agent_registry
+            .list()
+            .into_iter()
+            .filter_map(|name| {
+                agent_registry
+                    .get(name)
+                    .map(|config| (name.to_string(), config.effective_description()))
+            })
+            .collect();
+        roster.sort_by(|a, b| a.0.cmp(&b.0));
+        if let Some(slot) = tools
+            .iter_mut()
+            .find(|tool| tool.function.name == "run_subagent")
+        {
+            *slot = ds_tools::run_subagent_def_with_agents(&roster);
+        }
         if let Some(ref registry) = self.mcp_registry {
             if registry.has_connected() {
                 for (server_name, mcp_tool) in registry.all_tools() {
@@ -1778,8 +1821,8 @@ impl Orchestrator {
         send_request_token_delta(event_tx, &request);
         let mut emitted = EmittedStreamDeltas::default();
         let result = self
-            .client
-            .chat_stream_accumulated_with_deltas(&request, |chunk| {
+            .stream_client()
+            .stream_chat(&request, &mut |chunk| {
                 emitted.merge(emit_stream_chunk_deltas(event_tx, chunk));
             })
             .await;
@@ -2238,8 +2281,8 @@ impl Orchestrator {
                 let mut plan_execution_failed = false;
                 send_request_token_delta(event_tx, &request);
                 match self
-                    .client
-                    .chat_stream_accumulated_with_deltas(&request, |_| {})
+                    .stream_client()
+                    .stream_chat(&request, &mut |_| {})
                     .await
                 {
                     Ok(stream_result) => {
@@ -2919,8 +2962,8 @@ impl Orchestrator {
         let mut emitted = EmittedStreamDeltas::default();
         send_request_token_delta(event_tx, &followup_request);
         match self
-            .client
-            .chat_stream_accumulated_with_deltas(&followup_request, |chunk| {
+            .stream_client()
+            .stream_chat(&followup_request, &mut |chunk| {
                 emitted.merge(emit_stream_chunk_deltas_with_options(
                     event_tx,
                     chunk,
@@ -4314,5 +4357,87 @@ mod tests {
             AgentEvent::ReasoningDelta(text) if text == "thinking"
         ));
         assert!(rx.try_recv().is_err());
+    }
+
+    // A scripted streaming client so the orchestrator turn loop runs without a
+    // network round-trip; returns one canned StreamResult per turn.
+    struct MockStreamClient {
+        turns: std::sync::Mutex<std::collections::VecDeque<crate::deepseek::models::StreamResult>>,
+    }
+
+    impl MockStreamClient {
+        fn new(turns: Vec<crate::deepseek::models::StreamResult>) -> Self {
+            Self {
+                turns: std::sync::Mutex::new(turns.into()),
+            }
+        }
+    }
+
+    impl crate::deepseek::client::ChatStreamClient for MockStreamClient {
+        fn stream_chat<'a>(
+            &'a self,
+            _req: &'a crate::deepseek::ChatRequest,
+            _on_chunk: &'a mut (dyn FnMut(&StreamChunk) + Send + 'a),
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            crate::deepseek::models::StreamResult,
+                            crate::deepseek::errors::DeepSeekError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            let next = self.turns.lock().expect("mock lock").pop_front();
+            Box::pin(async move {
+                next.ok_or_else(|| {
+                    crate::deepseek::errors::DeepSeekError::Other("mock stream exhausted".into())
+                })
+            })
+        }
+    }
+
+    fn final_answer(content: &str) -> crate::deepseek::models::StreamResult {
+        crate::deepseek::models::StreamResult {
+            content: content.to_string(),
+            reasoning_content: String::new(),
+            tool_calls: Vec::new(),
+            finish_reason: Some("stop".to_string()),
+            usage: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn run_turn_streams_final_answer_through_injected_client() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut session = session_with_user_messages(&[]);
+        session.project_root = root.path().to_path_buf();
+        let mock = std::sync::Arc::new(MockStreamClient::new(vec![final_answer(
+            "All set — nothing to change.",
+        )]));
+        let mut orchestrator = super::Orchestrator::new(
+            crate::deepseek::client::DeepSeekClient::new("test-key".to_string()),
+            root.path().to_path_buf(),
+            session,
+        )
+        .with_stream_client(mock);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // A greeting routes to direct-execute via rules (no model classifier),
+        // so the only model call is the injected stream.
+        orchestrator
+            .run_turn("你好", tx)
+            .await
+            .expect("turn should succeed");
+
+        assert!(
+            orchestrator
+                .session
+                .messages
+                .iter()
+                .any(|m| m.content.to_string_lossy().contains("All set")),
+            "the streamed final answer should land in the session"
+        );
     }
 }
