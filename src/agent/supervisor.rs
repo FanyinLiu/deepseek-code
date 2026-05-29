@@ -186,7 +186,13 @@ impl Supervisor {
         }
 
         // Phase 2: LLM-driven decomposition
-        LlmDecomposer::decompose(&self.client, task_description, task_prompt).await
+        LlmDecomposer::decompose(
+            &self.client,
+            &self.project_root,
+            task_description,
+            task_prompt,
+        )
+        .await
     }
 
     // ------------------------------------------------------------------
@@ -261,13 +267,17 @@ Provide clear, actionable feedback."
         // Split by test suite or test file patterns
         let config = SubagentConfig::for_type(SubagentType::TestRunner);
 
-        // Try to find multiple test commands or directories
+        // Tell the test runner which command the project actually uses, so it
+        // doesn't guess a foreign toolchain.
+        let context = crate::agent::project_profile::ProjectProfile::detect(&self.project_root)
+            .test_command_hint();
+
         let tasks = vec![(
             config.clone(),
             SubagentTask {
                 description: "Run unit tests".to_string(),
                 prompt: prompt.to_string(),
-                context: None,
+                context,
                 focus_files: Vec::new(),
                 expected_output: Some("Test results summary".to_string()),
             },
@@ -351,16 +361,16 @@ Provide clear, actionable feedback."
                     out.push('\n');
                 }
 
-                out.push_str("## Summaries\n\n");
+                out.push_str("## Results\n\n");
                 for (i, result) in successful.iter().enumerate() {
-                    out.push_str(&format!("### Subagent {}\n{}", i + 1, result.summary));
-                    if !result.files_written.is_empty() {
-                        out.push_str(&format!(
-                            "\n\n**Modified:** {}",
-                            result.files_written.join(", ")
-                        ));
-                    }
-                    out.push_str("\n\n");
+                    // Give the parent the full result (summary, files, and the
+                    // detailed output) so it can actually synthesize — a
+                    // one-line summary leaves nothing to synthesize from.
+                    out.push_str(&format!(
+                        "### Subagent {}\n\n{}\n\n",
+                        i + 1,
+                        result.format_for_parent(2000)
+                    ));
                 }
 
                 out
@@ -516,6 +526,31 @@ mod tests {
     }
 
     #[test]
+    fn decompose_test_injects_project_native_test_command() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("Cargo.toml"), "[package]\nname=\"x\"\n")
+            .expect("write Cargo.toml");
+
+        let supervisor = Supervisor::new(
+            Arc::new(DeepSeekClient::new("test".to_string())),
+            root.path().to_path_buf(),
+        );
+
+        let batch = supervisor
+            .decompose_test("run tests", "run the tests")
+            .expect("test decomposition");
+        let context = batch.tasks[0]
+            .1
+            .context
+            .as_ref()
+            .expect("project test command injected");
+        assert!(
+            context.contains("cargo test"),
+            "test runner should be told the cargo test command, got: {context}"
+        );
+    }
+
+    #[test]
     fn test_synthesize_concatenate() {
         let results = vec![
             SubagentResult {
@@ -556,5 +591,89 @@ mod tests {
         assert!(out.contains("Parallel Subagent Results"));
         assert!(out.contains("Found 3 issues"));
         assert!(out.contains("Looks good"));
+    }
+
+    fn sample_result(
+        summary: &str,
+        success: bool,
+        files_written: Vec<String>,
+        tool_calls: Vec<String>,
+    ) -> SubagentResult {
+        SubagentResult {
+            success,
+            summary: summary.to_string(),
+            output: format!("output: {summary}"),
+            tool_calls_used: tool_calls,
+            files_read: Vec::new(),
+            files_written,
+            duration_ms: 1,
+            token_usage: 1,
+            error: if success {
+                None
+            } else {
+                Some("boom".to_string())
+            },
+            started_at: chrono::Utc::now(),
+            completed_at: chrono::Utc::now(),
+            worktree: None,
+        }
+    }
+
+    fn test_supervisor() -> Supervisor {
+        Supervisor::new(
+            Arc::new(DeepSeekClient::new("test".to_string())),
+            PathBuf::from("."),
+        )
+    }
+
+    #[test]
+    fn synthesize_strategy_reports_successes_failures_and_modified_files() {
+        let results = vec![
+            sample_result(
+                "implemented feature",
+                true,
+                vec!["src/a.rs".to_string()],
+                vec!["edit_file".to_string()],
+            ),
+            sample_result("could not parse input", false, vec![], vec![]),
+        ];
+        let out = test_supervisor().synthesize_results(&results, &MergeStrategy::Synthesize);
+        assert!(out.contains("Synthesized Subagent Results"));
+        assert!(out.contains("**Successful:** 1 / 2"));
+        assert!(out.contains("## Failures"));
+        assert!(out.contains("could not parse input"));
+        assert!(out.contains("implemented feature"));
+        // The Synthesize merge must hand the parent each agent's detailed
+        // output, not just the one-line summary — otherwise there is nothing
+        // for the parent to synthesize from.
+        assert!(out.contains("output: implemented feature"));
+        assert!(out.contains("**Files modified:** src/a.rs"));
+    }
+
+    #[test]
+    fn best_of_n_picks_the_most_productive_successful_result() {
+        let results = vec![
+            sample_result("thin result", true, vec![], vec!["read_file".to_string()]),
+            sample_result(
+                "rich result",
+                true,
+                vec!["src/x.rs".to_string(), "src/y.rs".to_string()],
+                vec!["edit_file".to_string(), "write_file".to_string()],
+            ),
+        ];
+        let out = test_supervisor().synthesize_results(&results, &MergeStrategy::BestOfN);
+        assert!(
+            out.contains("rich result"),
+            "BestOfN should pick the most productive result"
+        );
+        assert!(!out.contains("thin result"));
+    }
+
+    #[test]
+    fn best_of_n_falls_back_to_first_when_all_failed() {
+        let results = vec![sample_result("only failure", false, vec![], vec![])];
+        let out = test_supervisor().synthesize_results(&results, &MergeStrategy::BestOfN);
+        // No successful result — still surface something to the parent.
+        assert!(out.contains("only failure"));
     }
 }

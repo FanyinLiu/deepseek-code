@@ -7,8 +7,15 @@ use super::subagent::{MergeStrategy, ParallelBatch, SubagentConfig, SubagentTask
 
 /// LLM-driven task decomposition.
 ///
-/// Uses `DeepSeek` v4-flash to analyze a task and break it into
-/// parallel or sequential sub-tasks with appropriate agent types.
+/// Uses the `DeepSeek` Pro reasoning model to analyze a task and break it
+/// into parallel or sequential sub-tasks with appropriate agent types.
+/// Decomposition quality drives every downstream subagent, so this
+/// deliberately runs on Pro rather than the cheaper Flash the subagents
+/// themselves are dispatched with.
+/// Upper bound on subagents spawned from a single decomposition, so a
+/// misbehaving model response can't fan out into dozens of agent runs.
+const MAX_DECOMPOSED_TASKS: usize = 8;
+
 pub struct LlmDecomposer;
 
 impl LlmDecomposer {
@@ -18,6 +25,7 @@ impl LlmDecomposer {
     /// (e.g., it is too simple or inherently sequential).
     pub async fn decompose(
         client: &DeepSeekClient,
+        project_root: &std::path::Path,
         task_description: &str,
         task_prompt: &str,
     ) -> Option<ParallelBatch> {
@@ -27,8 +35,15 @@ impl LlmDecomposer {
         }
 
         let system_prompt = Self::build_system_prompt();
+        // Give the decomposition model the detected stack so it assigns
+        // stack-appropriate tasks (e.g. a tester task with the real test cmd).
+        let project_section =
+            match crate::agent::project_profile::ProjectProfile::detect(project_root).render() {
+                Some(profile) => format!("\n\n{profile}"),
+                None => String::new(),
+            };
         let user_prompt = format!(
-            "Task description: {task_description}\n\nTask prompt:\n{task_prompt}\n\nAnalyze this task and decide whether it should be split into parallel subagent tasks. If yes, return the decomposition JSON."
+            "Task description: {task_description}\n\nTask prompt:\n{task_prompt}{project_section}\n\nAnalyze this task and decide whether it should be split into parallel subagent tasks. If yes, return the decomposition JSON."
         );
 
         let request = ChatRequest {
@@ -84,16 +99,61 @@ impl LlmDecomposer {
     /// unnecessary LLM round-trip for decomposition analysis.
     fn is_clearly_single_task(description: &str, prompt: &str) -> bool {
         let combined = format!("{description} {prompt}");
-        let words: usize = combined.split_whitespace().count();
+        let lower = combined.to_lowercase();
 
-        // Very short tasks are never worth splitting.
-        if words < 8 {
+        // A review/explore/audit verb over a broad scope (the diff, multiple
+        // files, whole modules) is the canonical parallel case even without an
+        // explicit conjunction. Let the LLM decomposer weigh in rather than
+        // short-circuiting to a single agent; `should_decompose: false` is the
+        // safety valve if it decides a split isn't warranted.
+        let fanout_verbs = [
+            "review",
+            "explore",
+            "audit",
+            "investigate",
+            "understand",
+            "审查",
+            "探索",
+            "审计",
+            "梳理",
+            "调研",
+            "理解",
+        ];
+        let breadth_markers = [
+            "changes",
+            "diff",
+            "files",
+            "modules",
+            "codebase",
+            "across",
+            "pull request",
+            "directory",
+            "改动",
+            "变更",
+            "模块",
+            "文件",
+            "代码库",
+            "整个",
+            "各个",
+        ];
+        if fanout_verbs.iter().any(|v| lower.contains(v))
+            && breadth_markers.iter().any(|m| lower.contains(m))
+        {
+            return false;
+        }
+
+        let words: usize = combined.split_whitespace().count();
+        let chars: usize = combined.chars().count();
+
+        // Very short tasks are never worth splitting. CJK text has no spaces,
+        // so word count alone would treat every Chinese task as "tiny" — guard
+        // with a character-count floor too.
+        if words < 8 && chars < 12 {
             return true;
         }
 
         // Must contain at least one conjunction/quantifier that implies multiple
         // independent concerns before we bother asking the LLM.
-        let lower = combined.to_lowercase();
         let parallel_signals = [
             " and ",
             " also ",
@@ -104,6 +164,13 @@ impl LlmDecomposer {
             " as well as ",
             " meanwhile ",
             " simultaneously ",
+            // CJK enumeration / conjunction markers (no surrounding spaces).
+            "以及",
+            "并且",
+            "同时",
+            "分别",
+            "还有",
+            "、",
         ];
         !parallel_signals.iter().any(|s| lower.contains(s))
     }
@@ -207,9 +274,12 @@ merge_strategy options: concatenate, synthesize, best_of_n
             return None;
         }
 
+        // Bound a runaway decomposition: never spawn more than a sane number of
+        // subagents from a single task, regardless of what the model returns.
         let tasks: Vec<(SubagentConfig, SubagentTask)> = parsed
             .tasks
             .into_iter()
+            .take(MAX_DECOMPOSED_TASKS)
             .map(|t| {
                 let subagent_type = t
                     .subagent_type
@@ -301,5 +371,54 @@ mod tests {
         let json = "not json at all";
         let result = LlmDecomposer::parse_decomposition(json);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn decomposition_is_capped_at_a_sane_maximum() {
+        let tasks: Vec<String> = (0..20)
+            .map(|i| {
+                format!(
+                    r#"{{"description":"t{i}","subagent_type":"code-explorer","prompt":"p{i}"}}"#
+                )
+            })
+            .collect();
+        let json = format!(
+            r#"{{"should_decompose":true,"reasoning":"many","tasks":[{}],"independent":true}}"#,
+            tasks.join(",")
+        );
+        let batch = LlmDecomposer::parse_decomposition(&json).expect("decompose");
+        assert_eq!(batch.tasks.len(), MAX_DECOMPOSED_TASKS);
+    }
+
+    #[test]
+    fn chinese_multi_part_task_is_considered_for_decomposition() {
+        // Chinese has no spaces, so the word-count short-circuit must not treat
+        // a real multi-concern task as a trivial single one.
+        assert!(!LlmDecomposer::is_clearly_single_task(
+            "审查代码",
+            "审查鉴权模块以及数据库模块的安全性",
+        ));
+        // A genuinely tiny task still short-circuits.
+        assert!(LlmDecomposer::is_clearly_single_task("改个bug", "修复它"));
+    }
+
+    #[test]
+    fn review_over_broad_scope_is_considered_for_decomposition() {
+        // A review/explore over the diff or multiple files is the canonical
+        // parallel case and must reach the LLM decomposer even without a
+        // conjunction — and even when short enough to trip the tiny-task floor.
+        assert!(!LlmDecomposer::is_clearly_single_task(
+            "review the changes",
+            "review the changes for correctness",
+        ));
+        assert!(!LlmDecomposer::is_clearly_single_task(
+            "审查改动",
+            "审查这次改动",
+        ));
+        // A single-file review with no breadth marker stays a single agent.
+        assert!(LlmDecomposer::is_clearly_single_task(
+            "review function",
+            "review this function",
+        ));
     }
 }

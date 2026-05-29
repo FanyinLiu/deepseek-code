@@ -8,6 +8,7 @@ pub mod decomposer;
 pub mod event_sink;
 pub mod lanes;
 pub mod orchestrator;
+pub mod project_profile;
 pub mod prompt_builder;
 pub mod reasoning;
 pub mod router;

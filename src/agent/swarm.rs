@@ -319,6 +319,31 @@ impl SwarmResult {
             out.push_str("\npatch conflicts: ");
             out.push_str(&self.patch_conflicts.join(", "));
         }
+        // Surface each subagent's detailed output, not just the one-line index
+        // in `summary` above. Without this the parent has to act on a digest of
+        // a digest (the summary truncates each child's already-truncated
+        // summary). Bounded by a total budget so a wide fan-out can't blow the
+        // parent's context window.
+        if !self.outputs.is_empty() {
+            const OUTPUT_BUDGET: usize = 8000;
+            out.push_str("\n\n# Subagent outputs\n");
+            let mut used = 0usize;
+            for (idx, output) in self.outputs.iter().enumerate() {
+                if used >= OUTPUT_BUDGET {
+                    out.push_str(&format!(
+                        "\n[{} more output(s) omitted to stay within context budget]",
+                        self.outputs.len() - idx
+                    ));
+                    break;
+                }
+                let remaining = OUTPUT_BUDGET - used;
+                let slice: String = output.chars().take(remaining).collect();
+                used += slice.chars().count();
+                out.push('\n');
+                out.push_str(&slice);
+                out.push('\n');
+            }
+        }
         out
     }
 
@@ -2219,6 +2244,39 @@ END_PENDING_PATCH";
 
         assert_eq!(conflicts, vec!["src/lib.rs".to_string()]);
         assert!(patches.iter().all(|patch| patch.conflict));
+    }
+
+    #[test]
+    fn format_for_parent_includes_subagent_outputs() {
+        let result = SwarmResult {
+            run_id: "swarm-out".into(),
+            success: true,
+            summary: "蜂群执行摘要\n1. [完成] explorer · auth：ok".into(),
+            tasks_total: 1,
+            tasks_done: 1,
+            tasks_failed: 0,
+            outputs: vec![
+                "## Subagent Result: ✅ Success\n\nsession tokens live in src/auth/session.rs"
+                    .into(),
+            ],
+            files_read: vec![],
+            files_written: vec![],
+            pending_patches: vec![],
+            patch_conflicts: vec![],
+            validation_commands: vec![],
+            validation_report: None,
+            cancelled: false,
+            duration_ms: 1,
+        };
+
+        let formatted = result.format_for_parent();
+
+        // The parent must receive each subagent's detailed output, not just the
+        // one-line index in `summary`.
+        assert!(
+            formatted.contains("session tokens live in src/auth/session.rs"),
+            "parent-facing swarm output must include subagent outputs, got:\n{formatted}"
+        );
     }
 
     #[test]
