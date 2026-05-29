@@ -84,14 +84,20 @@ impl UsageStore {
             if trimmed.is_empty() {
                 continue;
             }
-            let event = serde_json::from_str(trimmed).map_err(|error| {
-                anyhow::anyhow!(
-                    "invalid usage event at {}:{}: {error}",
-                    path.display(),
-                    index + 1
-                )
-            })?;
-            events.push(event);
+            match serde_json::from_str::<UsageEvent>(trimmed) {
+                Ok(event) => events.push(event),
+                Err(error) => {
+                    // An append-only telemetry log must stay readable even if a
+                    // single line is corrupt or partial (e.g. a crash mid-write).
+                    // Skip it rather than failing the whole history — the same
+                    // approach scheduled-task loading takes.
+                    tracing::warn!(
+                        "skipping malformed usage event at {}:{}: {error}",
+                        path.display(),
+                        index + 1
+                    );
+                }
+            }
         }
         Ok(events)
     }
@@ -205,6 +211,38 @@ pub fn cache_hit_rate(cache_read_tokens: u64, cache_miss_tokens: u64) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn load_events_skips_malformed_lines() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let store = UsageStore::new(root.path());
+        let event = UsageEvent {
+            timestamp: Utc::now(),
+            provider: "deepseek".to_string(),
+            model: "deepseek-v4".to_string(),
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cache_miss_tokens: 0,
+            source: UsageEventSource::ModelResponse,
+        };
+        store.append(&event).expect("append good 1");
+        // A corrupt/partial line, as a crash mid-write could leave behind.
+        crate::storage::atomic::append_jsonl_locked(&store.events_path(), "{not valid json")
+            .expect("append garbage");
+        store.append(&event).expect("append good 2");
+
+        let events = store
+            .load_events()
+            .expect("one bad line must not fail the whole read");
+        assert_eq!(
+            events.len(),
+            2,
+            "both good events survive; the malformed line is skipped"
+        );
+    }
 
     #[test]
     fn summary_groups_events_by_provider_and_model() {
