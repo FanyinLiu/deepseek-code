@@ -368,6 +368,33 @@ fn thinking_budget_for_effort(effort: Option<&str>) -> Option<u32> {
     }
 }
 
+/// Object-safe streaming-chat surface used by the agent loop.
+///
+/// `DeepSeekClient` is the production implementation; tests inject a mock so a
+/// subagent's tool loop can be exercised without a network round-trip. The
+/// callback is a `dyn FnMut` (not a generic) so the trait stays object-safe.
+pub trait ChatStreamClient: Send + Sync {
+    fn stream_chat<'a>(
+        &'a self,
+        req: &'a ChatRequest,
+        on_chunk: &'a mut (dyn FnMut(&StreamChunk) + Send + 'a),
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<StreamResult, DeepSeekError>> + Send + 'a>,
+    >;
+}
+
+impl ChatStreamClient for DeepSeekClient {
+    fn stream_chat<'a>(
+        &'a self,
+        req: &'a ChatRequest,
+        on_chunk: &'a mut (dyn FnMut(&StreamChunk) + Send + 'a),
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<StreamResult, DeepSeekError>> + Send + 'a>,
+    > {
+        Box::pin(self.chat_stream_accumulated_with_deltas(req, on_chunk))
+    }
+}
+
 async fn accumulate_stream_events<S, F>(
     stream: S,
     mut on_chunk: F,

@@ -811,16 +811,63 @@ fn fetch_url_def() -> ToolDefinition {
     }
 }
 
+/// Built-in agents the orchestrator can always spawn, with the description
+/// the model uses to pick the right one. Kept in sync with
+/// `SubagentRegistry::register_built_in`.
+fn built_in_subagents() -> Vec<(String, String)> {
+    use crate::agent::subagent::SubagentType;
+    [
+        SubagentType::GeneralPurpose,
+        SubagentType::CodeExplorer,
+        SubagentType::CodeReviewer,
+        SubagentType::Planner,
+        SubagentType::TestRunner,
+        SubagentType::Architect,
+        SubagentType::SecurityAuditor,
+    ]
+    .into_iter()
+    .map(|agent| {
+        (
+            agent.as_str().to_string(),
+            agent.default_description().to_string(),
+        )
+    })
+    .collect()
+}
+
 fn run_subagent_def() -> ToolDefinition {
+    run_subagent_def_with_agents(&built_in_subagents())
+}
+
+/// Build the `run_subagent` tool from a concrete agent roster (built-ins plus
+/// any project custom agents). Each agent's description is listed so the model
+/// can choose well, and the `subagent_type` enum is restricted to real agents.
+#[must_use]
+pub fn run_subagent_def_with_agents(agents: &[(String, String)]) -> ToolDefinition {
+    let roster = if agents.is_empty() {
+        built_in_subagents()
+    } else {
+        agents.to_vec()
+    };
+    let catalog = roster
+        .iter()
+        .map(|(name, description)| format!("- {name}: {description}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let names = roster
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
     ToolDefinition {
         tool_type: "function".into(),
         function: super::models::FunctionDef {
             name: "run_subagent".into(),
-            description: "Spawn a specialized subagent to handle a specific task independently. \
-	Use this when a task can be decomposed into parallel or isolated work. \
-	The subagent runs with its own context and returns a summary result. \
-	Available types: general-purpose, code-explorer, code-reviewer, planner, test-runner, architect."
-                .into(),
+            description: format!(
+                "Spawn a specialized subagent to handle a specific task independently. \
+Use this when a task can be decomposed into parallel or isolated work. \
+The subagent runs with its own context and returns a summary result.\n\n\
+Available agents:\n{catalog}"
+            ),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -834,8 +881,8 @@ fn run_subagent_def() -> ToolDefinition {
                     },
                     "subagent_type": {
                         "type": "string",
-                        "description": "Type of subagent to spawn",
-                        "enum": ["general-purpose", "code-explorer", "code-reviewer", "planner", "test-runner", "architect"]
+                        "description": "Which agent to spawn (see the Available agents list above)",
+                        "enum": names
                     },
                     "context": {
                         "type": "string",
@@ -926,6 +973,54 @@ mod tests {
             .contains("Do not use this for file reading"));
         assert!(run.function.description.contains("cat, ls, find, grep, rg"));
         assert!(run.function.description.contains("use read_file, list_dir"));
+    }
+
+    #[test]
+    fn run_subagent_lists_all_built_in_agents_with_descriptions() {
+        let def = run_subagent_def();
+        let enum_values = def.function.parameters["properties"]["subagent_type"]["enum"]
+            .as_array()
+            .expect("subagent_type enum");
+        let names: Vec<&str> = enum_values.iter().filter_map(|v| v.as_str()).collect();
+        // security-auditor was previously missing from the schema.
+        assert!(names.contains(&"security-auditor"));
+        assert!(names.contains(&"general-purpose"));
+        // Each agent is described in the tool text so the model can choose.
+        assert!(def.function.description.contains("Available agents:"));
+        assert!(def.function.description.contains("code-explorer:"));
+    }
+
+    #[test]
+    fn run_subagent_with_agents_includes_custom_agent() {
+        let roster = vec![
+            (
+                "general-purpose".to_string(),
+                "Catch-all agent.".to_string(),
+            ),
+            (
+                "migration-runner".to_string(),
+                "Runs and verifies database migrations.".to_string(),
+            ),
+        ];
+        let def = run_subagent_def_with_agents(&roster);
+        let enum_values = def.function.parameters["properties"]["subagent_type"]["enum"]
+            .as_array()
+            .expect("subagent_type enum");
+        let names: Vec<&str> = enum_values.iter().filter_map(|v| v.as_str()).collect();
+        assert!(names.contains(&"migration-runner"));
+        assert!(def
+            .function
+            .description
+            .contains("migration-runner: Runs and verifies database migrations."));
+    }
+
+    #[test]
+    fn run_subagent_with_empty_roster_falls_back_to_built_ins() {
+        let def = run_subagent_def_with_agents(&[]);
+        let enum_values = def.function.parameters["properties"]["subagent_type"]["enum"]
+            .as_array()
+            .expect("subagent_type enum");
+        assert!(!enum_values.is_empty());
     }
 
     #[test]

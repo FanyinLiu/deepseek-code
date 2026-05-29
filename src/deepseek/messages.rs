@@ -17,6 +17,15 @@ pub fn to_chat_messages(
     let mut chat_msgs: Vec<ChatMessage> = Vec::new();
     let mut pending_tool_call_ids = std::collections::HashSet::<String>::new();
 
+    // Tool-call ids that actually have a matching tool-result message. An
+    // assistant tool_call with no result (e.g. a session interrupted mid tool
+    // execution, then resumed) would make the request malformed, so such
+    // unanswered calls are dropped below — the mirror of orphan-result removal.
+    let answered_tool_call_ids: std::collections::HashSet<String> = protocol_messages
+        .iter()
+        .flat_map(|m| m.tool_results.iter().map(|tr| tr.tool_call_id.clone()))
+        .collect();
+
     for msg in protocol_messages {
         let is_active_tool_protocol = msg.visibility == MessageVisibility::InternalProtocolState
             && (msg.role == Role::Tool
@@ -90,9 +99,15 @@ pub fn to_chat_messages(
                 {
                     chat_msg.reasoning_content = msg.reasoning_content.clone();
                 }
-                if !msg.tool_calls.is_empty() {
-                    pending_tool_call_ids.extend(msg.tool_calls.iter().map(|tc| tc.id.clone()));
-                    chat_msg.tool_calls = Some(msg.tool_calls.clone());
+                let answered_calls: Vec<_> = msg
+                    .tool_calls
+                    .iter()
+                    .filter(|tc| answered_tool_call_ids.contains(&tc.id))
+                    .cloned()
+                    .collect();
+                if !answered_calls.is_empty() {
+                    pending_tool_call_ids.extend(answered_calls.iter().map(|tc| tc.id.clone()));
+                    chat_msg.tool_calls = Some(answered_calls);
                 }
             }
             Role::Tool => {
@@ -110,6 +125,16 @@ pub fn to_chat_messages(
                 }
             }
             _ => {}
+        }
+
+        // An assistant message whose only tool_calls were unanswered (and that
+        // carries no text) is now empty — skip it rather than send a malformed
+        // or hollow message.
+        if msg.role == Role::Assistant
+            && chat_msg.content.is_none()
+            && chat_msg.tool_calls.is_none()
+        {
+            continue;
         }
 
         chat_msgs.push(chat_msg);
@@ -277,6 +302,51 @@ mod tests {
         let messages = to_chat_messages(&[protocol], &ReasoningState::default());
 
         assert!(messages.iter().all(|message| message.role != "tool"));
+    }
+
+    #[test]
+    fn dangling_assistant_tool_call_without_result_is_dropped() {
+        // A session interrupted mid tool execution can persist an assistant
+        // tool_call with no matching result; sending it would 400 the resume.
+        let assistant = protocol_assistant_tool_message(&["call_x"]);
+        let reasoning_state = ReasoningState {
+            preserved_assistant_messages: vec![assistant.id],
+            ..ReasoningState::default()
+        };
+
+        let messages = to_chat_messages(&[assistant], &reasoning_state);
+
+        assert!(
+            messages.iter().all(|m| m.tool_calls.is_none()),
+            "no hanging tool_call may reach the API"
+        );
+        assert!(messages.is_empty(), "the now-empty assistant is dropped");
+    }
+
+    #[test]
+    fn partially_answered_assistant_keeps_only_answered_tool_calls() {
+        let assistant = protocol_assistant_tool_message(&["call_a", "call_b"]);
+        let reasoning_state = ReasoningState {
+            preserved_assistant_messages: vec![assistant.id],
+            ..ReasoningState::default()
+        };
+        let protocol = protocol_tool_message(vec![ToolResultRecord {
+            tool_call_id: "call_a".into(),
+            name: "read".into(),
+            result: "first".into(),
+            is_error: false,
+        }]);
+
+        let messages = to_chat_messages(&[assistant, protocol], &reasoning_state);
+
+        let assistant_msg = messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant kept");
+        let calls = assistant_msg.tool_calls.as_ref().expect("kept call_a");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_a");
+        assert_eq!(messages.iter().filter(|m| m.role == "tool").count(), 1);
     }
 
     #[test]

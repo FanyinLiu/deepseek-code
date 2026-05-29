@@ -52,6 +52,38 @@ impl SubagentType {
         }
     }
 
+    /// Short, selection-facing description of *when* to delegate to this
+    /// agent. Surfaced to the orchestrating model in the `run_subagent` tool
+    /// so it can choose the right agent — distinct from the system prompt,
+    /// which instructs the agent itself.
+    #[must_use]
+    pub fn default_description(&self) -> &'static str {
+        match self {
+            Self::GeneralPurpose => {
+                "Catch-all for multi-step tasks that don't fit a more specific agent."
+            }
+            Self::CodeExplorer => {
+                "Read-only codebase search. Use to locate code, trace symbols, or answer \"where is X / what uses Y\"."
+            }
+            Self::CodeReviewer => {
+                "Read-only review of a diff or files for correctness, security, and style. Never edits."
+            }
+            Self::Planner => {
+                "Read-only planner. Use to break a complex task into a step-by-step plan before implementing."
+            }
+            Self::TestRunner => {
+                "Runs tests, analyzes failures, and reports results. Use to validate changes."
+            }
+            Self::Architect => {
+                "Designs APIs, schemas, and data models. Use for up-front interface/design work."
+            }
+            Self::SecurityAuditor => {
+                "Read-only security audit with VETO recommendations. Use before risky changes or to scan for secrets/policy bypass."
+            }
+            Self::Custom { .. } => "Custom project agent.",
+        }
+    }
+
     /// Default system prompt tailored to the role.
     #[must_use]
     pub fn default_system_prompt(&self) -> String {
@@ -160,6 +192,10 @@ pub enum SubagentIsolation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubagentConfig {
     pub subagent_type: SubagentType,
+    /// Selection-facing description of when to delegate to this agent.
+    /// Shown to the orchestrating model; falls back to the type default.
+    #[serde(default)]
+    pub description: Option<String>,
     /// Which tools this subagent is allowed to use.
     #[serde(default)]
     pub allowed_tools: Vec<String>,
@@ -203,6 +239,7 @@ impl Default for SubagentConfig {
     fn default() -> Self {
         Self {
             subagent_type: SubagentType::GeneralPurpose,
+            description: None,
             allowed_tools: Vec::new(),
             permission_mode: PermissionMode::default(),
             model: None,
@@ -276,6 +313,15 @@ impl SubagentConfig {
         self.system_prompt
             .clone()
             .unwrap_or_else(|| self.subagent_type.default_system_prompt())
+    }
+
+    /// Get the effective selection-facing description (custom override, else
+    /// the type default).
+    #[must_use]
+    pub fn effective_description(&self) -> String {
+        self.description
+            .clone()
+            .unwrap_or_else(|| self.subagent_type.default_description().to_string())
     }
 }
 
