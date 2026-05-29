@@ -433,6 +433,14 @@ pub fn parse_patch_paths(patch: &str) -> Vec<String> {
 /// Apply a unified diff patch using `git apply`.
 /// This is safer than manual parsing.
 pub fn apply_patch(project_root: &Path, patch: &str) -> Result<(), anyhow::Error> {
+    // Enforce the workspace boundary ourselves instead of relying solely on
+    // git apply's path handling: reject any patch that targets an absolute
+    // path, escapes the project via `..`, or hits a protected path — the same
+    // guard write_file/edit_file already apply.
+    for path in parse_patch_paths(patch) {
+        resolve_for_write(project_root, &path)
+            .map_err(|error| anyhow::anyhow!("patch rejected: {error}"))?;
+    }
     apply_patch_with_git(project_root, patch, "git")
 }
 
@@ -454,6 +462,39 @@ mod tests {
             .expect_err("missing git should fail");
         assert!(
             err.to_string().contains("git executable not found in PATH"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_patch_rejects_paths_escaping_the_workspace() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let escaping = "\
+diff --git a/../../etc/evil b/../../etc/evil
+--- a/../../etc/evil
++++ b/../../etc/evil
+@@ -0,0 +1 @@
++pwned
+";
+        let err = apply_patch(root.path(), escaping).expect_err("escape must be rejected");
+        assert!(
+            err.to_string().contains("patch rejected"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_patch_rejects_absolute_paths() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let absolute = "\
+--- /dev/null
++++ /etc/cron.d/evil
+@@ -0,0 +1 @@
++pwned
+";
+        let err = apply_patch(root.path(), absolute).expect_err("absolute path must be rejected");
+        assert!(
+            err.to_string().contains("patch rejected"),
             "unexpected error: {err}"
         );
     }

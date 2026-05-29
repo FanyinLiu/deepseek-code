@@ -838,4 +838,83 @@ mod tests {
         assert_eq!(backend.calls, 1);
         assert_eq!(outcome.approval, ApprovalOutcome::Approved);
     }
+
+    #[derive(Default)]
+    struct RecordingBackend {
+        calls: usize,
+    }
+    impl ToolRuntimeBackend for RecordingBackend {
+        fn execute<'a>(
+            &'a mut self,
+            _call: &'a DeepSeekToolCall,
+            _context: &'a ToolExecutionContext,
+        ) -> ToolRuntimeBackendFuture<'a> {
+            Box::pin(async move {
+                self.calls += 1;
+                ToolExecutionResult {
+                    success: true,
+                    summary: "ran".to_string(),
+                    content: "ran".to_string(),
+                    changed_files: Vec::new(),
+                    duration_ms: 1,
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_blocks_dangerous_command_even_when_resolver_approves() {
+        // A policy Deny must win over any approval — the backend never runs.
+        let root = tempfile::tempdir().expect("tempdir");
+        let runtime = ToolRuntime::new(root.path(), PolicyConfig::default());
+        let call = deepseek_call("run_command", serde_json::json!({ "command": "rm -rf /" }));
+        let context = ToolRuntimeContext::new("test-session", ToolDispatchConfig::default());
+        let mut resolver = AlwaysApproveResolver;
+        let mut backend = RecordingBackend::default();
+
+        let outcome = runtime
+            .execute(
+                &call,
+                ToolCallSource::Main,
+                context,
+                &mut resolver,
+                &mut backend,
+            )
+            .await;
+
+        assert_eq!(outcome.decision.action, PolicyAction::Deny);
+        assert_eq!(
+            backend.calls, 0,
+            "a dangerous command must never reach the backend"
+        );
+        assert!(outcome.result_record.is_error);
+    }
+
+    #[tokio::test]
+    async fn execute_denied_approval_blocks_the_backend() {
+        // When the human (resolver) declines an ask, the tool must not run.
+        let root = tempfile::tempdir().expect("tempdir");
+        let runtime = ToolRuntime::new(root.path(), PolicyConfig::default());
+        let call = deepseek_call("git_add", serde_json::json!({ "paths": ["src/lib.rs"] }));
+        let context = ToolRuntimeContext::new("test-session", ToolDispatchConfig::default());
+        let mut resolver = AlwaysDenyResolver;
+        let mut backend = RecordingBackend::default();
+
+        let outcome = runtime
+            .execute(
+                &call,
+                ToolCallSource::Main,
+                context,
+                &mut resolver,
+                &mut backend,
+            )
+            .await;
+
+        assert_eq!(
+            backend.calls, 0,
+            "a declined approval must not run the tool"
+        );
+        assert!(outcome.result_record.is_error);
+        assert!(!outcome.approval.approved());
+    }
 }
