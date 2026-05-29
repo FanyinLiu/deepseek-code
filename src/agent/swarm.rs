@@ -259,6 +259,10 @@ pub struct SwarmResult {
     pub tasks_total: usize,
     pub tasks_done: usize,
     pub tasks_failed: usize,
+    /// Aggregate token usage across every subagent in the run, folded into the
+    /// parent session totals so swarm spend is visible.
+    #[serde(default)]
+    pub token_usage: u64,
     #[serde(default)]
     pub outputs: Vec<String>,
     #[serde(default)]
@@ -1010,6 +1014,7 @@ impl SwarmCoordinator {
             .map(|r| r.format_for_parent(2200))
             .collect();
         let summary = synthesize_swarm_summary(&result_tasks);
+        let token_usage = all_results.iter().map(|r| r.token_usage).sum();
         let result = SwarmResult {
             run_id: plan.run_id.clone(),
             success,
@@ -1017,6 +1022,7 @@ impl SwarmCoordinator {
             tasks_total,
             tasks_done,
             tasks_failed,
+            token_usage,
             outputs,
             files_read,
             files_written,
@@ -2322,6 +2328,7 @@ END_PENDING_PATCH";
             tasks_total: 1,
             tasks_done: 1,
             tasks_failed: 0,
+            token_usage: 256,
             outputs: vec![
                 "## Subagent Result: ✅ Success\n\nsession tokens live in src/auth/session.rs"
                     .into(),
@@ -2355,6 +2362,7 @@ END_PENDING_PATCH";
             tasks_total: 2,
             tasks_done: 0,
             tasks_failed: 2,
+            token_usage: 0,
             outputs: vec![],
             files_read: vec!["src/agent/swarm.rs".into()],
             files_written: vec![],

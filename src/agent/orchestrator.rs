@@ -849,6 +849,10 @@ impl Orchestrator {
                 },
             )
             .await;
+        // Fold the swarm's aggregate subagent token usage into the session
+        // total so swarm spend shows in the session usage display (the
+        // per-call usage telemetry is recorded inside the executor).
+        self.session.metadata.total_tokens += result.token_usage;
         let patch_report = self
             .handle_swarm_pending_patches(
                 &result,
@@ -4095,6 +4099,7 @@ mod tests {
             tasks_total: 1,
             tasks_done: 1,
             tasks_failed: 0,
+            token_usage: 0,
             outputs: Vec::new(),
             files_read: Vec::new(),
             files_written: Vec::new(),

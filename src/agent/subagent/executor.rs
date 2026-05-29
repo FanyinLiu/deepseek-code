@@ -213,6 +213,24 @@ impl SubagentExecutor {
                         .usage
                         .as_ref()
                         .map_or(0, |u| u64::from(u.total_tokens));
+                    // Persist this subagent call's usage to the same telemetry
+                    // store the main loop uses, so swarm/subagent spend counts
+                    // toward usage/quota tracking instead of vanishing.
+                    if let Some(ref usage) = stream_result.usage {
+                        let provider_name = runtime_config.provider.default.as_str().to_string();
+                        let model_name = crate::provider::request_model_name_for_config(
+                            &runtime_config.provider,
+                            &model,
+                        );
+                        if let Err(error) = crate::storage::record_usage_event(
+                            &self.project_root,
+                            &provider_name,
+                            &model_name,
+                            usage,
+                        ) {
+                            tracing::warn!("failed to record subagent usage event: {error}");
+                        }
+                    }
 
                     if stream_result.tool_calls.is_empty() {
                         // No tool calls — final response
@@ -1699,6 +1717,38 @@ mod tests {
             "a no-tool-call turn ends the loop successfully"
         );
         assert!(result.output.contains("All done"));
+    }
+
+    #[tokio::test]
+    async fn subagent_run_records_usage_telemetry() {
+        let (executor, root) = loop_executor();
+        // The model response carries usage; the executor must persist it to the
+        // shared usage store so swarm/subagent spend counts toward quota
+        // tracking instead of vanishing.
+        let mut answer = final_answer("done");
+        answer.usage = Some(crate::deepseek::models::Usage {
+            prompt_tokens: 120,
+            completion_tokens: 30,
+            total_tokens: 150,
+            prompt_cache_hit_tokens: None,
+            prompt_cache_miss_tokens: None,
+            prompt_tokens_details: None,
+        });
+        let mock = MockStreamClient::new(vec![answer]);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let result = executor.run_with_client(&mock, &loop_task(), &tx).await;
+        assert_eq!(result.token_usage, 150);
+
+        let events = crate::storage::UsageStore::new(root.path())
+            .load_events()
+            .expect("load usage events");
+        assert_eq!(
+            events.len(),
+            1,
+            "the subagent model call must record exactly one usage event"
+        );
+        assert_eq!(events[0].total_tokens, 150);
     }
 
     #[tokio::test]
