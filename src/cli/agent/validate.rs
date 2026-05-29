@@ -31,8 +31,15 @@ fn validate_all(project_root: &Path) -> Result<Vec<AgentValidationReport>, anyho
         reports.insert((*name).to_string(), validate_built_in(name));
     }
 
-    let agents_dir = SubagentRegistry::agents_dir(project_root);
-    if agents_dir.is_dir() {
+    // Scan Claude Code's directory first, then octocode's, so an
+    // octocode-native agent file overrides a same-named Claude Code one.
+    for agents_dir in [
+        SubagentRegistry::claude_agents_dir(project_root),
+        SubagentRegistry::agents_dir(project_root),
+    ] {
+        if !agents_dir.is_dir() {
+            continue;
+        }
         for entry in std::fs::read_dir(&agents_dir)
             .with_context(|| format!("read {}", agents_dir.display()))?
             .flatten()
@@ -138,9 +145,14 @@ fn report(
     errors: Vec<AgentValidationIssue>,
     warnings: Vec<AgentValidationIssue>,
 ) -> AgentValidationReport {
+    let source = if path.components().any(|c| c.as_os_str() == ".claude") {
+        AgentSource::Claude
+    } else {
+        AgentSource::Project
+    };
     AgentValidationReport {
         name: name.to_string(),
-        source: AgentSource::Custom,
+        source,
         path: Some(path.display().to_string()),
         valid: errors.is_empty(),
         errors,

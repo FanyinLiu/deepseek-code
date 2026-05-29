@@ -251,7 +251,7 @@ enum Commands {
         command: KnowledgeCommands,
     },
 
-    /// Manage reusable local skills generated from successful repair/evolution runs
+    /// Author and manage reusable skills that auto-activate when your input matches their keywords
     Skill {
         #[command(subcommand)]
         command: SkillCommands,
@@ -728,7 +728,21 @@ enum SkillCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Create a draft skill from a repair run
+    /// Author a new reusable skill scaffold
+    New {
+        /// Skill name (slugified into the skill id)
+        name: String,
+        /// One-line description of what the skill does
+        #[arg(long)]
+        description: Option<String>,
+        /// Keyword that auto-activates this skill when it appears in your input (repeatable)
+        #[arg(long = "keyword")]
+        keywords: Vec<String>,
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a draft skill from a repair run (self-evolution path)
     Add {
         /// Repair run id from `octo repair run`
         run_id: String,
@@ -1708,6 +1722,17 @@ pub async fn run() -> Result<(), anyhow::Error> {
                 SkillCommands::Show { skill_id, json } => {
                     cli::skill::SkillCommand::Show { skill_id, json }
                 }
+                SkillCommands::New {
+                    name,
+                    description,
+                    keywords,
+                    json,
+                } => cli::skill::SkillCommand::New {
+                    name,
+                    description,
+                    keywords,
+                    json,
+                },
                 SkillCommands::Add { run_id, name, json } => {
                     cli::skill::SkillCommand::Add { run_id, name, json }
                 }

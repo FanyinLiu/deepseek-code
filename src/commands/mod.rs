@@ -231,9 +231,13 @@ impl CommandRegistry {
         // `octo commands list` and the TUI loader see the same custom command
         // surface — important for tests and for users who relocate their data
         // directory.
+        // Within each scope, load Claude Code's directory first so an
+        // octocode-native command overrides a same-named Claude Code one.
         if let Some(home) = crate::storage::user_home_dir() {
+            count += self.load_prompt_dir(&home.join(".claude").join("commands"));
             count += self.load_prompt_dir(&home.join(".octocode").join("commands"));
         }
+        count += self.load_prompt_dir(&project_root.join(".claude").join("commands"));
         count += self.load_prompt_dir(&project_root.join(".octocode").join("commands"));
         count
     }
@@ -3040,6 +3044,51 @@ mod tests {
             .get("/git:status")
             .expect("/git:status should load");
         assert_eq!(cmd.description, "show git status");
+    }
+
+    #[test]
+    fn loads_claude_code_commands_with_octocode_taking_precedence() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let claude = temp.path().join(".claude").join("commands");
+        let octo = temp.path().join(".octocode").join("commands");
+        std::fs::create_dir_all(&claude).expect("mkdir claude");
+        std::fs::create_dir_all(&octo).expect("mkdir octo");
+        // A Claude-only command loads...
+        std::fs::write(
+            claude.join("changelog.md"),
+            "---\ndescription: claude changelog\n---\nDraft notes.",
+        )
+        .expect("write claude");
+        // ...and a same-named command in .octocode overrides the Claude one.
+        std::fs::write(
+            claude.join("shared.md"),
+            "---\ndescription: from claude\n---\nA",
+        )
+        .expect("w");
+        std::fs::write(
+            octo.join("shared.md"),
+            "---\ndescription: from octocode\n---\nB",
+        )
+        .expect("w");
+
+        let mut reg = CommandRegistry::new();
+        reg.load_prompt_commands(temp.path());
+
+        assert_eq!(
+            reg.prompt_commands
+                .get("/changelog")
+                .expect("claude command loads")
+                .description,
+            "claude changelog"
+        );
+        assert_eq!(
+            reg.prompt_commands
+                .get("/shared")
+                .expect("shared command loads")
+                .description,
+            "from octocode",
+            "octocode command must win over a same-named Claude command"
+        );
     }
 
     #[test]

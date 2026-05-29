@@ -14,7 +14,7 @@ pub fn show_payload(project_root: &Path, name: &str) -> Result<AgentShowPayload,
     };
 
     Ok(AgentShowPayload {
-        item: item_from_config(name, config),
+        item: item_from_config(project_root, name, config),
         system_prompt: config.effective_system_prompt(),
     })
 }
@@ -22,6 +22,7 @@ pub fn show_payload(project_root: &Path, name: &str) -> Result<AgentShowPayload,
 pub(super) fn print_agent_show(payload: &AgentShowPayload) {
     println!("Agent: {}", payload.item.name);
     println!("  Source: {}", source_label(payload.item.source));
+    println!("  Description: {}", payload.item.description);
     println!("  Type: {}", payload.item.subagent_type);
     println!("  Permission mode: {}", payload.item.permission_mode);
     println!(

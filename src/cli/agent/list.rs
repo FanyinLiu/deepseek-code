@@ -13,7 +13,7 @@ pub fn list_payload(project_root: &Path) -> AgentListPayload {
         .filter_map(|name| {
             registry
                 .get(name)
-                .map(|config| item_from_config(name, config))
+                .map(|config| item_from_config(project_root, name, config))
         })
         .collect();
 

@@ -10,6 +10,7 @@ pub struct AgentListPayload {
 pub struct AgentListItem {
     pub name: String,
     pub source: AgentSource,
+    pub description: String,
     pub subagent_type: String,
     pub permission_mode: String,
     pub model: Option<String>,
@@ -21,7 +22,10 @@ pub struct AgentListItem {
 #[serde(rename_all = "snake_case")]
 pub enum AgentSource {
     BuiltIn,
-    Custom,
+    /// Custom agent under `.octocode/agents/`.
+    Project,
+    /// Custom agent under Claude Code's `.claude/agents/`.
+    Claude,
 }
 
 #[derive(Debug, Clone, Serialize)]

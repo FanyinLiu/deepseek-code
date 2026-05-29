@@ -190,6 +190,7 @@ fn render_template(name: &str, template: AgentTemplate) -> String {
     format!(
         r#"---
 subagent_type = "{subagent_type}"
+description = "{description}"
 allowed_tools = [{allowed_tools}]
 permission_mode = "{permission_mode}"
 model = "{model}"
@@ -203,6 +204,7 @@ max_turns = {max_turns}
 Agent name: `{name}`.
 "#,
         subagent_type = spec.subagent_type,
+        description = spec.description,
         allowed_tools = spec
             .allowed_tools
             .iter()
@@ -221,6 +223,7 @@ Agent name: `{name}`.
 struct TemplateSpec {
     title: &'static str,
     subagent_type: &'static str,
+    description: &'static str,
     allowed_tools: &'static [&'static str],
     permission_mode: &'static str,
     model: &'static str,
@@ -233,6 +236,7 @@ fn template_spec(template: AgentTemplate) -> TemplateSpec {
         AgentTemplate::Explorer => TemplateSpec {
             title: "Code Explorer",
             subagent_type: "code-explorer",
+            description: "Read-only codebase search. Use to locate code, trace symbols, or map structure.",
             allowed_tools: &["read_file", "list_dir", "search_files", "search_code", "git_status"],
             permission_mode: "read_only",
             model: "deepseek-v4-flash",
@@ -242,6 +246,7 @@ fn template_spec(template: AgentTemplate) -> TemplateSpec {
         AgentTemplate::Reviewer => TemplateSpec {
             title: "Code Reviewer",
             subagent_type: "code-reviewer",
+            description: "Read-only review of a diff or files for bugs, regressions, and missing tests.",
             allowed_tools: &["read_file", "list_dir", "search_files", "search_code", "git_status", "git_diff"],
             permission_mode: "read_only",
             model: "deepseek-v4-pro",
@@ -251,6 +256,7 @@ fn template_spec(template: AgentTemplate) -> TemplateSpec {
         AgentTemplate::Auditor => TemplateSpec {
             title: "Security Auditor",
             subagent_type: "security-auditor",
+            description: "Read-only security audit with VETO. Use to scan for secrets or policy bypass before risky changes.",
             allowed_tools: &["read_file", "list_dir", "search_files", "search_code", "git_status", "git_diff"],
             permission_mode: "read_only",
             model: "deepseek-v4-pro",
@@ -260,6 +266,7 @@ fn template_spec(template: AgentTemplate) -> TemplateSpec {
         AgentTemplate::Tester => TemplateSpec {
             title: "Test Runner",
             subagent_type: "test-runner",
+            description: "Runs tests, analyzes failures, and reports the smallest credible fix.",
             allowed_tools: &["read_file", "list_dir", "search_files", "search_code", "git_status", "git_diff", "run_command"],
             permission_mode: "accept_edits",
             model: "deepseek-v4-flash",
@@ -269,6 +276,7 @@ fn template_spec(template: AgentTemplate) -> TemplateSpec {
         AgentTemplate::Planner => TemplateSpec {
             title: "Planner",
             subagent_type: "planner",
+            description: "Read-only planner. Use to break a complex task into a phased plan before implementing.",
             allowed_tools: &["read_file", "list_dir", "search_files", "search_code", "git_status", "git_diff"],
             permission_mode: "read_only",
             model: "deepseek-v4-pro",
@@ -278,6 +286,7 @@ fn template_spec(template: AgentTemplate) -> TemplateSpec {
         AgentTemplate::Writer => TemplateSpec {
             title: "Documentation Writer",
             subagent_type: "general-purpose",
+            description: "Writes and improves documentation with concise, accurate language.",
             allowed_tools: &["read_file", "list_dir", "search_files", "search_code", "git_status", "git_diff", "edit_file", "write_file"],
             permission_mode: "accept_edits",
             model: "deepseek-v4-flash",
@@ -299,7 +308,26 @@ fn permission_mode_label(mode: &PermissionMode) -> &'static str {
 fn source_label(source: AgentSource) -> &'static str {
     match source {
         AgentSource::BuiltIn => "built-in",
-        AgentSource::Custom => "custom",
+        AgentSource::Project => ".octocode",
+        AgentSource::Claude => ".claude",
+    }
+}
+
+/// Decide where an agent comes from. A discoverable file under `.octocode`
+/// or `.claude` wins over the built-in label, so an overridden built-in
+/// reports its real source directory.
+fn agent_source(project_root: &Path, name: &str) -> AgentSource {
+    let exists_in = |dir: PathBuf| {
+        dir.join(format!("{name}.md")).exists() || dir.join(format!("{name}.toml")).exists()
+    };
+    if exists_in(SubagentRegistry::agents_dir(project_root)) {
+        AgentSource::Project
+    } else if exists_in(SubagentRegistry::claude_agents_dir(project_root)) {
+        AgentSource::Claude
+    } else if BUILT_IN_AGENTS.contains(&name) {
+        AgentSource::BuiltIn
+    } else {
+        AgentSource::Project
     }
 }
 
@@ -319,21 +347,27 @@ fn validate_agent_name(name: &str) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-fn agent_files_for_name(project_root: &Path, name: &str) -> [PathBuf; 2] {
+fn agent_files_for_name(project_root: &Path, name: &str) -> Vec<PathBuf> {
+    // octocode's directory first so it wins over a same-named Claude Code agent.
     [
-        SubagentRegistry::agents_dir(project_root).join(format!("{name}.md")),
-        SubagentRegistry::agents_dir(project_root).join(format!("{name}.toml")),
+        SubagentRegistry::agents_dir(project_root),
+        SubagentRegistry::claude_agents_dir(project_root),
     ]
+    .into_iter()
+    .flat_map(|dir| {
+        [
+            dir.join(format!("{name}.md")),
+            dir.join(format!("{name}.toml")),
+        ]
+    })
+    .collect()
 }
 
-fn item_from_config(name: &str, config: &SubagentConfig) -> AgentListItem {
+fn item_from_config(project_root: &Path, name: &str, config: &SubagentConfig) -> AgentListItem {
     AgentListItem {
         name: name.to_string(),
-        source: if BUILT_IN_AGENTS.contains(&name) {
-            AgentSource::BuiltIn
-        } else {
-            AgentSource::Custom
-        },
+        source: agent_source(project_root, name),
+        description: config.effective_description(),
         subagent_type: config.subagent_type.to_string(),
         permission_mode: permission_mode_label(&config.permission_mode).to_string(),
         model: config.model.as_ref().map(ToString::to_string),
