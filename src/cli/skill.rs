@@ -13,6 +13,12 @@ pub enum SkillCommand {
         skill_id: String,
         json: bool,
     },
+    New {
+        name: String,
+        description: Option<String>,
+        keywords: Vec<String>,
+        json: bool,
+    },
     Add {
         run_id: String,
         name: Option<String>,
@@ -55,6 +61,24 @@ pub async fn skill(command: SkillCommand, project_root: Option<PathBuf>) -> Resu
                 }))?;
             } else {
                 println!("{content}");
+            }
+        }
+        SkillCommand::New {
+            name,
+            description,
+            keywords,
+            json,
+        } => {
+            let metadata = store.scaffold(&name, description.as_deref(), &keywords)?;
+            if json {
+                print_json(&metadata)?;
+            } else {
+                println!("Created skill: {}", metadata.id);
+                println!("Path: .octocode/skills/{}/SKILL.md", metadata.id);
+                println!(
+                    "Edit SKILL.md to fill in the steps and keywords, then run `octo skill test {}`.",
+                    metadata.id
+                );
             }
         }
         SkillCommand::Add { run_id, name, json } => {

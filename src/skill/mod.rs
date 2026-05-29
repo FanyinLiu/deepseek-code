@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 use crate::repair::{RepairRun, REPAIR_DIR};
 
 pub const SKILLS_DIR: &str = ".octocode/skills";
+/// Claude Code's skill directory, scanned read-only so `.claude/skills/*`
+/// activate without being copied into `.octocode/skills/`.
+pub const CLAUDE_SKILLS_DIR: &str = ".claude/skills";
 
 #[derive(Debug, Clone)]
 pub struct SkillStore {
@@ -72,6 +75,53 @@ impl SkillStore {
         Self { project_root, root }
     }
 
+    /// Scaffold a user-authored skill from a name, description, and keywords.
+    ///
+    /// Unlike [`add_from_repair_run`], this produces an empty SKILL.md template
+    /// for the user to fill in. The `keywords` become frontmatter triggers, so
+    /// the skill auto-activates whenever one appears in the user's input.
+    pub fn scaffold(
+        &self,
+        name: &str,
+        description: Option<&str>,
+        keywords: &[String],
+    ) -> Result<SkillMetadata> {
+        self.ensure_dirs()?;
+        let id = unique_skill_id(&self.root, name);
+        let skill_dir = self.skill_dir(&id)?;
+        fs::create_dir_all(skill_dir.join("examples"))
+            .with_context(|| format!("create {}", skill_dir.join("examples").display()))?;
+        fs::create_dir_all(skill_dir.join("tests"))
+            .with_context(|| format!("create {}", skill_dir.join("tests").display()))?;
+        let metadata = SkillMetadata {
+            id: id.clone(),
+            version: 1,
+            created_at: Utc::now(),
+            created_from_run: None,
+            status: SkillStatus::Draft,
+            success_count: 0,
+            failure_count: 0,
+            last_used_at: None,
+            tags: keywords.to_vec(),
+        };
+        crate::storage::atomic::write_json_pretty_atomic(
+            &skill_dir.join("metadata.json"),
+            &metadata,
+        )
+        .with_context(|| format!("write {}", skill_dir.join("metadata.json").display()))?;
+        crate::storage::atomic::write_text_atomic(
+            &skill_dir.join("SKILL.md"),
+            &render_authored_skill_markdown(&id, description, keywords),
+        )
+        .with_context(|| format!("write {}", skill_dir.join("SKILL.md").display()))?;
+        append_trace(
+            &skill_dir,
+            "skill_authored",
+            "user-authored draft skill created",
+        )?;
+        Ok(metadata)
+    }
+
     pub fn add_from_repair_run(&self, run_id: &str, name: Option<String>) -> Result<SkillMetadata> {
         self.ensure_dirs()?;
         validate_run_id(run_id)?;
@@ -125,21 +175,44 @@ impl SkillStore {
 
     pub fn list(&self) -> Result<Vec<SkillSummary>> {
         self.ensure_dirs()?;
-        let mut summaries = Vec::new();
-        for entry in
-            fs::read_dir(&self.root).with_context(|| format!("read {}", self.root.display()))?
-        {
-            let entry = entry?;
-            let metadata_path = entry.path().join("metadata.json");
-            if metadata_path.exists() {
-                let metadata = self.load_metadata_from_path(&metadata_path)?;
-                summaries.push(SkillSummary {
-                    id: metadata.id,
-                    status: metadata.status,
-                    path: entry.path().display().to_string(),
-                    created_from_run: metadata.created_from_run,
-                    tags: metadata.tags,
-                });
+        let mut summaries: Vec<SkillSummary> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for root in self.read_roots() {
+            let entries = match fs::read_dir(&root) {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let dir = entry.path();
+                let metadata_path = dir.join("metadata.json");
+                let summary = if metadata_path.exists() {
+                    let metadata = self.load_metadata_from_path(&metadata_path)?;
+                    SkillSummary {
+                        id: metadata.id,
+                        status: metadata.status,
+                        path: dir.display().to_string(),
+                        created_from_run: metadata.created_from_run,
+                        tags: metadata.tags,
+                    }
+                } else if dir.join("SKILL.md").is_file() {
+                    // Claude Code skill: no metadata.json, synthesize from the dir.
+                    match dir.file_name().and_then(|s| s.to_str()) {
+                        Some(id) => SkillSummary {
+                            id: id.to_string(),
+                            status: SkillStatus::Active,
+                            path: dir.display().to_string(),
+                            created_from_run: None,
+                            tags: Vec::new(),
+                        },
+                        None => continue,
+                    }
+                } else {
+                    continue;
+                };
+                // octocode's own root is scanned first and wins on id clashes.
+                if seen.insert(summary.id.clone()) {
+                    summaries.push(summary);
+                }
             }
         }
         summaries.sort_by(|left, right| left.id.cmp(&right.id));
@@ -173,7 +246,7 @@ impl SkillStore {
     }
 
     pub fn show(&self, skill_id: &str) -> Result<String> {
-        let path = self.skill_dir(skill_id)?.join("SKILL.md");
+        let path = self.resolve_skill_dir(skill_id)?.join("SKILL.md");
         crate::storage::read_text_file_capped(&path)
             .with_context(|| format!("read {}", path.display()))
     }
@@ -195,34 +268,43 @@ impl SkillStore {
         }
         let lower = user_input.to_lowercase();
         let mut hits: Vec<(String, String)> = Vec::new();
-        let entries =
-            fs::read_dir(&self.root).with_context(|| format!("read {}", self.root.display()))?;
-        for entry in entries.flatten() {
-            let skill_dir = entry.path();
-            let md_path = skill_dir.join("SKILL.md");
-            if !md_path.is_file() {
-                continue;
-            }
-            let id = match skill_dir.file_name().and_then(|s| s.to_str()) {
-                Some(name) => name.to_string(),
-                None => continue,
-            };
-            let raw = match crate::storage::read_text_file_capped(&md_path) {
-                Ok(s) => s,
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for root in self.read_roots() {
+            let entries = match fs::read_dir(&root) {
+                Ok(entries) => entries,
                 Err(_) => continue,
             };
-            let triggers = parse_skill_triggers(&raw);
-            if triggers.is_empty() {
-                continue;
-            }
-            let matched = triggers
-                .iter()
-                .any(|kw| !kw.is_empty() && lower.contains(&kw.to_lowercase()));
-            if matched {
-                let body = strip_frontmatter(&raw);
-                hits.push((id, body));
-                if hits.len() >= limit {
-                    break;
+            for entry in entries.flatten() {
+                let skill_dir = entry.path();
+                let md_path = skill_dir.join("SKILL.md");
+                if !md_path.is_file() {
+                    continue;
+                }
+                let id = match skill_dir.file_name().and_then(|s| s.to_str()) {
+                    Some(name) => name.to_string(),
+                    None => continue,
+                };
+                // octocode root wins on id clashes; skip a Claude duplicate.
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+                let raw = match crate::storage::read_text_file_capped(&md_path) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let triggers = effective_triggers(&raw);
+                if triggers.is_empty() {
+                    continue;
+                }
+                let matched = triggers
+                    .iter()
+                    .any(|kw| !kw.is_empty() && lower.contains(&kw.to_lowercase()));
+                if matched {
+                    let body = strip_frontmatter(&raw);
+                    hits.push((id, body));
+                    if hits.len() >= limit {
+                        return Ok(hits);
+                    }
                 }
             }
         }
@@ -230,13 +312,18 @@ impl SkillStore {
     }
 
     pub fn test(&self, skill_id: &str) -> Result<SkillTestReport> {
-        let skill_dir = self.skill_dir(skill_id)?;
-        let checks = vec![
-            check_exists("SKILL.md", skill_dir.join("SKILL.md")),
+        let skill_dir = self.resolve_skill_dir(skill_id)?;
+        let md_path = skill_dir.join("SKILL.md");
+        let mut checks = vec![
+            check_exists("SKILL.md", md_path.clone()),
             check_exists("metadata.json", skill_dir.join("metadata.json")),
             check_exists("examples", skill_dir.join("examples")),
             check_exists("tests", skill_dir.join("tests")),
         ];
+        if md_path.is_file() {
+            let markdown = crate::storage::read_text_file_capped(&md_path).unwrap_or_default();
+            checks.extend(frontmatter_checks(&markdown));
+        }
         let status = if checks.iter().all(|check| check.passed) {
             SkillTestStatus::Pass
         } else {
@@ -289,6 +376,31 @@ impl SkillStore {
 
     fn skill_dir(&self, skill_id: &str) -> Result<PathBuf> {
         validate_skill_id(skill_id)?;
+        Ok(self.root.join(skill_id))
+    }
+
+    /// Directories scanned when reading/activating skills: octocode's own
+    /// (which also receives writes) plus Claude Code's, in that precedence.
+    fn read_roots(&self) -> Vec<PathBuf> {
+        let mut roots = vec![self.root.clone()];
+        let claude = self.project_root.join(CLAUDE_SKILLS_DIR);
+        if claude != self.root {
+            roots.push(claude);
+        }
+        roots
+    }
+
+    /// Resolve a skill id to its directory across the read roots (octocode
+    /// first, then Claude Code). Used by read-only operations.
+    fn resolve_skill_dir(&self, skill_id: &str) -> Result<PathBuf> {
+        validate_skill_id(skill_id)?;
+        for root in self.read_roots() {
+            let candidate = root.join(skill_id);
+            if candidate.is_dir() {
+                return Ok(candidate);
+            }
+        }
+        // Fall back to the writable root so error messages point somewhere real.
         Ok(self.root.join(skill_id))
     }
 
@@ -404,7 +516,21 @@ fn skill_tags(run: &RepairRun) -> Vec<String> {
 }
 
 fn render_skill_markdown(metadata: &SkillMetadata, run: &RepairRun) -> String {
-    format!(
+    // Keywords come from the run's tags (dropping `key:value` tags like
+    // `status:Passed`), so a repair-generated skill is activatable and passes
+    // the same frontmatter checks as an authored one.
+    let keyword_list = metadata
+        .tags
+        .iter()
+        .filter(|tag| !tag.contains(':'))
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let frontmatter = format!(
+        "---\nname: {}\ndescription: Draft repair skill generated from repair run {}.\nkeywords: [{}]\n---\n\n",
+        metadata.id, run.id, keyword_list
+    );
+    let body = format!(
         r#"# {}
 
 ## Purpose
@@ -467,6 +593,51 @@ Add examples after this draft is successfully reused.
             .collect::<Vec<_>>()
             .join("\n"),
         list_or_none(&run.touched_files)
+    );
+    format!("{frontmatter}{body}")
+}
+
+fn render_authored_skill_markdown(
+    id: &str,
+    description: Option<&str>,
+    keywords: &[String],
+) -> String {
+    let description = description.unwrap_or("Describe what this skill does in one line.");
+    let keyword_list = keywords
+        .iter()
+        .map(|keyword| keyword.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        r#"---
+name: {id}
+description: {description}
+keywords: [{keyword_list}]
+---
+
+# {id}
+
+## Purpose
+
+{description}
+
+## When to Use
+
+- Add the situations where this skill should guide the work.
+
+## When Not to Use
+
+- Add the cases where this skill does not apply.
+
+## Steps
+
+1. Outline the first step.
+2. Outline the next step.
+
+## Examples
+
+Add a concrete example once you have used this skill.
+"#
     )
 }
 
@@ -480,6 +651,94 @@ fn list_or_none(values: &[String]) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     }
+}
+
+/// Validate that a SKILL.md carries the frontmatter a skill needs to work:
+/// a `name`, a `description`, and at least one keyword/trigger (without which
+/// the skill never auto-activates on user input).
+fn frontmatter_checks(markdown: &str) -> Vec<SkillTestCheck> {
+    let frontmatter = extract_frontmatter(markdown);
+    let has_name = frontmatter.is_some_and(|block| frontmatter_field(block, "name").is_some());
+    let has_description =
+        frontmatter.is_some_and(|block| frontmatter_field(block, "description").is_some());
+    let has_keywords = !parse_skill_triggers(markdown).is_empty();
+    let activates = !effective_triggers(markdown).is_empty();
+    vec![
+        SkillTestCheck {
+            name: "frontmatter".to_string(),
+            passed: frontmatter.is_some(),
+            message: if frontmatter.is_some() {
+                "SKILL.md opens with a --- frontmatter block".to_string()
+            } else {
+                "add a --- frontmatter block at the top of SKILL.md".to_string()
+            },
+        },
+        SkillTestCheck {
+            name: "name".to_string(),
+            passed: has_name,
+            message: if has_name {
+                "name is set".to_string()
+            } else {
+                "add a `name:` field to the frontmatter".to_string()
+            },
+        },
+        SkillTestCheck {
+            name: "description".to_string(),
+            passed: has_description,
+            message: if has_description {
+                "description is set".to_string()
+            } else {
+                "add a `description:` field to the frontmatter".to_string()
+            },
+        },
+        SkillTestCheck {
+            name: "activation".to_string(),
+            passed: activates,
+            message: if has_keywords {
+                "keywords are set, so the skill can auto-activate".to_string()
+            } else if activates {
+                "no keywords; will auto-activate on the skill name (add `keywords:` for broader matching)".to_string()
+            } else {
+                "add `keywords:` so the skill auto-activates on matching input".to_string()
+            },
+        },
+    ]
+}
+
+/// Triggers used to auto-activate a skill: explicit `keywords:`/`trigger:`
+/// frontmatter if present, otherwise terms derived from the skill `name:`.
+/// The name fallback lets Claude Code skills (which declare only `name` and
+/// `description`) activate without an octocode-specific `keywords:` field.
+fn effective_triggers(markdown: &str) -> Vec<String> {
+    let explicit = parse_skill_triggers(markdown);
+    if !explicit.is_empty() {
+        return explicit;
+    }
+    extract_frontmatter(markdown)
+        .and_then(|block| frontmatter_field(block, "name"))
+        .map(|name| name_derived_triggers(&name))
+        .unwrap_or_default()
+}
+
+/// Split a skill name into lowercase trigger terms (length >= 3).
+fn name_derived_triggers(name: &str) -> Vec<String> {
+    name.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .map(str::to_ascii_lowercase)
+        .filter(|term| term.len() >= 3)
+        .collect()
+}
+
+/// Read a non-empty scalar value for `key` from a frontmatter block.
+fn frontmatter_field(frontmatter: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}:");
+    frontmatter.lines().find_map(|line| {
+        let trimmed = line.trim();
+        let value = trimmed
+            .strip_prefix(&prefix)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        Some(value.to_string())
+    })
 }
 
 fn check_exists(name: &str, path: PathBuf) -> SkillTestCheck {
@@ -598,6 +857,119 @@ mod skill_trigger_tests {
             serde_json::from_str(data.trim()).expect("parse trace event");
         assert_eq!(event["event"], "skill_used");
         assert_eq!(event["summary"], "used successfully");
+    }
+
+    #[test]
+    fn scaffold_creates_user_authored_skill_that_triggers() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().to_path_buf();
+        let store = SkillStore::for_project(&project);
+
+        let metadata = store
+            .scaffold(
+                "Refactor Large Function",
+                Some("Split an oversized function into smaller pieces."),
+                &["refactor".to_string(), "split".to_string()],
+            )
+            .expect("scaffold skill");
+
+        assert_eq!(metadata.id, "refactor-large-function");
+        assert_eq!(metadata.created_from_run, None);
+        assert_eq!(metadata.status, SkillStatus::Draft);
+
+        let hits = store
+            .triggered_for_input("please refactor src/foo.rs", 5)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, "refactor-large-function");
+    }
+
+    #[test]
+    fn test_passes_for_scaffolded_skill_with_keywords() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SkillStore::for_project(temp.path());
+        let metadata = store
+            .scaffold(
+                "Tidy Imports",
+                Some("Remove unused imports."),
+                &["imports".to_string()],
+            )
+            .expect("scaffold");
+
+        let report = store.test(&metadata.id).expect("test");
+        assert_eq!(report.status, SkillTestStatus::Pass);
+        assert!(report
+            .checks
+            .iter()
+            .any(|c| c.name == "activation" && c.passed));
+    }
+
+    #[test]
+    fn claude_style_skill_activates_on_name_without_keywords() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().to_path_buf();
+        let skill_dir = project.join(".octocode").join("skills").join("pdf-export");
+        std::fs::create_dir_all(skill_dir.join("examples")).unwrap();
+        std::fs::create_dir_all(skill_dir.join("tests")).unwrap();
+        // A Claude Code skill: name + description, no octocode `keywords:`.
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: pdf-export\ndescription: Export reports to PDF.\n---\nUse the pdf crate.",
+        )
+        .unwrap();
+        std::fs::write(
+            skill_dir.join("metadata.json"),
+            r#"{"id":"pdf-export","version":1,"created_at":"2026-05-22T00:00:00Z","created_from_run":null,"status":"active","success_count":0,"failure_count":0,"last_used_at":null,"tags":[]}"#,
+        )
+        .unwrap();
+
+        let store = SkillStore::for_project(&project);
+        let hits = store
+            .triggered_for_input("can you handle pdf export here", 5)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, "pdf-export");
+
+        let report = store.test("pdf-export").expect("test");
+        let activation = report
+            .checks
+            .iter()
+            .find(|c| c.name == "activation")
+            .expect("activation check present");
+        assert!(activation.passed);
+    }
+
+    #[test]
+    fn scans_claude_skills_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().to_path_buf();
+        // A Claude Code skill living under .claude/skills, not .octocode.
+        let claude_skill = project.join(".claude").join("skills").join("changelog");
+        std::fs::create_dir_all(&claude_skill).unwrap();
+        std::fs::write(
+            claude_skill.join("SKILL.md"),
+            "---\nname: changelog\ndescription: Maintain the changelog.\n---\nKeep Keep-a-Changelog format.",
+        )
+        .unwrap();
+
+        let store = SkillStore::for_project(&project);
+
+        // Activates from the Claude directory.
+        let hits = store
+            .triggered_for_input("update the changelog please", 5)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, "changelog");
+
+        // Appears in list even without an octocode metadata.json.
+        let listed = store.list().unwrap();
+        assert!(listed.iter().any(|s| s.id == "changelog"));
+
+        // show resolves across roots.
+        assert!(store
+            .show("changelog")
+            .unwrap()
+            .contains("Keep-a-Changelog"));
     }
 
     #[test]
