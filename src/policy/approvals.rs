@@ -585,7 +585,15 @@ fn evaluate_tool_inner(
                     command.to_string(),
                 );
             }
-            if policy.autonomy_level.auto_local_commands() || !policy.require_approval_for_command {
+            // A command carrying zero-width or bidirectional-override
+            // characters can display differently from what actually runs
+            // (a Trojan-Source style spoof). Such a command must never
+            // auto-approve — force explicit human review and surface why.
+            let unicode_warnings = crate::policy::unicode::detect_suspicious_unicode(command);
+            if unicode_warnings.is_empty()
+                && (policy.autonomy_level.auto_local_commands()
+                    || !policy.require_approval_for_command)
+            {
                 return PolicyDecision::allow(
                     format!("local command allowed by policy: {command}"),
                     "Run Command",
@@ -593,16 +601,23 @@ fn evaluate_tool_inner(
                     RiskLevel::CommandExecution,
                 );
             }
+            let mut detail = format!(
+                "Command: {}\nCWD: {}",
+                command,
+                args["cwd"].as_str().unwrap_or("project root")
+            );
+            if !unicode_warnings.is_empty() {
+                detail.push_str("\n⚠ suspicious characters detected — the displayed command may differ from what runs:");
+                for warning in &unicode_warnings {
+                    detail.push_str(&format!("\n  - {}: {}", warning.char_info, warning.risk));
+                }
+            }
             PolicyDecision::ask_once(
                 format!("execute: {command}"),
                 "Run Command",
                 command.to_string(),
                 RiskLevel::CommandExecution,
-                format!(
-                    "Command: {}\nCWD: {}",
-                    command,
-                    args["cwd"].as_str().unwrap_or("project root")
-                ),
+                detail,
             )
         }
 
@@ -830,8 +845,17 @@ fn write_paths_decision(
     let workspace_safe = paths.iter().all(|path| {
         evaluate_path_risk(path, project_root, policy.block_protected_paths) == RiskLevel::SafeRead
     });
-    if (policy.autonomy_level.auto_workspace_writes() && workspace_safe)
-        || !policy.require_approval_for_write
+    // A write that targets anything outside the workspace must keep its
+    // SensitiveRead risk so it is never auto-approved by accept-edits or by
+    // `!require_approval_for_write`. Hard-coding WriteProject here previously
+    // discarded that signal and leaned entirely on the execution-layer guard.
+    let escapes_workspace = paths.iter().any(|path| {
+        evaluate_path_risk(path, project_root, policy.block_protected_paths)
+            == RiskLevel::SensitiveRead
+    });
+    if !escapes_workspace
+        && ((policy.autonomy_level.auto_workspace_writes() && workspace_safe)
+            || !policy.require_approval_for_write)
     {
         return PolicyDecision::allow(
             format!("file write allowed by policy: {}", summarize_paths(paths)),
@@ -841,11 +865,16 @@ fn write_paths_decision(
         );
     }
 
+    let risk = if escapes_workspace {
+        RiskLevel::SensitiveRead
+    } else {
+        RiskLevel::WriteProject
+    };
     PolicyDecision::ask_once(
         format!("file write: {}", summarize_paths(paths)),
         title,
         description,
-        RiskLevel::WriteProject,
+        risk,
         details,
     )
 }
@@ -1071,6 +1100,69 @@ mod tests {
 
     fn args(value: serde_json::Value) -> String {
         value.to_string()
+    }
+
+    #[test]
+    fn run_command_with_hidden_unicode_is_not_auto_approved() {
+        // Auto-approval is on, but a command with a bidi-override char must
+        // still require explicit review (display can differ from execution).
+        let policy = PolicyConfig {
+            require_approval_for_command: false,
+            ..PolicyConfig::default()
+        };
+
+        let plain = evaluate_tool(
+            "run_command",
+            &args(serde_json::json!({ "command": "cargo test" })),
+            Path::new("."),
+            &policy,
+        );
+        assert_eq!(plain.action, PolicyAction::Allow);
+
+        let spoofed = evaluate_tool(
+            "run_command",
+            &args(serde_json::json!({ "command": "echo safe\u{202E}gnp" })),
+            Path::new("."),
+            &policy,
+        );
+        assert_eq!(spoofed.action, PolicyAction::AskOnce);
+        assert!(spoofed.display.details.contains("suspicious characters"));
+    }
+
+    #[test]
+    fn write_outside_workspace_keeps_sensitive_risk_and_is_not_auto_approved() {
+        use crate::policy::PermissionMode;
+        // Even with writes auto-allowed by policy, a target outside the
+        // workspace must not be silently approved.
+        let policy = PolicyConfig {
+            require_approval_for_write: false,
+            ..PolicyConfig::default()
+        };
+
+        let inside = evaluate_tool(
+            "write_file",
+            &args(serde_json::json!({ "path": "notes.txt", "content": "x" })),
+            Path::new("."),
+            &policy,
+        );
+        assert_eq!(inside.action, PolicyAction::Allow);
+
+        let outside = evaluate_tool(
+            "write_file",
+            &args(serde_json::json!({ "path": "/tmp/octo_escape_probe.txt", "content": "x" })),
+            Path::new("."),
+            &policy,
+        );
+        assert_ne!(
+            outside.action,
+            PolicyAction::Allow,
+            "out-of-workspace write must not auto-allow"
+        );
+        assert_eq!(outside.display.risk_level, RiskLevel::SensitiveRead);
+        assert!(
+            !PermissionMode::AcceptEdits.auto_approves("write_file", &outside),
+            "accept-edits must not auto-approve an out-of-workspace write"
+        );
     }
 
     #[test]
@@ -1602,7 +1694,9 @@ mod tests {
         );
 
         assert_eq!(decision.action, PolicyAction::AskOnce);
-        assert_eq!(decision.display.risk_level, RiskLevel::WriteProject);
+        // A parent-dir escape leaves the workspace, so it must carry the
+        // sensitive risk that keeps accept-edits from auto-approving it.
+        assert_eq!(decision.display.risk_level, RiskLevel::SensitiveRead);
     }
 
     #[test]

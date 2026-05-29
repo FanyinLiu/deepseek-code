@@ -23,10 +23,10 @@ impl DefenseProtocol {
     #[must_use]
     pub fn sanitize_input(&self, input: &str) -> SanitizedInput {
         let mut sanitized = self.input_filter.sanitize(input);
+        // Detect identity-override attempts for telemetry, but do not rewrite
+        // the input — silent stripping mangles legitimate developer requests.
         let identity = self.identity.sanitize(sanitized.safe_text());
         if identity.modified {
-            sanitized.safe = identity.safe;
-            sanitized.removed_contamination = true;
             sanitized
                 .matched_signatures
                 .push("identity override".to_string());

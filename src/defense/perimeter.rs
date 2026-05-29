@@ -220,23 +220,34 @@ fn path_ends_with_gitignore(path: &str, project_root: &Path) -> bool {
     path.file_name().and_then(|name| name.to_str()) == Some(".gitignore")
 }
 
+/// True only for an actual hardcoded secret: a token in a known, bounded
+/// format, or a secret-named key assigned a quoted literal value.
+///
+/// The previous version flagged any text containing the bare substring `sk-`
+/// (so `risk-free`, `disk-usage` tripped it) or a secret-ish word next to any
+/// `:`/`=` (so a `password: String` field or `let k = cfg.api_key;` reference
+/// tripped it), hard-blocking ordinary code writes. This keeps detecting real
+/// secrets without mangling legitimate code.
 fn contains_hardcoded_secret(value: &str) -> bool {
-    let lower = value.to_lowercase();
-    let assignment_markers = [
-        "api_key",
-        "apikey",
-        "secret_key",
-        "access_token",
-        "auth_token",
-        "password",
-        "credential",
-        "bearer ",
-    ];
-    assignment_markers
-        .iter()
-        .any(|marker| lower.contains(marker) && (lower.contains('=') || lower.contains(':')))
-        || lower.contains("sk-")
-        || lower.contains("ghp_")
+    secret_literal_present(value) || secret_key_assigned_literal(value)
+}
+
+fn secret_literal_present(value: &str) -> bool {
+    // Bounded, self-identifying token formats — not loose substrings.
+    const PATTERN: &str = r"(?i)\bsk-[A-Za-z0-9][A-Za-z0-9_-]{9,}\b|\bgh[pousr]_[A-Za-z0-9]{20,}\b|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|\bBearer\s+[A-Za-z0-9._\-]{8,}";
+    regex::Regex::new(PATTERN)
+        .map(|re| re.is_match(value))
+        .unwrap_or(false)
+}
+
+fn secret_key_assigned_literal(value: &str) -> bool {
+    // A secret-named key assigned a quoted string literal value. Excludes type
+    // annotations (`password: String`) and references (`= cfg.api_key`), which
+    // have no quoted literal on the value side.
+    const PATTERN: &str = r#"(?i)(?:api[_-]?key|secret|access[_-]?token|auth[_-]?token|password|credential)["']?\s*[:=]\s*["'][^"']{6,}["']"#;
+    regex::Regex::new(PATTERN)
+        .map(|re| re.is_match(value))
+        .unwrap_or(false)
 }
 
 fn contains_any(value: &str, needles: &[&str]) -> bool {
@@ -346,6 +357,45 @@ mod tests {
             denied.expect("violation").category,
             PerimeterCategory::HardcodedSecret
         );
+    }
+
+    #[test]
+    fn allows_ordinary_code_writes_that_resemble_secrets() {
+        // Type annotations, references, and words containing "sk-" must not be
+        // hard-blocked as hardcoded secrets.
+        for content in [
+            "pub struct Config { pub password: String }",
+            "let key = config.api_key;",
+            "// this refactor is risk-free and saves disk-space",
+            "fn token() -> Token { self.token }",
+        ] {
+            let result = BehavioralPerimeter.check_tool_call(
+                "write_file",
+                &args(serde_json::json!({ "path": "src/x.rs", "content": content })),
+                Path::new("."),
+            );
+            assert!(result.is_none(), "should allow: {content}");
+        }
+    }
+
+    #[test]
+    fn still_blocks_real_hardcoded_secret_values() {
+        for content in [
+            "let k = \"sk-livekey0123456789abcdef\";",
+            "password = \"hunter2-prod-secret\"",
+            "AWS_ID is AKIAIOSFODNN7EXAMPLE",
+        ] {
+            let result = BehavioralPerimeter.check_tool_call(
+                "write_file",
+                &args(serde_json::json!({ "path": "src/x.rs", "content": content })),
+                Path::new("."),
+            );
+            assert_eq!(
+                result.expect("violation").category,
+                PerimeterCategory::HardcodedSecret,
+                "should block: {content}"
+            );
+        }
     }
 
     #[test]

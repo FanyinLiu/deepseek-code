@@ -70,6 +70,30 @@ pub fn redact_env_vars(text: &str) -> String {
     result
 }
 
+/// Redact secrets that carry a distinctive, self-identifying prefix or
+/// envelope, so they are caught even when they appear bare (not as
+/// `NAME=value`) — e.g. inside a git remote URL or pasted into output.
+#[must_use]
+pub fn redact_known_token_formats(text: &str) -> String {
+    let mut result = text.to_string();
+    // GitHub tokens: ghp_/gho_/ghu_/ghs_/ghr_ and fine-grained github_pat_.
+    result = replace_regex(&result, r"\bgh[pousr]_[A-Za-z0-9]{20,}\b", "gh*_****");
+    result = replace_regex(
+        &result,
+        r"\bgithub_pat_[A-Za-z0-9_]{20,}\b",
+        "github_pat_****",
+    );
+    // AWS access key IDs (long-term AKIA, temporary ASIA).
+    result = replace_regex(&result, r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b", "AKIA****");
+    // PEM private key blocks (RSA/EC/OPENSSH/generic).
+    result = replace_regex(
+        &result,
+        r"(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+        "[REDACTED PRIVATE KEY]",
+    );
+    result
+}
+
 /// Redact file paths that might contain sensitive data.
 #[must_use]
 pub fn redact_sensitive_paths(text: &str) -> String {
@@ -100,6 +124,7 @@ pub fn redact_all(text: &str) -> String {
     let mut result = text.to_string();
     result = redact_api_keys(&result);
     result = redact_bearer_tokens(&result);
+    result = redact_known_token_formats(&result);
     result = redact_env_vars(&result);
     result = redact_sensitive_paths(&result);
     result
@@ -154,6 +179,36 @@ mod tests {
         let redacted = redact_env_vars(r#"$env:DEEPSEEK_API_KEY = "sk-abc123""#);
         assert!(!redacted.contains("sk-abc123"));
         assert!(redacted.contains("****"));
+    }
+
+    #[test]
+    fn redacts_bare_github_token_in_remote_url() {
+        // A PAT embedded in a git remote URL has no NAME=value envelope.
+        let redacted =
+            redact_all("origin https://ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123@github.com/x/y");
+        assert!(!redacted.contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123"));
+        assert!(redacted.contains("github.com/x/y"));
+    }
+
+    #[test]
+    fn redacts_bare_aws_access_key_id() {
+        let redacted = redact_all("key id AKIAIOSFODNN7EXAMPLE in the logs");
+        assert!(!redacted.contains("AKIAIOSFODNN7EXAMPLE"));
+    }
+
+    #[test]
+    fn redacts_pem_private_key_block() {
+        let pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\nsecretmaterial\n-----END OPENSSH PRIVATE KEY-----";
+        let redacted = redact_all(pem);
+        assert!(!redacted.contains("secretmaterial"));
+        assert!(redacted.contains("[REDACTED PRIVATE KEY]"));
+    }
+
+    #[test]
+    fn does_not_redact_benign_text_resembling_tokens() {
+        // No false positives on ordinary words / short ids.
+        let text = "the ghost wrote a haiku about asia";
+        assert_eq!(redact_known_token_formats(text), text);
     }
 
     #[test]

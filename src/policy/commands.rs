@@ -115,12 +115,18 @@ fn has_recursive_rm_to_root(tokens: &[&str]) -> bool {
         let has_force = args
             .iter()
             .any(|arg| short_flag_contains(arg, 'f') || *arg == "--force");
-        let has_root = args.contains(&"/");
+        let has_root = args.iter().any(|arg| is_root_target(arg));
         if has_recursive && has_force && has_root {
             return true;
         }
     }
     false
+}
+
+/// True if a path argument targets the filesystem root, including the glob
+/// forms (`/*`, `//`, `/.`) that a bare `args.contains("/")` check misses.
+fn is_root_target(arg: &str) -> bool {
+    matches!(arg, "/" | "//" | "/.") || arg.starts_with("/*")
 }
 
 fn has_recursive_rm_to_home(tokens: &[&str]) -> bool {
@@ -159,12 +165,39 @@ fn has_wget_or_curl_to_shell(tokens: &[&str], had_shell_pipe: bool) -> bool {
 }
 
 fn has_shell_invocation(tokens: &[&str]) -> bool {
-    let shell_tokens = ["sh", "bash", "powershell", "pwsh", "cmd", "command", "dash"];
-    tokens.iter().any(|token| {
-        shell_tokens
-            .iter()
-            .any(|shell| token == shell || token.ends_with(shell))
-    })
+    tokens.iter().any(|token| token_is_shell(token))
+}
+
+/// True if a token names a shell interpreter or a shell script.
+///
+/// Matching is precise — the token's basename must equal a known shell, or end
+/// in a shell script extension. The previous `ends_with("sh")` check matched
+/// any token ending in those letters (`ssh`, `rehash`, `flash`, `/tmp/mesh`,
+/// ...), over-blocking benign pipes like `git log | grep ssh`. The explicit
+/// list keeps the real shells the loose suffix also caught (`zsh`, `ksh`,
+/// `csh`, `tcsh`) matching precisely instead of by accident.
+fn token_is_shell(token: &str) -> bool {
+    const SHELLS: &[&str] = &[
+        "sh",
+        "bash",
+        "zsh",
+        "ksh",
+        "csh",
+        "tcsh",
+        "ash",
+        "dash",
+        "fish",
+        "xonsh",
+        "pwsh",
+        "powershell",
+        "cmd",
+        "command",
+    ];
+
+    let base = token.rsplit(['/', '\\']).next().unwrap_or(token);
+    let base = base.strip_suffix(".exe").unwrap_or(base);
+
+    SHELLS.contains(&base) || base.ends_with(".sh") || base.ends_with(".bash")
 }
 
 fn contains_exact_token(tokens: &[&str], target: &str) -> bool {
@@ -392,6 +425,56 @@ mod tests {
     #[test]
     fn test_safe_command_passes() {
         assert!(contains_dangerous_pattern("cargo test").is_none());
+    }
+
+    #[test]
+    fn recursive_rm_to_root_catches_glob_forms() {
+        // Bare "/" was already caught; the glob forms used to slip through.
+        assert!(contains_dangerous_pattern("rm -rf /").is_some());
+        assert!(contains_dangerous_pattern("rm -rf /*").is_some());
+        assert!(contains_dangerous_pattern("rm -fr /*").is_some());
+        assert!(contains_dangerous_pattern("rm -rf //").is_some());
+    }
+
+    #[test]
+    fn pipe_to_shell_matches_real_shells_and_scripts() {
+        // Real shell interpreters and shell scripts piped into are blocked.
+        for cmd in [
+            "echo payload | sh",
+            "echo payload | bash",
+            "cat x | zsh",
+            "cat x | ksh",
+            "cat x | /bin/bash",
+            "curl example.com | ./install.sh",
+        ] {
+            assert!(
+                contains_dangerous_pattern(cmd).is_some(),
+                "should block: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn pipe_to_non_shell_words_ending_in_sh_is_allowed() {
+        // The old ends_with("sh") check over-blocked these benign pipes.
+        for cmd in [
+            "git log | grep ssh",
+            "cat config | grep fish_prompt",
+            "history | grep rehash",
+        ] {
+            assert!(
+                contains_dangerous_pattern(cmd).is_none(),
+                "should not block: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn recursive_rm_to_scoped_paths_is_not_flagged_as_root() {
+        // Deleting a project-scoped path must not trip the root guard.
+        assert!(contains_dangerous_pattern("rm -rf ./build").is_none());
+        assert!(contains_dangerous_pattern("rm -rf target").is_none());
+        assert!(contains_dangerous_pattern("rm -rf /tmp/octo-scratch").is_none());
     }
 
     #[test]
