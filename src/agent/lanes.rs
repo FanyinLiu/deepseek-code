@@ -46,6 +46,7 @@ pub fn classify_task(input: &str) -> TaskClass {
         || input_lower.starts_with("remove ")
         || input_lower.starts_with("delete ")
         || input_lower.starts_with("update ")
+        || has_edit_intent(&input_lower)
     {
         return TaskClass::Execute;
     }
@@ -115,6 +116,18 @@ fn has_local_context_intent(input: &str) -> bool {
     NEEDLES.iter().any(|needle| input.contains(needle))
 }
 
+/// Chinese edit verbs that imply file changes (the tool loop). English edit
+/// verbs are matched as `starts_with` prefixes above; Chinese has no word
+/// delimiter, so these are matched as substrings. Kept to unambiguous edit
+/// verbs to avoid pulling pure-chat prompts onto the tool lane.
+fn has_edit_intent(input: &str) -> bool {
+    const NEEDLES: &[&str] = &[
+        "修复", "修改", "更改", "改成", "改为", "重构", "重写", "实现", "添加", "新增",
+        "删除", "移除", "更新",
+    ];
+    NEEDLES.iter().any(|needle| input.contains(needle))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskClass {
     Chat,
@@ -143,6 +156,28 @@ impl TaskClass {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chinese_edit_requests_use_tool_lane() {
+        // P0: Chinese edit phrasings used to fall through to `Chat`, which sends
+        // no tools (orchestrator.rs `send_tools`), silently degrading an edit
+        // request into a chat reply. They must classify as `Execute`.
+        for input in [
+            "修复登录失败的 bug",
+            "重构这个函数",
+            "实现登录功能",
+            "修改用户验证逻辑",
+            "删除无用代码",
+        ] {
+            assert_eq!(classify_task(input), TaskClass::Execute, "input: {input}");
+        }
+        assert_eq!(
+            TaskClass::Execute.default_lane(),
+            ExecutionLane::ToolLoopThinking
+        );
+        // Pure explanation stays off the edit lane.
+        assert_ne!(classify_task("解释这个函数怎么工作"), TaskClass::Execute);
+    }
 
     #[test]
     fn local_file_requests_use_tool_lane() {

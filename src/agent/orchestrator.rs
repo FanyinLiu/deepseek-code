@@ -1804,7 +1804,7 @@ impl Orchestrator {
         }
 
         // Determine execution lane
-        let lane = force_lane.unwrap_or_else(|| task.default_lane());
+        let lane = force_lane.unwrap_or_else(|| resolve_lane(&task, assessment.as_ref()));
 
         // 8. Build prompt (project_rules loaded once at top of run_turn_inner)
         let cap = ModelCapability::for_model(&self.session.reasoning_state.effective_model());
@@ -3353,6 +3353,45 @@ fn should_force_swarm(user_input: &str) -> bool {
     )
 }
 
+/// Reconcile the lexical task lane with the complexity router's verdict.
+///
+/// `classify_task` picks the lane from surface keywords, but it can land an
+/// actionable edit on a tool-less chat lane (the lane decides `send_tools`).
+/// When the router independently judged this a direct execution that writes
+/// files or runs commands, upgrade the chat lane into the tool loop so the
+/// model actually receives edit/run tools.
+fn resolve_lane(task: &TaskClass, assessment: Option<&ComplexityAssessment>) -> ExecutionLane {
+    let base = task.default_lane();
+    let is_chat_lane = matches!(
+        base,
+        ExecutionLane::ChatNonThinking | ExecutionLane::ChatThinking
+    );
+    if is_chat_lane {
+        if let Some(a) = assessment {
+            if a.route == Route::DirectExecute && assessment_implies_edits(a) {
+                return ExecutionLane::ToolLoopThinking;
+            }
+        }
+    }
+    base
+}
+
+/// Whether a router assessment carries positive evidence that the task changes
+/// files or runs commands (as opposed to a pure read/chat task).
+fn assessment_implies_edits(a: &ComplexityAssessment) -> bool {
+    a.predicted_write_files > 0
+        || a.predicted_commands > 0
+        || a.reason_codes.iter().any(|r| {
+            matches!(
+                r,
+                ReasonCode::SingleFileSafe
+                    | ReasonCode::MultiFile
+                    | ReasonCode::ShellRequired
+                    | ReasonCode::TestRequired
+            )
+        })
+}
+
 fn swarm_patch_approval_details(
     result: &crate::agent::swarm::SwarmResult,
     changed_files: &[String],
@@ -3933,9 +3972,10 @@ mod tests {
         changed_files_for_tool_call, emit_stream_chunk_deltas,
         emit_stream_chunk_deltas_with_options, event_changed_files_for_tool_result,
         generate_plan_options, is_contextual_followup_request, plan_execution_context,
-        plan_execution_prompt, plan_or_input_uses_chinese, plan_uses_chinese,
+        plan_execution_prompt, plan_or_input_uses_chinese, plan_uses_chinese, resolve_lane,
         swarm_patch_approval_details, validate_swarm_patch_for_auto_apply, AgentEvent,
-        ContextualTurnInput, PlanExecutionState, PlanStepStatus,
+        ComplexityAssessment, ContextualTurnInput, ExecutionLane, PlanExecutionState,
+        PlanStepStatus, ReasonCode, Route, TaskClass,
     };
     use crate::agent::swarm::{SwarmAgentRole, SwarmPendingPatch, SwarmResult};
     use crate::agent::tool_loop::ToolLoopResult;
@@ -3946,6 +3986,65 @@ mod tests {
     };
     use crate::plan::executor::PlanStep;
     use crate::plan::schema::{Plan, Risk, RiskLevel};
+
+    fn direct_execute_assessment() -> ComplexityAssessment {
+        ComplexityAssessment {
+            route: Route::DirectExecute,
+            complexity_label: crate::agent::router::ComplexityLabel::Simple,
+            score: 10,
+            confidence: 0.9,
+            reason_codes: Vec::new(),
+            hard_trigger_codes: Vec::new(),
+            predicted_write_files: 0,
+            predicted_commands: 0,
+            predicted_duration_ms: 5_000,
+            risk_flags: Vec::new(),
+            classifier_version: "test".to_string(),
+            explanation: String::new(),
+            model_name: None,
+            latency_ms: 0,
+        }
+    }
+
+    #[test]
+    fn router_write_signal_upgrades_chat_lane_to_tool_loop() {
+        // classify_task landed on Chat, but the router judged a direct execution
+        // with a file write → upgrade to the tool loop so tools get sent.
+        let mut a = direct_execute_assessment();
+        a.predicted_write_files = 1;
+        assert_eq!(
+            resolve_lane(&TaskClass::Chat, Some(&a)),
+            ExecutionLane::ToolLoopThinking
+        );
+
+        // A single-file-safe reason code is also sufficient evidence.
+        let mut a = direct_execute_assessment();
+        a.reason_codes.push(ReasonCode::SingleFileSafe);
+        assert_eq!(
+            resolve_lane(&TaskClass::Chat, Some(&a)),
+            ExecutionLane::ToolLoopThinking
+        );
+    }
+
+    #[test]
+    fn router_keeps_chat_lane_without_edit_evidence() {
+        // Pure chat/explain (DirectExecute, no edit signals) stays on chat.
+        let a = direct_execute_assessment();
+        assert_eq!(
+            resolve_lane(&TaskClass::Chat, Some(&a)),
+            ExecutionLane::ChatNonThinking
+        );
+        // No assessment → fall back to the lexical default lane.
+        assert_eq!(
+            resolve_lane(&TaskClass::Chat, None),
+            ExecutionLane::ChatNonThinking
+        );
+        // Non-chat lanes are never downgraded.
+        assert_eq!(
+            resolve_lane(&TaskClass::Execute, None),
+            ExecutionLane::ToolLoopThinking
+        );
+    }
 
     fn sample_plan_state() -> PlanExecutionState {
         PlanExecutionState::new(vec![
