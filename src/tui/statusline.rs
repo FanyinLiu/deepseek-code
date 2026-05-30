@@ -91,26 +91,28 @@ fn statusline_row(props: &StatuslineProps<'_>, canvas: Color, width: u16) -> Vec
             colors.text,
         );
     }
-    if !narrow {
-        if let Some(cache) = props.cache {
-            if cache.prompt_cache_hit_tokens + cache.prompt_cache_miss_tokens > 0 {
-                push_sep(&mut spans, canvas, colors.sep);
-                push_label(
-                    &mut spans,
-                    canvas,
-                    label(props.chinese, "Hit", "命中率"),
-                    colors.label,
-                );
-                let rate = cache.hit_rate() * 100.0;
-                let fg = if rate >= 80.0 {
-                    colors.permission
-                } else if rate >= 50.0 {
-                    colors.text
-                } else {
-                    colors.sep
-                };
-                push_text(&mut spans, canvas, format!("{:.0}%", rate), fg);
-            }
+    // Cache hit rate stays visible even on narrow terminals — it's small
+    // (one label + a percentage) and is the metric most worth watching.
+    if let Some(cache) = props.cache {
+        if cache.prompt_cache_hit_tokens + cache.prompt_cache_miss_tokens > 0 {
+            push_sep(&mut spans, canvas, colors.sep);
+            push_label(
+                &mut spans,
+                canvas,
+                label(props.chinese, "Hit", "命中率"),
+                colors.label,
+            );
+            let rate = cache.hit_rate() * 100.0;
+            // High hit rate is good (green); low is worth flagging (red), not
+            // hidden in dim grey as before.
+            let fg = if rate >= 80.0 {
+                colors.good
+            } else if rate >= 50.0 {
+                colors.text
+            } else {
+                colors.bad
+            };
+            push_text(&mut spans, canvas, format!("{:.0}%", rate), fg);
         }
     }
     push_sep(&mut spans, canvas, colors.sep);
@@ -285,6 +287,8 @@ struct StatuslineColors {
     text: Color,
     sep: Color,
     permission: Color,
+    good: Color,
+    bad: Color,
 }
 
 fn statusline_colors(p: theme::ThemePalette) -> StatuslineColors {
@@ -293,6 +297,8 @@ fn statusline_colors(p: theme::ThemePalette) -> StatuslineColors {
         text: p.text,
         sep: p.muted,
         permission: p.warning,
+        good: p.success,
+        bad: p.danger,
     }
 }
 
@@ -518,6 +524,51 @@ mod tests {
             .collect();
         assert!(rendered.contains("命 中 率"));
         assert!(rendered.contains("90%"));
+    }
+
+    #[test]
+    fn statusline_shows_cache_hit_rate_on_narrow_terminal() {
+        // Width 60 is below the `narrow` threshold (88) that drops the model
+        // segment. The cache hit rate must still render after the fix.
+        let mut terminal = Terminal::new(TestBackend::new(60, 1)).expect("terminal");
+        terminal
+            .draw(|f| {
+                render_statusline(
+                    f,
+                    f.area(),
+                    StatuslineProps {
+                        mode: AppMode::Run,
+                        provider: "deepseek",
+                        model: "deepseek-v4-flash",
+                        status: "working",
+                        tokens: 1_000,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        agent_tokens: 0,
+                        cost: 0.0,
+                        cache: Some(&CacheUsage {
+                            prompt_cache_hit_tokens: 900,
+                            prompt_cache_miss_tokens: 100,
+                        }),
+                        permissions: "permissions ask",
+                        context_limit: Some(20_000),
+                        chinese: false,
+                    },
+                );
+            })
+            .expect("draw");
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(
+            rendered.contains("90%"),
+            "narrow statusline must keep the cache hit rate, got: {rendered}"
+        );
     }
 
     #[test]
