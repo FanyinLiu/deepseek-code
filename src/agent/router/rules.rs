@@ -378,8 +378,20 @@ fn estimate_file_changes(_input: &str, lower: &str) -> u32 {
     {
         return 3;
     }
-    if lower.contains("and")
-        && (lower.contains("file") || lower.contains("模块") || lower.contains("组件"))
+    let has_conjunction = lower.contains("and")
+        || lower.contains("和")
+        || lower.contains("与")
+        || lower.contains("以及")
+        || lower.contains("、");
+    if (has_conjunction
+        && (lower.contains("file")
+            || lower.contains("文件")
+            || lower.contains("模块")
+            || lower.contains("组件")))
+        || lower.contains("multiple files")
+        || lower.contains("多个文件")
+        || lower.contains("多文件")
+        || lower.contains("几个文件")
     {
         return 2;
     }
