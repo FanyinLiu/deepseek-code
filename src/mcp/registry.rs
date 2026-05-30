@@ -172,7 +172,13 @@ impl McpRegistry {
     #[must_use]
     pub fn all_tools(&self) -> Vec<(&str, &McpTool)> {
         let mut result = Vec::new();
-        for (name, entry) in &self.servers {
+        // Iterate servers in a deterministic (name-sorted) order. HashMap
+        // iteration order varies per registry instance, which would reorder the
+        // MCP tool block between sessions and break DeepSeek's prefix cache.
+        let mut names: Vec<&String> = self.servers.keys().collect();
+        names.sort();
+        for name in names {
+            let entry = &self.servers[name];
             if entry.connected {
                 for tool in &entry.tools {
                     result.push((name.as_str(), tool));
@@ -441,6 +447,34 @@ mod tests {
             .expect("metadata for filtered tool");
         assert!(!blocked.advertised);
         assert!(!blocked.allowed_by_filters);
+    }
+
+    #[test]
+    fn all_tools_are_ordered_by_server_name() {
+        let server_config = crate::storage::config::McpServerEntryConfig {
+            transport: crate::mcp::client::McpTransport::Stdio,
+            command: Some("cmd".into()),
+            args: Vec::new(),
+            env: None,
+            url: None,
+            headers: None,
+            include_tools: Vec::new(),
+            exclude_tools: Vec::new(),
+            trust: true,
+            timeout_ms: 1_234,
+        };
+        let mut reg = McpRegistry::new();
+        // Register out of alphabetical order; all_tools must still come back
+        // sorted so the MCP tool prefix stays stable for the context cache.
+        for name in ["zeta", "alpha", "mu"] {
+            reg.register_config(name.to_string(), &server_config);
+            let entry = reg.servers.get_mut(name).expect("server");
+            entry.connected = true;
+            entry.tools = vec![tool(name)];
+        }
+
+        let servers: Vec<&str> = reg.all_tools().into_iter().map(|(s, _)| s).collect();
+        assert_eq!(servers, vec!["alpha", "mu", "zeta"]);
     }
 
     fn tool(name: &str) -> McpTool {
