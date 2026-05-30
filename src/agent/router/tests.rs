@@ -117,6 +117,30 @@ fn deploy_is_hard_trigger_complex() {
 }
 
 #[test]
+fn drop_statement_is_flagged_as_delete() {
+    // "drop" alone (no delete/remove word) is still destructive.
+    let result = rules::assess_with_rules("drop the legacy_sessions table", None);
+    assert!(result.risk_flags.contains(&RiskFlag::Delete));
+    assert!(result.has_hard_trigger);
+}
+
+#[test]
+fn network_install_has_no_spurious_permission_flag() {
+    // Installing deps is a network action, not a permission change.
+    let result = rules::assess_with_rules("npm install lodash", None);
+    assert!(result.reason_codes.contains(&ReasonCode::NetworkRequired));
+    assert!(!result.risk_flags.contains(&RiskFlag::PermissionChange));
+}
+
+#[test]
+fn chinese_multi_file_request_is_flagged_multi_file() {
+    // Chinese conjunction "和" + file noun should read as multiple files,
+    // matching the English "and ... file" path.
+    let result = rules::assess_with_rules("修改 auth 模块和 user 模块的文件", None);
+    assert!(result.reason_codes.contains(&ReasonCode::MultiFile));
+}
+
+#[test]
 fn ambiguous_short_task_is_clarify() {
     let result = rules::assess_with_rules("fix it", None);
     // Very short + vague → the engine may treat it as simple due to low score.
