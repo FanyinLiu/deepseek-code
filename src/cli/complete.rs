@@ -57,7 +57,7 @@ pub async fn complete(
         let out = serde_json::json!({ "completion": text });
         println!("{}", serde_json::to_string(&out)?);
     } else {
-        print!("{text}");
+        println!("{text}");
     }
     Ok(())
 }
