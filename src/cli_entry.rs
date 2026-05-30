@@ -125,6 +125,20 @@ enum Commands {
         auto_approve: bool,
     },
 
+    /// Fill-in-the-middle completion at a `<CURSOR>` marker (DeepSeek FIM)
+    Complete {
+        /// File to complete; reads stdin when omitted
+        file: Option<PathBuf>,
+
+        /// Max tokens to generate
+        #[arg(long)]
+        max_tokens: Option<u32>,
+
+        /// Print machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Search the project codebase
     Search {
         /// Search query
@@ -1527,6 +1541,11 @@ pub async fn run() -> Result<(), anyhow::Error> {
             )
             .await
         }
+        Some(Commands::Complete {
+            file,
+            max_tokens,
+            json,
+        }) => cli::complete(file, max_tokens, json).await,
         Some(Commands::Search {
             query,
             code_only,

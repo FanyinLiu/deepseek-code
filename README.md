@@ -67,6 +67,10 @@ octo plan "修复登录失败的问题"
 # 执行任务
 octo run "列出 src 目录"
 
+# FIM 补全（DeepSeek 填空，非 agentic）：在文件里用 <CURSOR> 标出填充点
+octo complete src/lib.rs
+echo 'fn add(a: i32, b: i32) -> i32 {<CURSOR>}' | octo complete
+
 # 交互式 TUI（推荐）
 octo
 
