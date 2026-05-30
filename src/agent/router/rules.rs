@@ -40,7 +40,8 @@ pub fn assess_with_rules(task_input: &str, _project_context: Option<&str>) -> Ru
     if has_network_or_install(&lower) {
         hard_triggers.push("NETWORK_REQUIRED".into());
         reasons.push(ReasonCode::NetworkRequired);
-        risks.push(RiskFlag::PermissionChange);
+        // Network/install is captured by the NetworkRequired reason + hard
+        // trigger; it is not a permission change, so it gets no risk flag.
     }
 
     if has_high_risk_action(&lower) {
@@ -48,6 +49,7 @@ pub fn assess_with_rules(task_input: &str, _project_context: Option<&str>) -> Ru
         reasons.push(ReasonCode::HighRisk);
         if lower.contains("delete")
             || lower.contains("remove ")
+            || lower.contains("drop ")
             || lower.contains("移除")
             || lower.contains("删除")
         {
