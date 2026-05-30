@@ -44,22 +44,6 @@ impl ReasoningManager {
         turn_id
     }
 
-    /// Check if a given message's reasoning should be carried forward.
-    #[must_use]
-    pub fn should_preserve_reasoning(msg: &ProtocolMessage, state: &ReasoningState) -> bool {
-        if msg.role != Role::Assistant {
-            return false;
-        }
-        if msg.reasoning_content.is_none() {
-            return false;
-        }
-        if msg.tool_calls.is_empty() {
-            return false;
-        }
-        // Only preserve if this message is in the active preserved set
-        state.preserved_assistant_messages.contains(&msg.id)
-    }
-
     /// Complete the tool loop: move preserved reasoning to audit-only.
     pub fn complete_tool_loop(state: &mut ReasoningState, messages: &mut [ProtocolMessage]) {
         for msg_id in state.preserved_assistant_messages.drain(..) {

@@ -1,5 +1,5 @@
 use super::models::{
-    ExecutionLane, ProtocolMessage, ReasoningEffort, Role, ThinkingConfig, ThinkingMode, ToolTurnId,
+    ExecutionLane, ProtocolMessage, ReasoningEffort, Role, ThinkingConfig, ThinkingMode,
 };
 
 /// Build `ThinkingConfig` for a given `ExecutionLane` and user preferences.
@@ -31,30 +31,6 @@ pub fn thinking_config_for_lane(
                 None // let API decide
             }
         }
-    }
-}
-
-/// Determine if a given assistant `ProtocolMessage` still needs its
-/// `reasoning_content` preserved for an ongoing tool loop.
-#[must_use]
-pub fn should_preserve_reasoning(
-    msg: &ProtocolMessage,
-    active_tool_turn: Option<&ToolTurnId>,
-) -> bool {
-    if msg.role != Role::Assistant {
-        return false;
-    }
-    if msg.reasoning_content.is_none() {
-        return false;
-    }
-    if msg.tool_calls.is_empty() {
-        // No tool calls — reasoning is not needed for next round
-        return false;
-    }
-    // Has tool calls — preserve if this is the active tool turn
-    match (active_tool_turn, &msg.sub_turn_id) {
-        (Some(active), Some(sub)) => active == sub,
-        _ => false,
     }
 }
 
