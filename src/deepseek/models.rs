@@ -266,7 +266,13 @@ pub fn estimate_tokenish_count(value: &str) -> u64 {
     let chars = value.chars().count() as u64;
     let non_ascii = value.chars().filter(|c| !c.is_ascii()).count() as u64;
     let ascii = chars.saturating_sub(non_ascii);
-    ascii.div_ceil(4).saturating_add(non_ascii).max(1)
+    // DeepSeek's published estimate: ~0.3 tokens per English char, ~0.6 per
+    // Chinese char (rounded up to stay slightly conservative). Counting every
+    // non-ASCII char as a full token previously over-counted CJK by ~67%,
+    // tripping auto-compaction far too early on Chinese sessions.
+    let ascii_tokens = (ascii * 3).div_ceil(10);
+    let cjk_tokens = (non_ascii * 3).div_ceil(5);
+    ascii_tokens.saturating_add(cjk_tokens).max(1)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -869,6 +875,16 @@ mod tests {
         };
 
         assert_eq!(state.effective_model(), DeepSeekModel::Pro);
+    }
+
+    #[test]
+    fn token_estimate_follows_deepseek_char_ratios() {
+        // ~0.3 tokens per English char, ~0.6 per Chinese char.
+        assert_eq!(estimate_tokenish_count(&"a".repeat(100)), 30);
+        assert_eq!(estimate_tokenish_count(&"中".repeat(100)), 60);
+        // Empty stays zero; a tiny input still rounds up to at least 1.
+        assert_eq!(estimate_tokenish_count(""), 0);
+        assert_eq!(estimate_tokenish_count("a"), 1);
     }
 
     #[test]
