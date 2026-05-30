@@ -630,8 +630,8 @@ impl Orchestrator {
         self.record_usage_event(usage);
         let cache = CacheUsage::from_usage(usage);
         self.session.metadata.total_tokens += u64::from(usage.total_tokens);
-        self.session.metadata.total_cost_estimate += usage
-            .estimate_cost_cny(&self.session.reasoning_state.effective_model());
+        self.session.metadata.total_cost_estimate +=
+            usage.estimate_cost_cny(&self.session.reasoning_state.effective_model());
         self.session.metadata.prompt_cache_hit_tokens = self
             .session
             .metadata

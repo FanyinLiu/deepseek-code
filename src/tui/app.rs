@@ -6363,7 +6363,10 @@ fn mention_prefix_at_cursor(text: &str, cursor_pos: usize) -> Option<FileMention
         // Advance past the whitespace char itself. It may be multi-byte (e.g.
         // U+3000 ideographic space, common in CJK input), so a bare `idx + 1`
         // would land inside the char and panic when slicing below.
-        idx + before_cursor[idx..].chars().next().map_or(1, char::len_utf8)
+        idx + before_cursor[idx..]
+            .chars()
+            .next()
+            .map_or(1, char::len_utf8)
     });
     let token = &before_cursor[token_start..];
     let prefix = token.strip_prefix('@')?;
