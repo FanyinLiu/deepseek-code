@@ -682,6 +682,11 @@ pub struct ReasoningState {
     pub effort: ReasoningEffort,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_model: Option<DeepSeekModel>,
+    /// Ephemeral per-turn auto-tier override (auto mode only). Never persisted:
+    /// the orchestrator sets it from the complexity assessment at turn start and
+    /// clears it at turn end. An explicit `selected_model` pin always wins.
+    #[serde(skip)]
+    pub auto_tier_model: Option<DeepSeekModel>,
     pub active_tool_turn: Option<ToolTurnId>,
     pub preserved_assistant_messages: Vec<MessageId>,
     pub last_cleanup_at_turn: Option<TurnId>,
@@ -693,6 +698,7 @@ impl Default for ReasoningState {
             mode: ThinkingMode::Auto,
             effort: ReasoningEffort::default(),
             selected_model: None,
+            auto_tier_model: None,
             active_tool_turn: None,
             preserved_assistant_messages: Vec::new(),
             last_cleanup_at_turn: None,
@@ -706,6 +712,9 @@ impl ReasoningState {
     #[must_use]
     pub fn effective_model(&self) -> DeepSeekModel {
         if let Some(model) = &self.selected_model {
+            return model.canonical();
+        }
+        if let Some(model) = &self.auto_tier_model {
             return model.canonical();
         }
         match self.effort {
@@ -856,5 +865,29 @@ mod tests {
         };
 
         assert_eq!(state.effective_model(), DeepSeekModel::Pro);
+    }
+
+    #[test]
+    fn explicit_pin_overrides_auto_tier() {
+        let state = ReasoningState {
+            effort: ReasoningEffort::Max,
+            selected_model: Some(DeepSeekModel::Pro),
+            auto_tier_model: Some(DeepSeekModel::Flash),
+            ..ReasoningState::default()
+        };
+
+        assert_eq!(state.effective_model(), DeepSeekModel::Pro);
+    }
+
+    #[test]
+    fn auto_tier_downgrades_unpinned_effort_default() {
+        let state = ReasoningState {
+            effort: ReasoningEffort::Max, // would otherwise resolve to Pro
+            selected_model: None,
+            auto_tier_model: Some(DeepSeekModel::Flash),
+            ..ReasoningState::default()
+        };
+
+        assert_eq!(state.effective_model(), DeepSeekModel::Flash);
     }
 }

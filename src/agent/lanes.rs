@@ -122,8 +122,8 @@ fn has_local_context_intent(input: &str) -> bool {
 /// verbs to avoid pulling pure-chat prompts onto the tool lane.
 fn has_edit_intent(input: &str) -> bool {
     const NEEDLES: &[&str] = &[
-        "修复", "修改", "更改", "改成", "改为", "重构", "重写", "实现", "添加", "新增",
-        "删除", "移除", "更新",
+        "修复", "修改", "更改", "改成", "改为", "重构", "重写", "实现", "添加", "新增", "删除",
+        "移除", "更新",
     ];
     NEEDLES.iter().any(|needle| input.contains(needle))
 }

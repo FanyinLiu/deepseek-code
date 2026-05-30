@@ -1580,6 +1580,7 @@ impl Orchestrator {
             .await;
         self.current_turn_allowed_tools = None;
         self.cached_turn_config = None;
+        self.session.reasoning_state.auto_tier_model = None;
         result
     }
 
@@ -1674,6 +1675,15 @@ impl Orchestrator {
             crate::telemetry::events::log_complexity_assessed(&assessment, &self.session.id);
             (Some(assessment), shadow_mode)
         };
+
+        // 2b. Auto model tiering (auto mode only): keep complex/plan work on the
+        // effort-based default (Pro), but downgrade clearly-lightweight direct
+        // tasks to Flash to save cost. An explicit pin always wins; cleared at
+        // turn end in `run_turn_inner`.
+        self.session.reasoning_state.auto_tier_model = auto_tier_model_for(
+            self.session.reasoning_state.selected_model.is_some(),
+            assessment.as_ref(),
+        );
 
         // 3. Route decision
         if let Some(ref a) = assessment {
@@ -3392,6 +3402,37 @@ fn assessment_implies_edits(a: &ComplexityAssessment) -> bool {
         })
 }
 
+/// Pick an ephemeral per-turn model tier for auto mode (no explicit pin).
+///
+/// Returns `Some(Flash)` to downgrade a clearly-lightweight direct task so it
+/// does not burn the expensive Pro model; returns `None` to leave the
+/// effort-based default in place (complex/plan tasks, pinned sessions, or when
+/// the router did not run).
+fn auto_tier_model_for(
+    has_pinned_model: bool,
+    assessment: Option<&ComplexityAssessment>,
+) -> Option<DeepSeekModel> {
+    // An explicit user pin is authoritative — never auto-tier over it.
+    if has_pinned_model {
+        return None;
+    }
+    let a = assessment?;
+    if a.route == Route::DirectExecute && assessment_is_lightweight(a) {
+        return Some(DeepSeekModel::Flash);
+    }
+    None
+}
+
+/// Whether a direct-execute assessment is light enough to run on Flash: no risk
+/// flags, no commands, at most one file write, and only read-only /
+/// single-file-safe reason codes.
+fn assessment_is_lightweight(a: &ComplexityAssessment) -> bool {
+    a.risk_flags.is_empty()
+        && a.predicted_commands == 0
+        && a.predicted_write_files <= 1
+        && a.reason_codes.iter().all(|r| r.is_safe_for_direct())
+}
+
 fn swarm_patch_approval_details(
     result: &crate::agent::swarm::SwarmResult,
     changed_files: &[String],
@@ -3969,7 +4010,7 @@ fn summarize_parent_context(session: &Session) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        changed_files_for_tool_call, emit_stream_chunk_deltas,
+        auto_tier_model_for, changed_files_for_tool_call, emit_stream_chunk_deltas,
         emit_stream_chunk_deltas_with_options, event_changed_files_for_tool_result,
         generate_plan_options, is_contextual_followup_request, plan_execution_context,
         plan_execution_prompt, plan_or_input_uses_chinese, plan_uses_chinese, resolve_lane,
@@ -3980,9 +4021,9 @@ mod tests {
     use crate::agent::swarm::{SwarmAgentRole, SwarmPendingPatch, SwarmResult};
     use crate::agent::tool_loop::ToolLoopResult;
     use crate::deepseek::models::{
-        MessageContent, MessageId, MessageVisibility, ProtocolMessage, ReasoningState, Role,
-        Session, SessionId, SessionMetadata, StreamChunk, ToolCall, ToolCallFunction,
-        ToolResultRecord, TurnId,
+        DeepSeekModel, MessageContent, MessageId, MessageVisibility, ProtocolMessage,
+        ReasoningState, Role, Session, SessionId, SessionMetadata, StreamChunk, ToolCall,
+        ToolCallFunction, ToolResultRecord, TurnId,
     };
     use crate::plan::executor::PlanStep;
     use crate::plan::schema::{Plan, Risk, RiskLevel};
@@ -4044,6 +4085,42 @@ mod tests {
             resolve_lane(&TaskClass::Execute, None),
             ExecutionLane::ToolLoopThinking
         );
+    }
+
+    #[test]
+    fn auto_tier_downgrades_lightweight_direct_task_to_flash() {
+        // Unpinned, simple direct task → run it on Flash to save cost.
+        let a = direct_execute_assessment();
+        assert_eq!(
+            auto_tier_model_for(false, Some(&a)),
+            Some(DeepSeekModel::Flash)
+        );
+    }
+
+    #[test]
+    fn auto_tier_keeps_base_model_for_pin_heavy_or_complex() {
+        let a = direct_execute_assessment();
+        // Explicit pin → never tier.
+        assert_eq!(auto_tier_model_for(true, Some(&a)), None);
+
+        // Multi-file / write-heavy direct task → keep the base (Pro) model.
+        let mut heavy = direct_execute_assessment();
+        heavy.predicted_write_files = 3;
+        heavy.reason_codes.push(ReasonCode::MultiFile);
+        assert_eq!(auto_tier_model_for(false, Some(&heavy)), None);
+
+        // A task that runs commands stays on the base model.
+        let mut cmd = direct_execute_assessment();
+        cmd.predicted_commands = 1;
+        assert_eq!(auto_tier_model_for(false, Some(&cmd)), None);
+
+        // Complex (plan-review) assessment → keep the base model.
+        let mut complex = direct_execute_assessment();
+        complex.route = Route::PlanReview;
+        assert_eq!(auto_tier_model_for(false, Some(&complex)), None);
+
+        // No assessment (forced lane / explicit plan) → no tiering.
+        assert_eq!(auto_tier_model_for(false, None), None);
     }
 
     fn sample_plan_state() -> PlanExecutionState {
