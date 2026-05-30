@@ -6359,9 +6359,12 @@ fn mention_prefix_at_cursor(text: &str, cursor_pos: usize) -> Option<FileMention
             quoted: true,
         });
     }
-    let token_start = before_cursor
-        .rfind(char::is_whitespace)
-        .map_or(0, |idx| idx + 1);
+    let token_start = before_cursor.rfind(char::is_whitespace).map_or(0, |idx| {
+        // Advance past the whitespace char itself. It may be multi-byte (e.g.
+        // U+3000 ideographic space, common in CJK input), so a bare `idx + 1`
+        // would land inside the char and panic when slicing below.
+        idx + before_cursor[idx..].chars().next().map_or(1, char::len_utf8)
+    });
     let token = &before_cursor[token_start..];
     let prefix = token.strip_prefix('@')?;
     if prefix.starts_with('"') {
@@ -9311,6 +9314,18 @@ mod tests {
             app.input_for_interaction_mode("inspect workspace".into()),
             "/review inspect workspace"
         );
+    }
+
+    #[test]
+    fn mention_prefix_handles_multibyte_whitespace_before_token() {
+        // U+3000 ideographic space (3 bytes) is common in CJK input. Finding
+        // the token start must advance past the whole whitespace char, not a
+        // single byte, or slicing panics on a non-char-boundary.
+        let text = "你好\u{3000}@src/main";
+        let cursor = text.chars().count();
+        let mention = mention_prefix_at_cursor(text, cursor).expect("mention detected");
+        assert_eq!(mention.prefix, "src/main");
+        assert!(!mention.quoted);
     }
 
     #[test]
