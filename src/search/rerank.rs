@@ -49,6 +49,7 @@ pub async fn deepseek_rerank(
         response_format: None,
         stream: false,
         max_tokens: Some(2000),
+        temperature: Some(0.0),
     };
 
     let response = client.chat_with_retry(&request).await?;

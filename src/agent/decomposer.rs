@@ -70,6 +70,7 @@ impl LlmDecomposer {
             thinking: Some(ThinkingConfig::disabled()),
             stream: false,
             max_tokens: Some(4096),
+            temperature: Some(0.0),
             tools: None,
         };
 

@@ -20,4 +20,4 @@ pub use models::{
     ToolCall, ToolCallDeltaAccumulated, ToolCallFunction, ToolCallRecord, ToolDefinition,
     ToolResultRecord, ToolTurnId, TurnId, Usage,
 };
-pub use thinking::thinking_config_for_lane;
+pub use thinking::{temperature_for_lane, thinking_config_for_lane};

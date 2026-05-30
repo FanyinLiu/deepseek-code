@@ -9,10 +9,10 @@ use tokio::sync::mpsc;
 use crate::deepseek::client::{ChatStreamClient, DeepSeekClient};
 use crate::deepseek::tools as ds_tools;
 use crate::deepseek::{
-    thinking_config_for_lane, CacheUsage, ChatRequest, DeepSeekModel, ExecutionLane, FinishReason,
-    MessageContent, MessageId, MessageVisibility, ModelCapability, ProtocolMessage, Role, Session,
-    SessionId, StreamResult, SubTurnId, ThinkingConfig, ToolCall, ToolCallFunction, ToolDefinition,
-    ToolResultRecord, TurnId, Usage,
+    temperature_for_lane, thinking_config_for_lane, CacheUsage, ChatRequest, DeepSeekModel,
+    ExecutionLane, FinishReason, MessageContent, MessageId, MessageVisibility, ModelCapability,
+    ProtocolMessage, Role, Session, SessionId, StreamResult, SubTurnId, ThinkingConfig, ToolCall,
+    ToolCallFunction, ToolDefinition, ToolResultRecord, TurnId, Usage,
 };
 use crate::hooks::{HookEvent, HookPayload, HookRunSummary};
 use crate::plan;
@@ -1844,6 +1844,7 @@ impl Orchestrator {
 
         let request = ChatRequest {
             model: cap.model.to_string(),
+            temperature: temperature_for_lane(&lane),
             messages,
             tools: if send_tools {
                 Some(effective_tools)
@@ -2295,6 +2296,7 @@ impl Orchestrator {
 
                 let request = ChatRequest {
                     model: cap.model.to_string(),
+                    temperature: Some(0.0),
                     messages,
                     tools: Some(tool_defs),
                     thinking: thinking_config,
@@ -2976,6 +2978,7 @@ impl Orchestrator {
 
         let followup_request = ChatRequest {
             model: self.session.reasoning_state.effective_model().to_string(),
+            temperature: Some(0.0),
             messages,
             tools: Some(tool_defs),
             thinking: Some(ThinkingConfig::enabled()),

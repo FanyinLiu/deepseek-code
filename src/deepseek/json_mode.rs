@@ -43,6 +43,7 @@ pub fn json_request(
         response_format: Some(ResponseFormat::json_object()),
         stream: false,
         max_tokens: Some(4096),
+        temperature: Some(0.0),
     }
 }
 

@@ -826,6 +826,7 @@ impl SwarmCoordinator {
             response_format: Some(ResponseFormat::json_object()),
             stream: false,
             max_tokens: Some(4096),
+            temperature: Some(0.0),
         };
         let response = self.client.chat_with_retry(&request).await?;
         parse_json_response(&response)

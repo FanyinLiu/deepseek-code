@@ -6260,6 +6260,7 @@ fn side_chat_request(system: &str, user: &str, max_tokens: u32) -> ChatRequest {
         response_format: None,
         stream: false,
         max_tokens: Some(max_tokens),
+        temperature: None,
     }
 }
 

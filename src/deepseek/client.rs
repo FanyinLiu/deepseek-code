@@ -489,6 +489,7 @@ mod tests {
             response_format: None,
             stream: true,
             max_tokens: None,
+            temperature: None,
         }
     }
 

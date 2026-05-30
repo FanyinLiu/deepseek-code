@@ -62,6 +62,7 @@ pub async fn classify_with_model(
         response_format: Some(ResponseFormat::json_object()),
         stream: false,
         max_tokens: Some(4096),
+        temperature: Some(0.0),
     };
 
     // Attempt with retry

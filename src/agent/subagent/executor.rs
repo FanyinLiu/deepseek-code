@@ -15,9 +15,9 @@ use crate::deepseek::client::{ChatStreamClient, DeepSeekClient};
 use crate::deepseek::models::StreamChunk;
 use crate::deepseek::tools as ds_tools;
 use crate::deepseek::{
-    ChatRequest, ExecutionLane, MessageContent, MessageId, MessageVisibility, ProtocolMessage,
-    ReasoningState, Role, Session, SessionId, SessionMetadata, SubTurnId, ThinkingConfig, ToolCall,
-    ToolCallRecord, ToolResultRecord, TurnId,
+    temperature_for_lane, ChatRequest, ExecutionLane, MessageContent, MessageId, MessageVisibility,
+    ProtocolMessage, ReasoningState, Role, Session, SessionId, SessionMetadata, SubTurnId,
+    ThinkingConfig, ToolCall, ToolCallRecord, ToolResultRecord, TurnId,
 };
 use crate::runtime::tool_runtime::{
     ApprovalFuture, ApprovalOutcome, ApprovalResolver, ToolRuntime, ToolRuntimeBackend,
@@ -199,6 +199,7 @@ impl SubagentExecutor {
                 // Same 32K budget rationale as the parent turn — reasoning
                 // can chew through 8K alone, leaving no room for the answer.
                 max_tokens: Some(32_768),
+                temperature: temperature_for_lane(&lane),
             };
 
             send_request_token_delta(event_tx, &request);

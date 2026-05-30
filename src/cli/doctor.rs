@@ -275,6 +275,7 @@ fn base_request(model: &str, prompt: &str, stream: bool) -> ChatRequest {
         response_format: None,
         stream,
         max_tokens: Some(32),
+        temperature: None,
     }
 }
 

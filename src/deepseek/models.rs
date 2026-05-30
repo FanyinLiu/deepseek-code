@@ -246,6 +246,10 @@ pub struct ChatRequest {
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Sampling temperature. DeepSeek recommends 0.0 for coding/math; thinking
+    /// turns ignore it, so it only affects non-thinking model calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
 }
 
 #[must_use]

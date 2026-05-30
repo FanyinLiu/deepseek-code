@@ -1037,6 +1037,7 @@ impl EvolutionStore {
             response_format: Some(ResponseFormat::json_object()),
             stream: false,
             max_tokens: Some(1800),
+            temperature: None,
         };
         let response = client.chat_with_retry(&request).await?;
         let content = response

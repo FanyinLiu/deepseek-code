@@ -452,6 +452,7 @@ impl RepairStore {
                 response_format: Some(ResponseFormat::json_object()),
                 stream: false,
                 max_tokens: Some(4000),
+                temperature: Some(0.0),
             };
             let response = client.chat_with_retry(&request).await?;
             let content = response
