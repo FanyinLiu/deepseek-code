@@ -135,6 +135,12 @@ impl SubagentExecutor {
         let runtime_config =
             crate::storage::Config::load(Some(&self.project_root)).unwrap_or_default();
         let subagent_rules = self.effective_prompt_rules();
+        let ctx_budget = crate::provider::context_budget_for(
+            runtime_config.provider.default,
+            &model,
+            runtime_config.search.max_context_tokens,
+        )
+        .effective_budget_tokens;
 
         // Determine effective tools based on allowed_tools config.
         // Subagents can spawn child agents when spawn_depth < MAX_SPAWN_DEPTH.
@@ -178,7 +184,8 @@ impl SubagentExecutor {
             turn_count += 1;
 
             // Build prompt
-            let builder = PromptBuilder::new(model.clone(), lane.clone(), true);
+            let builder = PromptBuilder::new(model.clone(), lane.clone(), true)
+                .with_context_budget(ctx_budget);
             let (_, messages) =
                 builder.build(&session, Some(&subagent_rules), None, &effective_tools);
 

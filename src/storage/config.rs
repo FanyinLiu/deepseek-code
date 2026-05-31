@@ -560,7 +560,10 @@ fn default_max_results() -> usize {
     50
 }
 fn default_max_context_tokens() -> usize {
-    12000
+    // 0 means "use the model's full context window" (see `context_budget_for`).
+    // DeepSeek V4 is 1M tokens; the old fixed 12K cap stranded ~99% of it and
+    // forced auto-compaction at ~10K. Set an explicit positive value to cap.
+    0
 }
 fn default_command_timeout() -> u64 {
     120

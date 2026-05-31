@@ -27,6 +27,9 @@ const STEPFUN_CONTEXT_WINDOW_TOKENS: u64 = 16_000;
 const DOUBAO_SEED_CODE_CONTEXT_WINDOW_TOKENS: u64 = 256_000;
 const DOUBAO_SEED_CODE_MAX_OUTPUT_TOKENS: u64 = 32_000;
 const DEFAULT_AUTO_COMPACT_RATIO: f64 = 0.80;
+/// Conservative context budget used when a provider/model's window is unknown
+/// (so "use the full window" cannot resolve to an unsafe, oversized request).
+const UNKNOWN_WINDOW_FALLBACK_TOKENS: u64 = 32_768;
 const PROVIDER_PROFILE_LAST_VERIFIED: &str = "2026-05-21";
 
 /// Supported provider families.
@@ -446,13 +449,22 @@ pub fn context_budget_for(
     model: &DeepSeekModel,
     configured_local_budget: usize,
 ) -> ContextBudget {
-    let local_budget_tokens = (configured_local_budget as u64).max(1);
     let model_window_tokens = model_context_window_tokens(provider, model);
-    let effective_budget_tokens = model_window_tokens
-        .map_or(local_budget_tokens, |window| {
-            window.min(local_budget_tokens)
-        })
-        .max(1);
+    // A configured budget of 0 means "use the model's full context window"
+    // (with a safe fallback when the window is unknown). A positive value is an
+    // explicit user cap, clamped down to the window when it is known.
+    let effective_budget_tokens = if configured_local_budget == 0 {
+        model_window_tokens.unwrap_or(UNKNOWN_WINDOW_FALLBACK_TOKENS)
+    } else {
+        let local = configured_local_budget as u64;
+        model_window_tokens.map_or(local, |window| window.min(local))
+    }
+    .max(1);
+    let local_budget_tokens = if configured_local_budget == 0 {
+        effective_budget_tokens
+    } else {
+        (configured_local_budget as u64).max(1)
+    };
     let auto_compact_threshold_tokens =
         ((effective_budget_tokens as f64) * DEFAULT_AUTO_COMPACT_RATIO).round() as u64;
     ContextBudget {
@@ -1000,6 +1012,22 @@ mod tests {
         assert_eq!(budget.model_window_tokens, None);
         assert_eq!(budget.effective_budget_tokens, 32_000);
         assert_eq!(budget.auto_compact_threshold_tokens, 25_600);
+    }
+
+    #[test]
+    fn context_budget_zero_uses_full_model_window() {
+        let budget = context_budget_for(ProviderKind::DeepSeek, &DeepSeekModel::Pro, 0);
+
+        assert_eq!(budget.effective_budget_tokens, 1_000_000);
+        assert_eq!(budget.auto_compact_threshold_tokens, 800_000);
+    }
+
+    #[test]
+    fn context_budget_zero_falls_back_safely_for_unknown_window() {
+        let budget = context_budget_for(ProviderKind::OpenAiCompatible, &DeepSeekModel::Flash, 0);
+
+        assert_eq!(budget.model_window_tokens, None);
+        assert_eq!(budget.effective_budget_tokens, 32_768);
     }
 
     #[test]

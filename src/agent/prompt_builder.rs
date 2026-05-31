@@ -17,6 +17,10 @@ pub struct PromptBuilder {
     pub model: DeepSeekModel,
     pub lane: ExecutionLane,
     pub stable_prefix_enabled: bool,
+    /// Effective context budget (tokens) for history pruning. When set, prune
+    /// uses ~90% of it as a hard backstop above the 80% auto-compaction
+    /// threshold; when `None`, a conservative per-model default is used.
+    pub context_budget_tokens: Option<u64>,
 }
 
 impl PromptBuilder {
@@ -26,7 +30,16 @@ impl PromptBuilder {
             model,
             lane,
             stable_prefix_enabled,
+            context_budget_tokens: None,
         }
+    }
+
+    /// Set the effective context budget so history pruning tracks the model's
+    /// real window instead of a fixed conservative cap.
+    #[must_use]
+    pub fn with_context_budget(mut self, tokens: u64) -> Self {
+        self.context_budget_tokens = Some(tokens);
+        self
     }
 
     /// Build messages for an API request.
@@ -132,10 +145,17 @@ impl PromptBuilder {
     /// Prune protocol messages to fit within the model's context window.
     /// Preserves complete turns (grouped by turn_id) from the end of the conversation.
     fn prune_protocol_messages(&self, messages: &mut Vec<ProtocolMessage>, system_tokens: usize) {
-        let max_tokens: usize = match self.model {
-            DeepSeekModel::Pro => 50_000,
-            DeepSeekModel::Flash => 25_000,
-            DeepSeekModel::LegacyChat | DeepSeekModel::LegacyReasoner => 20_000,
+        let max_tokens: usize = match self.context_budget_tokens {
+            // ~90% of the real budget: a hard backstop that sits above the 80%
+            // auto-compaction threshold, so intelligent compaction trims first
+            // and this dumb truncation only fires if context still overflows.
+            Some(budget) => (budget / 10 * 9) as usize,
+            // Fallback for callers that don't supply a budget (e.g. tests).
+            None => match self.model {
+                DeepSeekModel::Pro => 50_000,
+                DeepSeekModel::Flash => 25_000,
+                DeepSeekModel::LegacyChat | DeepSeekModel::LegacyReasoner => 20_000,
+            },
         };
         let budget = max_tokens.saturating_sub(system_tokens);
 

@@ -1410,6 +1410,21 @@ impl Orchestrator {
         self.mcp_initialized
     }
 
+    /// Effective context budget (tokens) for the active provider/model, used to
+    /// size history pruning against the real window rather than a fixed cap.
+    fn effective_context_budget_tokens(&mut self) -> u64 {
+        let (provider, max_context) = {
+            let config = self.turn_config();
+            (config.provider.default, config.search.max_context_tokens)
+        };
+        crate::provider::context_budget_for(
+            provider,
+            &self.session.reasoning_state.effective_model(),
+            max_context,
+        )
+        .effective_budget_tokens
+    }
+
     /// Get all tool definitions, including standard tools and MCP tools.
     fn get_all_tools(&self) -> Vec<ToolDefinition> {
         let mut tools = ds_tools::standard_tool_definitions();
@@ -1833,6 +1848,7 @@ impl Orchestrator {
 
         let session_events = self.load_session_events();
         let (_, messages) = PromptBuilder::new(cap.model.clone(), lane.clone(), true)
+            .with_context_budget(budget.effective_budget_tokens)
             .build_with_events_and_context(
                 &self.session,
                 Some(&session_events),
@@ -2283,8 +2299,10 @@ impl Orchestrator {
                 );
 
                 let session_events = self.load_session_events();
+                let ctx_budget = self.effective_context_budget_tokens();
                 let (_, messages) =
                     PromptBuilder::new(cap.model.clone(), ExecutionLane::ToolLoopThinking, true)
+                        .with_context_budget(ctx_budget)
                         .build_with_events_and_context(
                             &self.session,
                             Some(&session_events),
@@ -2963,11 +2981,13 @@ impl Orchestrator {
         let tool_defs = self.get_all_tools();
         let project_rules = load_project_rules(&self.project_root);
         let session_events = self.load_session_events();
+        let ctx_budget = self.effective_context_budget_tokens();
         let (_, messages) = PromptBuilder::new(
             self.session.reasoning_state.effective_model(),
             ExecutionLane::ToolLoopThinking,
             true,
         )
+        .with_context_budget(ctx_budget)
         .build_with_events(
             &self.session,
             Some(&session_events),
