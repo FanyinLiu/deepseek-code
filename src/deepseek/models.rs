@@ -254,8 +254,55 @@ pub struct ChatRequest {
 
 #[must_use]
 pub fn estimate_chat_request_tokens(request: &ChatRequest) -> u64 {
-    let payload = serde_json::to_string(request).unwrap_or_default();
-    estimate_tokenish_count(&payload)
+    // Estimate in place over the structured request. Serializing the whole
+    // request to a String first (the old approach) allocated a multi-hundred-KB
+    // buffer every turn once the context window grew — wasteful for a rough
+    // preview whose real value comes back in the API usage anyway.
+    let mut total: u64 = 0;
+    for msg in &request.messages {
+        total = total.saturating_add(estimate_tokenish_count(&msg.role));
+        if let Some(content) = &msg.content {
+            total = total.saturating_add(estimate_content_tokens(content));
+        }
+        if let Some(reasoning) = &msg.reasoning_content {
+            total = total.saturating_add(estimate_tokenish_count(reasoning));
+        }
+        if let Some(tool_calls) = &msg.tool_calls {
+            for tc in tool_calls {
+                total = total.saturating_add(estimate_tokenish_count(&tc.function.name));
+                total = total.saturating_add(estimate_tokenish_count(&tc.function.arguments));
+            }
+        }
+        if let Some(name) = &msg.name {
+            total = total.saturating_add(estimate_tokenish_count(name));
+        }
+        if let Some(id) = &msg.tool_call_id {
+            total = total.saturating_add(estimate_tokenish_count(id));
+        }
+    }
+    if let Some(tools) = &request.tools {
+        for tool in tools {
+            total = total.saturating_add(estimate_tokenish_count(&tool.function.name));
+            total = total.saturating_add(estimate_tokenish_count(&tool.function.description));
+            // Tool schemas are small and bounded (a fixed roster), so a rough
+            // estimate of the serialized params is cheap and keeps overhead.
+            total = total.saturating_add(estimate_tokenish_count(
+                &tool.function.parameters.to_string(),
+            ));
+        }
+    }
+    total.max(1)
+}
+
+fn estimate_content_tokens(content: &ChatMessageContent) -> u64 {
+    match content {
+        ChatMessageContent::Text(text) => estimate_tokenish_count(text),
+        ChatMessageContent::Parts(parts) => parts
+            .iter()
+            .filter_map(|part| part.text.as_deref())
+            .map(estimate_tokenish_count)
+            .fold(0u64, u64::saturating_add),
+    }
 }
 
 #[must_use]
@@ -885,6 +932,32 @@ mod tests {
         // Empty stays zero; a tiny input still rounds up to at least 1.
         assert_eq!(estimate_tokenish_count(""), 0);
         assert_eq!(estimate_tokenish_count("a"), 1);
+    }
+
+    #[test]
+    fn chat_request_token_estimate_counts_content_not_json_overhead() {
+        let request = ChatRequest {
+            model: "deepseek-v4-flash".into(),
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: Some(ChatMessageContent::Text("a".repeat(100))),
+                reasoning_content: None,
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            }],
+            tools: None,
+            thinking: None,
+            response_format: None,
+            stream: true,
+            max_tokens: None,
+            temperature: None,
+        };
+
+        // ~0.3 tokens/char for the 100-char body plus a couple for the role —
+        // it reflects the actual content, not an inflated JSON envelope.
+        let estimate = estimate_chat_request_tokens(&request);
+        assert!((30..=40).contains(&estimate), "got {estimate}");
     }
 
     #[test]
