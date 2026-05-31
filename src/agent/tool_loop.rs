@@ -3,11 +3,13 @@ use std::path::Path;
 use chrono::Utc;
 use tokio::sync::mpsc;
 
-use crate::deepseek::{Session, SubTurnId, ToolCall, ToolCallRecord, ToolResultRecord, TurnId};
+use crate::deepseek::{
+    Session, SessionId, SubTurnId, ToolCall, ToolCallRecord, ToolResultRecord, TurnId,
+};
 use crate::policy::{PermissionMode, PolicyDecision, ToolCallSource};
 use crate::runtime::tool_runtime::{
     ApprovalFuture, ApprovalOutcome, ApprovalResolver, LocalDispatchRuntimeBackend, ToolRuntime,
-    ToolRuntimeContext,
+    ToolRuntimeContext, ToolRuntimeOutcome,
 };
 use crate::storage::{EventLogStore, SessionEvent, SessionEventKind};
 
@@ -58,40 +60,64 @@ impl ToolLoop {
         hooks_config: &crate::storage::config::HooksConfig,
         event_log_store: Option<EventLogStore>,
     ) -> Vec<ToolLoopResult> {
-        let mut results = Vec::new();
         let dispatch_config =
             crate::tools::dispatch::ToolDispatchConfig::from_policy(policy_config);
         let runtime = ToolRuntime::new(project_root, policy_config.clone());
+        let session_id = session.id;
 
-        for tc in tool_calls {
-            let mut context =
-                ToolRuntimeContext::new(session.id.to_string(), dispatch_config.clone());
-            context.session_id = Some(session.id);
-            context.turn_id = Some(turn_id);
-            context.hooks_config = Some(hooks_config);
-            let mut resolver = AgentApprovalResolver {
-                event_tx,
-                yolo_mode,
-                permission_mode,
-                subagent: None,
-            };
-            let mut backend = LocalDispatchRuntimeBackend;
-            let outcome = runtime
-                .execute(
+        // DeepSeek V4 emits parallel tool calls. When the whole batch is
+        // read-only and auto-approved (yolo), run them concurrently instead of
+        // serializing the latency; `join_all` preserves input order. Anything
+        // with side effects or an approval prompt stays strictly sequential.
+        let parallel_safe = tool_calls.len() > 1
+            && yolo_mode
+            && tool_calls
+                .iter()
+                .all(|tc| crate::tools::metadata::is_read_only(&tc.function.name));
+        let outcomes = if parallel_safe {
+            futures::future::join_all(tool_calls.iter().map(|tc| {
+                run_tool_call(
                     tc,
-                    ToolCallSource::Main,
-                    context,
-                    &mut resolver,
-                    &mut backend,
+                    &runtime,
+                    dispatch_config.clone(),
+                    session_id,
+                    turn_id,
+                    hooks_config,
+                    event_tx,
+                    yolo_mode,
+                    permission_mode,
                 )
-                .await;
+            }))
+            .await
+        } else {
+            let mut out = Vec::with_capacity(tool_calls.len());
+            for tc in tool_calls {
+                out.push(
+                    run_tool_call(
+                        tc,
+                        &runtime,
+                        dispatch_config.clone(),
+                        session_id,
+                        turn_id,
+                        hooks_config,
+                        event_tx,
+                        yolo_mode,
+                        permission_mode,
+                    )
+                    .await,
+                );
+            }
+            out
+        };
 
+        let mut results = Vec::with_capacity(tool_calls.len());
+        for (tc, outcome) in tool_calls.iter().zip(outcomes) {
             for hook_summary in &outcome.hook_summaries {
                 emit_hook_summary(
                     event_tx,
                     event_log_store.as_ref(),
                     project_root,
-                    session.id,
+                    session_id,
                     Some(turn_id),
                     hook_summary,
                 );
@@ -125,6 +151,43 @@ impl ToolLoop {
     }
 
     // execute_single_tool moved to crate::tools::dispatch
+}
+
+/// Execute one tool call through the runtime. Factored out so the batch loop
+/// can run a read-only, auto-approved batch concurrently or fall back to
+/// sequential execution with the same per-call setup.
+#[allow(clippy::too_many_arguments)]
+async fn run_tool_call<'a>(
+    tc: &'a ToolCall,
+    runtime: &'a ToolRuntime,
+    dispatch_config: crate::tools::dispatch::ToolDispatchConfig,
+    session_id: SessionId,
+    turn_id: TurnId,
+    hooks_config: &'a crate::storage::config::HooksConfig,
+    event_tx: &'a mpsc::UnboundedSender<AgentEvent>,
+    yolo_mode: bool,
+    permission_mode: PermissionMode,
+) -> ToolRuntimeOutcome {
+    let mut context = ToolRuntimeContext::new(session_id.to_string(), dispatch_config);
+    context.session_id = Some(session_id);
+    context.turn_id = Some(turn_id);
+    context.hooks_config = Some(hooks_config);
+    let mut resolver = AgentApprovalResolver {
+        event_tx,
+        yolo_mode,
+        permission_mode,
+        subagent: None,
+    };
+    let mut backend = LocalDispatchRuntimeBackend;
+    runtime
+        .execute(
+            tc,
+            ToolCallSource::Main,
+            context,
+            &mut resolver,
+            &mut backend,
+        )
+        .await
 }
 
 struct AgentApprovalResolver<'a> {
@@ -295,6 +358,52 @@ mod tests {
         assert_eq!(result.changed_files, vec!["generated.txt".to_string()]);
         assert_eq!(session.tool_call_history.len(), 1);
         assert_eq!(session.tool_call_history[0].duration_ms, result.duration_ms);
+    }
+
+    #[tokio::test]
+    async fn tool_loop_runs_read_only_batch_concurrently_in_order() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        for (name, body) in [("a.txt", "alpha"), ("b.txt", "bravo"), ("c.txt", "charlie")] {
+            std::fs::write(temp.path().join(name), body).expect("write fixture");
+        }
+        let calls: Vec<ToolCall> = ["a.txt", "b.txt", "c.txt"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| ToolCall {
+                id: format!("call-{i}"),
+                call_type: "function".into(),
+                function: ToolCallFunction {
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({ "path": name }).to_string(),
+                },
+            })
+            .collect();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = test_session(temp.path());
+
+        // yolo + all read-only → concurrent fast path; results must still map
+        // back to the calls in the original order.
+        let results = ToolLoop::execute_tools_with_approval(
+            &calls,
+            temp.path(),
+            TurnId::new_v4(),
+            SubTurnId::new_v4(),
+            &mut session,
+            &tx,
+            true,
+            PermissionMode::Default,
+            &crate::storage::config::PolicyConfig::default(),
+            &crate::storage::config::HooksConfig::default(),
+            None,
+        )
+        .await;
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].call.id, "call-0");
+        assert_eq!(results[1].call.id, "call-1");
+        assert_eq!(results[2].call.id, "call-2");
+        assert!(results.iter().all(|r| !r.result.is_error));
+        assert_eq!(session.tool_call_history.len(), 3);
     }
 
     #[tokio::test]
