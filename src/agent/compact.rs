@@ -1,7 +1,8 @@
 use std::collections::BTreeSet;
 
 use crate::deepseek::{
-    models::estimate_tokenish_count, MessageVisibility, ProtocolMessage, Role, Session, SubTurnId,
+    models::estimate_tokenish_count, MessageContent, MessageVisibility, ProtocolMessage, Role,
+    Session, SubTurnId,
 };
 use crate::storage::{SessionEvent, SessionEventKind};
 
@@ -197,8 +198,17 @@ fn is_active_protocol_message(
 }
 
 fn estimate_message_tokens(msg: &ProtocolMessage) -> u64 {
-    let mut total = estimate_tokenish_count(&msg.role.to_string())
-        .saturating_add(estimate_tokenish_count(&msg.content.to_string_lossy()));
+    // Count in place: this runs over every message on every turn (auto-compact
+    // check + snapshot), so allocating a String for the role and cloning the
+    // whole content via to_string_lossy would be O(history) wasted allocation.
+    let role_str = match msg.role {
+        Role::System => "system",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+    };
+    let mut total =
+        estimate_tokenish_count(role_str).saturating_add(estimate_content_tokens(&msg.content));
     if let Some(reasoning) = &msg.reasoning_content {
         total = total.saturating_add(estimate_tokenish_count(reasoning));
     }
@@ -215,6 +225,20 @@ fn estimate_message_tokens(msg: &ProtocolMessage) -> u64 {
             .saturating_add(estimate_tokenish_count(&result.result));
     }
     total
+}
+
+/// Token estimate for message content without cloning it (Text borrows the
+/// string directly; the previous `to_string_lossy` copied the whole body).
+fn estimate_content_tokens(content: &MessageContent) -> u64 {
+    match content {
+        MessageContent::None => 0,
+        MessageContent::Text(text) => estimate_tokenish_count(text),
+        MessageContent::MultiPart(parts) => parts
+            .iter()
+            .filter_map(|part| part.text.as_deref())
+            .map(estimate_tokenish_count)
+            .fold(0u64, u64::saturating_add),
+    }
 }
 
 fn deterministic_summary(
