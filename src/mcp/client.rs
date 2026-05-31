@@ -422,6 +422,9 @@ pub struct RemoteMcpClient {
     server_info: Option<Implementation>,
     timeout: Duration,
     transport: McpTransport,
+    /// Session id assigned by a Streamable HTTP server on `initialize`. When
+    /// present it must be echoed on every subsequent request (MCP spec).
+    session_id: Option<String>,
 }
 
 impl RemoteMcpClient {
@@ -445,6 +448,7 @@ impl RemoteMcpClient {
             server_info: None,
             timeout,
             transport,
+            session_id: None,
         };
 
         let init_req = InitializeRequest {
@@ -547,7 +551,7 @@ impl RemoteMcpClient {
     }
 
     async fn send_json_rpc(
-        &self,
+        &mut self,
         method: &str,
         body: String,
         expect_response: bool,
@@ -557,6 +561,9 @@ impl RemoteMcpClient {
             .post(&self.url)
             .headers(self.headers.clone())
             .header(CONTENT_TYPE, "application/json");
+        if let Some(session_id) = &self.session_id {
+            request = request.header("mcp-session-id", session_id);
+        }
         request = match self.transport {
             McpTransport::Sse => request.header(ACCEPT, "text/event-stream"),
             McpTransport::Http | McpTransport::Stdio => {
@@ -581,6 +588,15 @@ impl RemoteMcpClient {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_string();
+        // Capture a Streamable HTTP session id so it can be echoed on later
+        // requests; servers that don't use sessions simply never send it.
+        if let Some(session_id) = response
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+        {
+            self.session_id = Some(session_id.to_string());
+        }
         let text = time::timeout(
             self.timeout,
             read_limited_response_text(method, response, MAX_MCP_CONTENT_LENGTH),
@@ -768,7 +784,7 @@ where
 mod tests {
     use super::*;
     use tokio::io::BufReader as TokioBufReader;
-    use wiremock::matchers::{body_partial_json, method};
+    use wiremock::matchers::{body_partial_json, header, method};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
@@ -946,6 +962,76 @@ mod tests {
 
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "read");
+    }
+
+    #[tokio::test]
+    async fn http_client_echoes_streamable_session_id() {
+        let server = MockServer::start().await;
+        // initialize hands back a Streamable HTTP session id.
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                serde_json::json!({"method": "initialize"}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("mcp-session-id", "sess-123")
+                    .set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {
+                            "protocol_version": PROTOCOL_VERSION,
+                            "capabilities": {},
+                            "server_info": {"name": "remote", "version": "1.0"}
+                        }
+                    })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        // The follow-up calls only match if the client echoes the session id.
+        Mock::given(method("POST"))
+            .and(header("mcp-session-id", "sess-123"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "notifications/initialized"
+            })))
+            .respond_with(ResponseTemplate::new(202))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(header("mcp-session-id", "sess-123"))
+            .and(body_partial_json(
+                serde_json::json!({"method": "tools/list"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {"tools": []}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let config = McpServerConfig {
+            name: "remote".into(),
+            transport: McpTransport::Http,
+            command: None,
+            args: Vec::new(),
+            env: None,
+            cwd: None,
+            url: Some(server.uri()),
+            headers: None,
+        };
+        let mut client = McpClient::connect_with_timeout(&config, 1_000)
+            .await
+            .expect("HTTP MCP client connects");
+
+        // Succeeds only because the session id from initialize was echoed.
+        let tools = client
+            .list_tools()
+            .await
+            .expect("tools list with session id");
+        assert!(tools.is_empty());
     }
 
     #[test]
