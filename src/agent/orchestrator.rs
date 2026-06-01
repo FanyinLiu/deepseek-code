@@ -511,6 +511,8 @@ pub struct Orchestrator {
     /// auto-compact check scans only newly appended messages, not the whole
     /// history (which can be the full context window).
     token_cache: crate::agent::compact::TokenEstimateCache,
+    /// Reusable language-server pool for opt-in post-edit diagnostics.
+    lsp_pool: crate::lsp::pool::LspDiagnosticsPool,
 }
 
 impl Orchestrator {
@@ -536,6 +538,7 @@ impl Orchestrator {
             cached_turn_config: None,
             stream_override: None,
             token_cache: crate::agent::compact::TokenEstimateCache::default(),
+            lsp_pool: crate::lsp::pool::LspDiagnosticsPool::new(),
         }
     }
 
@@ -2963,6 +2966,43 @@ impl Orchestrator {
                     );
                 }
             }
+
+            // Opt-in post-edit LSP diagnostics (default off). Surfaces real
+            // errors — a hallucinated API, bad import, type error — so the model
+            // can self-correct. Unlike build/test self-verification it needs no
+            // command approval, so it also covers the default interactive mode.
+            // Fail-safe: disabled or no working server → no-op.
+            let lsp_config = self.turn_config().lsp.clone();
+            if lsp_config.enabled {
+                let changed: Vec<String> = results
+                    .iter()
+                    .filter(|tool_result| !tool_result.result.is_error)
+                    .flat_map(|tool_result| tool_result.changed_files.iter().cloned())
+                    .collect();
+                if !changed.is_empty() {
+                    let diagnostics = self
+                        .lsp_pool
+                        .diagnostics(&self.project_root, &changed, &lsp_config)
+                        .await;
+                    if let Some(report) = format_diagnostics_report(&diagnostics) {
+                        self.session.messages.push(ProtocolMessage {
+                            id: MessageId::new_v4(),
+                            role: Role::System,
+                            content: MessageContent::from(format!("[Diagnostics] {report}")),
+                            reasoning_content: None,
+                            tool_calls: Vec::new(),
+                            tool_results: Vec::new(),
+                            turn_id,
+                            sub_turn_id: None,
+                            visibility: MessageVisibility::InternalProtocolState,
+                        });
+                        send_event(
+                            event_tx,
+                            AgentEvent::ContentDelta(format!("\n[Diagnostics] {report}\n")),
+                        );
+                    }
+                }
+            }
         }
 
         // Advance plan execution step tracker after each tool batch
@@ -3461,6 +3501,31 @@ fn assessment_is_lightweight(a: &ComplexityAssessment) -> bool {
         && a.predicted_commands == 0
         && a.predicted_write_files <= 1
         && a.reason_codes.iter().all(|r| r.is_safe_for_direct())
+}
+
+/// Build a model-facing report of post-edit diagnostics, errors only (warnings
+/// are noise for self-correction) and capped per file. `None` when there are no
+/// errors, so a clean edit is never nagged.
+fn format_diagnostics_report(
+    diagnostics: &[(String, Vec<crate::lsp::client::Diagnostic>)],
+) -> Option<String> {
+    let mut report = String::new();
+    for (file, diags) in diagnostics {
+        let errors: Vec<_> = diags.iter().filter(|diag| diag.is_error()).collect();
+        if errors.is_empty() {
+            continue;
+        }
+        report.push_str(&format!("{file}:\n"));
+        for diag in errors.iter().take(10) {
+            report.push_str(&format!("  {diag}\n"));
+        }
+    }
+    if report.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "The last edit introduced errors — fix them before continuing:\n{report}"
+    ))
 }
 
 fn swarm_patch_approval_details(
@@ -4042,11 +4107,11 @@ mod tests {
     use super::{
         auto_tier_model_for, changed_files_for_tool_call, emit_stream_chunk_deltas,
         emit_stream_chunk_deltas_with_options, event_changed_files_for_tool_result,
-        generate_plan_options, is_contextual_followup_request, plan_execution_context,
-        plan_execution_prompt, plan_or_input_uses_chinese, plan_uses_chinese, resolve_lane,
-        swarm_patch_approval_details, validate_swarm_patch_for_auto_apply, AgentEvent,
-        ComplexityAssessment, ContextualTurnInput, ExecutionLane, PlanExecutionState,
-        PlanStepStatus, ReasonCode, Route, TaskClass,
+        format_diagnostics_report, generate_plan_options, is_contextual_followup_request,
+        plan_execution_context, plan_execution_prompt, plan_or_input_uses_chinese,
+        plan_uses_chinese, resolve_lane, swarm_patch_approval_details,
+        validate_swarm_patch_for_auto_apply, AgentEvent, ComplexityAssessment, ContextualTurnInput,
+        ExecutionLane, PlanExecutionState, PlanStepStatus, ReasonCode, Route, TaskClass,
     };
     use crate::agent::swarm::{SwarmAgentRole, SwarmPendingPatch, SwarmResult};
     use crate::agent::tool_loop::ToolLoopResult;
@@ -4151,6 +4216,36 @@ mod tests {
 
         // No assessment (forced lane / explicit plan) → no tiering.
         assert_eq!(auto_tier_model_for(false, None), None);
+    }
+
+    #[test]
+    fn diagnostics_report_lists_errors_and_skips_clean_or_warning_only() {
+        use crate::lsp::client::{Diagnostic, DiagnosticSeverity};
+        let error = Diagnostic {
+            line: 12,
+            character: 5,
+            severity: DiagnosticSeverity::Error,
+            message: "cannot find function `foo`".into(),
+        };
+        let warning = Diagnostic {
+            line: 1,
+            character: 1,
+            severity: DiagnosticSeverity::Warning,
+            message: "unused import".into(),
+        };
+
+        let report = format_diagnostics_report(&[(
+            "src/main.rs".into(),
+            vec![error.clone(), warning.clone()],
+        )])
+        .expect("errors should be reported");
+        assert!(report.contains("src/main.rs"));
+        assert!(report.contains("cannot find function"));
+        assert!(!report.contains("unused import")); // warnings are excluded
+
+        // Warnings-only or empty → no report (a clean edit is never nagged).
+        assert!(format_diagnostics_report(&[("a.rs".into(), vec![warning])]).is_none());
+        assert!(format_diagnostics_report(&[]).is_none());
     }
 
     fn sample_plan_state() -> PlanExecutionState {

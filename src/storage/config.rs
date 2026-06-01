@@ -31,6 +31,8 @@ pub struct Config {
     #[serde(default)]
     pub router: RouterConfig,
     #[serde(default)]
+    pub lsp: LspConfig,
+    #[serde(default)]
     pub profiles: std::collections::BTreeMap<String, ProfileConfig>,
     #[serde(default)]
     pub subagent: SubagentConfig,
@@ -398,6 +400,19 @@ pub struct RouterConfig {
     pub confidence_threshold: f64,
     #[serde(default)]
     pub shadow_mode: bool,
+}
+
+/// Post-edit LSP diagnostics. Off by default and inert until a language server
+/// is configured — it requires the server binary to be installed locally.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LspConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Language id → server command, e.g. `rust = ["rust-analyzer"]` or
+    /// `python = ["pyright-langserver", "--stdio"]`. Languages with no entry
+    /// are skipped.
+    #[serde(default)]
+    pub servers: std::collections::HashMap<String, Vec<String>>,
 }
 
 /// Subagent system configuration.
@@ -819,6 +834,7 @@ impl Config {
             subagent,
             mcp,
             hooks,
+            lsp,
         } = self;
 
         let search = match patch.search {
@@ -863,6 +879,7 @@ impl Config {
             subagent,
             mcp: mcp.merge_mcp(patch.mcp),
             hooks: hooks.merge_hooks(patch.hooks),
+            lsp,
         }
     }
 }

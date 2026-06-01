@@ -115,6 +115,26 @@ fn path_to_uri(path: &str) -> String {
     }
 }
 
+/// LSP language id for a file path — used both as the config key for picking a
+/// server and as the `languageId` sent in `didOpen`. `None` for extensions we
+/// don't map.
+#[must_use]
+pub fn language_id_for_path(path: &str) -> Option<&'static str> {
+    let ext = std::path::Path::new(path).extension()?.to_str()?;
+    Some(match ext.to_ascii_lowercase().as_str() {
+        "rs" => "rust",
+        "py" | "pyi" => "python",
+        "ts" => "typescript",
+        "tsx" => "typescriptreact",
+        "js" | "mjs" | "cjs" => "javascript",
+        "jsx" => "javascriptreact",
+        "go" => "go",
+        "c" | "h" => "c",
+        "cc" | "cpp" | "cxx" | "hpp" | "hh" => "cpp",
+        _ => return None,
+    })
+}
+
 impl LspClient {
     pub async fn start(
         command: &str,
@@ -126,6 +146,7 @@ impl LspClient {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("spawning LSP server: {}", command))?;
 
@@ -475,6 +496,16 @@ mod tests {
         assert!(parse_publish_diagnostics(&msg, "file:///other.rs").is_empty());
         let reply = json!({"jsonrpc":"2.0","id":4,"result":{}});
         assert!(parse_publish_diagnostics(&reply, "file:///src/main.rs").is_empty());
+    }
+
+    #[test]
+    fn language_id_maps_known_extensions() {
+        assert_eq!(language_id_for_path("src/main.rs"), Some("rust"));
+        assert_eq!(language_id_for_path("/abs/app.py"), Some("python"));
+        assert_eq!(language_id_for_path("a/b/c.tsx"), Some("typescriptreact"));
+        assert_eq!(language_id_for_path("x.go"), Some("go"));
+        assert_eq!(language_id_for_path("README.md"), None);
+        assert_eq!(language_id_for_path("Makefile"), None);
     }
 
     #[tokio::test]
