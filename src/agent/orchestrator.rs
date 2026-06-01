@@ -507,6 +507,10 @@ pub struct Orchestrator {
     /// turns stream through it instead of `client`, so the turn loop can be
     /// exercised without a network round-trip. `None` in production.
     stream_override: Option<Arc<dyn ChatStreamClient>>,
+    /// Incremental cache for the session token estimate so the per-turn
+    /// auto-compact check scans only newly appended messages, not the whole
+    /// history (which can be the full context window).
+    token_cache: crate::agent::compact::TokenEstimateCache,
 }
 
 impl Orchestrator {
@@ -531,6 +535,7 @@ impl Orchestrator {
             current_turn_allowed_tools: None,
             cached_turn_config: None,
             stream_override: None,
+            token_cache: crate::agent::compact::TokenEstimateCache::default(),
         }
     }
 
@@ -1335,7 +1340,9 @@ impl Orchestrator {
         turn_id: TurnId,
         event_tx: &mpsc::UnboundedSender<AgentEvent>,
     ) -> bool {
-        if !should_auto_compact(&self.session, events, threshold_tokens) {
+        let session_tokens =
+            crate::agent::compact::session_tokens_incremental(&self.session, &mut self.token_cache);
+        if !should_auto_compact(&self.session, events, threshold_tokens, session_tokens) {
             return false;
         }
 

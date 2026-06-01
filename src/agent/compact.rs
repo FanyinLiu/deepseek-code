@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use crate::deepseek::{
     models::estimate_tokenish_count, MessageContent, MessageVisibility, ProtocolMessage, Role,
-    Session, SubTurnId,
+    Session, SessionId, SubTurnId,
 };
 use crate::storage::{SessionEvent, SessionEventKind};
 
@@ -84,6 +84,51 @@ pub fn estimate_session_tokens(session: &Session) -> u64 {
     message_tokens.saturating_add(tool_history_tokens)
 }
 
+/// Incremental cache for the session token estimate, owned by the turn driver.
+/// `estimate_session_tokens` is O(history); recomputing it every turn rescans
+/// the whole conversation. Since messages and tool history are append-only
+/// between compactions, this scans only newly appended entries and recomputes
+/// from scratch only on a different session or a shrink (compaction).
+#[derive(Debug, Clone, Default)]
+pub struct TokenEstimateCache {
+    session_id: Option<SessionId>,
+    counted_messages: usize,
+    counted_tool_history: usize,
+    total: u64,
+}
+
+fn tool_record_tokens(record: &crate::deepseek::ToolCallRecord) -> u64 {
+    estimate_tokenish_count(&record.name)
+        .saturating_add(estimate_tokenish_count(&record.arguments))
+        .saturating_add(estimate_tokenish_count(&record.result_summary))
+}
+
+/// Session token estimate using `cache` to avoid rescanning unchanged history.
+/// Returns the same value as [`estimate_session_tokens`].
+#[must_use]
+pub fn session_tokens_incremental(session: &Session, cache: &mut TokenEstimateCache) -> u64 {
+    let appended_only = cache.session_id == Some(session.id)
+        && session.messages.len() >= cache.counted_messages
+        && session.tool_call_history.len() >= cache.counted_tool_history;
+    if !appended_only {
+        // First use, a different session, or a shrink (compaction): recompute.
+        cache.session_id = Some(session.id);
+        cache.counted_messages = session.messages.len();
+        cache.counted_tool_history = session.tool_call_history.len();
+        cache.total = estimate_session_tokens(session);
+        return cache.total;
+    }
+    for msg in &session.messages[cache.counted_messages..] {
+        cache.total = cache.total.saturating_add(estimate_message_tokens(msg));
+    }
+    for record in &session.tool_call_history[cache.counted_tool_history..] {
+        cache.total = cache.total.saturating_add(tool_record_tokens(record));
+    }
+    cache.counted_messages = session.messages.len();
+    cache.counted_tool_history = session.tool_call_history.len();
+    cache.total
+}
+
 #[must_use]
 pub fn has_active_tool_protocol(session: &Session) -> bool {
     session.reasoning_state.active_tool_turn.is_some()
@@ -98,10 +143,11 @@ pub fn should_auto_compact(
     session: &Session,
     events: &[SessionEvent],
     threshold_tokens: u64,
+    session_tokens: u64,
 ) -> bool {
     if threshold_tokens == 0
         || has_active_tool_protocol(session)
-        || estimate_session_tokens(session) < threshold_tokens
+        || session_tokens < threshold_tokens
     {
         return false;
     }
@@ -413,6 +459,42 @@ mod tests {
     use chrono::Utc;
 
     use super::*;
+
+    #[test]
+    fn incremental_token_estimate_matches_full_recompute() {
+        let mut session = session_with(vec![
+            message(Role::User, "hello world", MessageVisibility::UserVisible),
+            message(
+                Role::Assistant,
+                "hi there friend",
+                MessageVisibility::UserVisible,
+            ),
+            message(Role::User, &"x".repeat(200), MessageVisibility::UserVisible),
+        ]);
+        let mut cache = TokenEstimateCache::default();
+        assert_eq!(
+            session_tokens_incremental(&session, &mut cache),
+            estimate_session_tokens(&session),
+            "cold start should match full recompute"
+        );
+
+        // Appending: the cache should add only the new tail.
+        let extra = session.messages[0].clone();
+        session.messages.push(extra);
+        assert_eq!(
+            session_tokens_incremental(&session, &mut cache),
+            estimate_session_tokens(&session),
+            "after append should match full recompute"
+        );
+
+        // Shrinking (compaction): the cache must recompute from scratch.
+        session.messages.truncate(2);
+        assert_eq!(
+            session_tokens_incremental(&session, &mut cache),
+            estimate_session_tokens(&session),
+            "after shrink should match full recompute"
+        );
+    }
     use crate::deepseek::{
         MessageContent, MessageId, ReasoningState, SessionId, SessionMetadata, ToolCall,
         ToolCallFunction, TurnId,
@@ -529,7 +611,12 @@ mod tests {
             },
         );
 
-        assert!(!should_auto_compact(&session, &[compact], 10));
+        assert!(!should_auto_compact(
+            &session,
+            &[compact],
+            10,
+            estimate_session_tokens(&session)
+        ));
 
         let user = SessionEvent::new(
             session_id,
@@ -556,6 +643,11 @@ mod tests {
             user,
         ];
 
-        assert!(should_auto_compact(&session, &events, 10));
+        assert!(should_auto_compact(
+            &session,
+            &events,
+            10,
+            estimate_session_tokens(&session)
+        ));
     }
 }
