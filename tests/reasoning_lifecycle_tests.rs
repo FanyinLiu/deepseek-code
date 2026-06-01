@@ -135,18 +135,12 @@ fn test_preserve_reasoning_for_active_tool_turn() {
 
     ReasoningManager::begin_tool_turn(&mut session.reasoning_state, &session.messages[0]);
 
-    // Verify the message ID is in the preserved set
+    // Preservation is now tracked by membership: an assistant message that
+    // opened a tool turn is in the preserved set for the loop's duration.
     assert!(session
         .reasoning_state
         .preserved_assistant_messages
         .contains(&msg_id));
-
-    // should_preserve_reasoning should return true for this message
-    let last_msg = session.messages.last().expect("messages not empty");
-    assert!(ReasoningManager::should_preserve_reasoning(
-        last_msg,
-        &session.reasoning_state
-    ));
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -168,12 +162,14 @@ fn test_reasoning_not_preserved_without_tool_calls() {
 
     session.messages.push(assistant_msg);
 
-    // Even if we try to preserve, should_preserve_reasoning returns false
+    // A message with no tool calls never opens a tool turn, so it is never
+    // added to the preserved set.
     let last_msg = session.messages.last().expect("messages not empty");
-    assert!(!ReasoningManager::should_preserve_reasoning(
-        last_msg,
-        &session.reasoning_state
-    ));
+    assert!(last_msg.tool_calls.is_empty());
+    assert!(!session
+        .reasoning_state
+        .preserved_assistant_messages
+        .contains(&last_msg.id));
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
