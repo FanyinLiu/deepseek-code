@@ -88,6 +88,20 @@ simple_threshold = 40
 confidence_threshold = 0.75
 shadow_mode = false
 
+# Post-edit LSP diagnostics (off by default). When enabled, octo opens each
+# edited file with the configured language server and feeds error diagnostics
+# (e.g. a hallucinated API, bad import, type error) back so the model can fix
+# them. Requires the server binary to be installed; missing/broken servers are
+# skipped silently. Servers are started once per language and reused.
+[lsp]
+enabled = false
+# language id -> server command:
+# [lsp.servers]
+# rust = ["rust-analyzer"]
+# python = ["pyright-langserver", "--stdio"]
+# typescript = ["typescript-language-server", "--stdio"]
+# go = ["gopls"]
+
 [subagent]
 enabled = true
 swarm_enabled = true
