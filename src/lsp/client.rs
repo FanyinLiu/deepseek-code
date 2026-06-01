@@ -13,6 +13,47 @@ pub struct LspClient {
     next_id: i64,
 }
 
+/// Severity of a diagnostic, mirroring the LSP `DiagnosticSeverity` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticSeverity {
+    Error,
+    Warning,
+    Information,
+    Hint,
+}
+
+/// One diagnostic for a file (1-based line/character for display).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Diagnostic {
+    pub line: u32,
+    pub character: u32,
+    pub severity: DiagnosticSeverity,
+    pub message: String,
+}
+
+impl Diagnostic {
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        self.severity == DiagnosticSeverity::Error
+    }
+}
+
+impl std::fmt::Display for Diagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self.severity {
+            DiagnosticSeverity::Error => "error",
+            DiagnosticSeverity::Warning => "warning",
+            DiagnosticSeverity::Information => "info",
+            DiagnosticSeverity::Hint => "hint",
+        };
+        write!(
+            f,
+            "{}:{} {label}: {}",
+            self.line, self.character, self.message
+        )
+    }
+}
+
 async fn read_message<R>(reader: &mut BufReader<R>) -> Result<serde_json::Value, anyhow::Error>
 where
     R: AsyncRead + Unpin,
@@ -170,6 +211,73 @@ impl LspClient {
         Ok(())
     }
 
+    /// Tell the server a document is open so it computes diagnostics for it.
+    pub async fn did_open(
+        &mut self,
+        file_path: &str,
+        language_id: &str,
+        text: &str,
+    ) -> Result<(), anyhow::Error> {
+        let params = json!({
+            "textDocument": {
+                "uri": path_to_uri(file_path),
+                "languageId": language_id,
+                "version": 1,
+                "text": text,
+            }
+        });
+        self.send_notification("textDocument/didOpen", params).await
+    }
+
+    /// Collect `publishDiagnostics` for `file_path` until `timeout` elapses.
+    /// Each notification carries the file's full diagnostic set, so the latest
+    /// one for the URI wins. Best-effort: any read error or the timeout returns
+    /// whatever was gathered and never fails the caller (fail-safe).
+    pub async fn collect_diagnostics(
+        &mut self,
+        file_path: &str,
+        timeout: std::time::Duration,
+    ) -> Vec<Diagnostic> {
+        let uri = path_to_uri(file_path);
+        let start = std::time::Instant::now();
+        let mut diagnostics = Vec::new();
+        loop {
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                break;
+            }
+            match tokio::time::timeout(timeout - elapsed, read_message(&mut self.stdout)).await {
+                Ok(Ok(message)) => {
+                    if is_publish_diagnostics_for(&message, &uri) {
+                        diagnostics = parse_publish_diagnostics(&message, &uri);
+                    }
+                }
+                // Read error or deadline reached: stop and return what we have.
+                Ok(Err(_)) | Err(_) => break,
+            }
+        }
+        diagnostics
+    }
+
+    async fn send_notification(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<(), anyhow::Error> {
+        let note = json!({ "jsonrpc": "2.0", "method": method, "params": params });
+        let body = serde_json::to_string(&note)?;
+        let msg = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+        self.stdin
+            .write_all(msg.as_bytes())
+            .await
+            .context("writing LSP notification")?;
+        self.stdin
+            .flush()
+            .await
+            .context("flushing LSP notification")?;
+        Ok(())
+    }
+
     async fn send_request(
         &mut self,
         method: &str,
@@ -262,6 +370,54 @@ fn location_to_string(value: &serde_json::Value) -> Option<String> {
     Some(format!("{}:{}:{}", path, line + 1, character + 1))
 }
 
+/// True if `message` is a `textDocument/publishDiagnostics` notification for `uri`.
+fn is_publish_diagnostics_for(message: &serde_json::Value, uri: &str) -> bool {
+    message.get("method").and_then(serde_json::Value::as_str)
+        == Some("textDocument/publishDiagnostics")
+        && message
+            .get("params")
+            .and_then(|p| p.get("uri"))
+            .and_then(serde_json::Value::as_str)
+            == Some(uri)
+}
+
+/// Parse the diagnostics from a `publishDiagnostics` notification, but only
+/// when it targets `uri`. Returns 1-based line/character for display.
+fn parse_publish_diagnostics(message: &serde_json::Value, uri: &str) -> Vec<Diagnostic> {
+    if !is_publish_diagnostics_for(message, uri) {
+        return Vec::new();
+    }
+    let Some(items) = message
+        .get("params")
+        .and_then(|p| p.get("diagnostics"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    items.iter().filter_map(parse_one_diagnostic).collect()
+}
+
+fn parse_one_diagnostic(value: &serde_json::Value) -> Option<Diagnostic> {
+    let start = value.get("range")?.get("start")?;
+    let line = start.get("line")?.as_u64()? as u32;
+    let character = start.get("character")?.as_u64()? as u32;
+    let message = value.get("message")?.as_str()?.to_string();
+    let severity = match value.get("severity").and_then(serde_json::Value::as_u64) {
+        Some(2) => DiagnosticSeverity::Warning,
+        Some(3) => DiagnosticSeverity::Information,
+        Some(4) => DiagnosticSeverity::Hint,
+        // 1 (Error) or unspecified: surface it as an error so real problems
+        // (e.g. a hallucinated API) aren't silently downgraded.
+        _ => DiagnosticSeverity::Error,
+    };
+    Some(Diagnostic {
+        line: line + 1,
+        character: character + 1,
+        severity,
+        message,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,6 +438,43 @@ mod tests {
             &json!({"jsonrpc":"2.0","id":3,"result":{}}),
             4
         ));
+    }
+
+    #[test]
+    fn parses_publish_diagnostics_for_matching_uri_only() {
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": {
+                "uri": "file:///src/main.rs",
+                "diagnostics": [
+                    {
+                        "range": {"start": {"line": 11, "character": 4}, "end": {"line": 11, "character": 9}},
+                        "severity": 1,
+                        "message": "cannot find function `frobnicate`"
+                    },
+                    {
+                        "range": {"start": {"line": 3, "character": 0}},
+                        "message": "no severity given"
+                    }
+                ]
+            }
+        });
+
+        let diags = parse_publish_diagnostics(&msg, "file:///src/main.rs");
+        assert_eq!(diags.len(), 2);
+        assert_eq!(diags[0].line, 12); // 1-based for display
+        assert_eq!(diags[0].character, 5);
+        assert_eq!(diags[0].severity, DiagnosticSeverity::Error);
+        assert!(diags[0].is_error());
+        assert!(diags[0].message.contains("cannot find function"));
+        // Missing severity is surfaced as an error, not silently dropped.
+        assert_eq!(diags[1].severity, DiagnosticSeverity::Error);
+
+        // A notification for another file, or a non-diagnostics message, is empty.
+        assert!(parse_publish_diagnostics(&msg, "file:///other.rs").is_empty());
+        let reply = json!({"jsonrpc":"2.0","id":4,"result":{}});
+        assert!(parse_publish_diagnostics(&reply, "file:///src/main.rs").is_empty());
     }
 
     #[tokio::test]
