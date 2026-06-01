@@ -192,7 +192,11 @@ pub fn apply_edit(
     // Check uniqueness
     let occurrences = original.matches(old_string).count();
     if occurrences == 0 {
-        anyhow::bail!("old_string not found in {relative_path}");
+        anyhow::bail!(
+            "old_string not found in {relative_path}. Read the file with read_file and copy the \
+             exact current text (including whitespace and indentation) instead of reconstructing \
+             it from memory."
+        );
     }
     if occurrences > 1 {
         anyhow::bail!(
