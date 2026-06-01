@@ -6,6 +6,12 @@ use crate::lsp::client::{language_id_for_path, Diagnostic, LspClient};
 use crate::storage::config::LspConfig;
 
 const DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(3);
+/// The first diagnostics after a cold server start also pay the one-time
+/// workspace index (seconds: rust-analyzer runs `cargo metadata`/flycheck
+/// before its first diagnostics land), so the first file handled by a
+/// freshly-started server gets a longer budget. Paid once per language per
+/// session; warm edits use the short timeout above.
+const COLD_INDEX_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Reusable pool of language servers for post-edit diagnostics. Servers are
 /// started lazily and kept alive, so the costly first index is paid once per
@@ -50,6 +56,8 @@ impl LspDiagnosticsPool {
             let Some(command) = config.servers.get(language) else {
                 continue;
             };
+            // A server we haven't started yet still owes its first-index cost.
+            let cold = !self.servers.contains_key(language);
             if !self.ensure_server(language, command, project_root).await {
                 continue;
             }
@@ -67,9 +75,12 @@ impl LspDiagnosticsPool {
                 self.unavailable.insert(language.to_string());
                 continue;
             }
-            let diags = client
-                .collect_diagnostics(&abs_str, DIAGNOSTICS_TIMEOUT)
-                .await;
+            let timeout = if cold {
+                COLD_INDEX_TIMEOUT
+            } else {
+                DIAGNOSTICS_TIMEOUT
+            };
+            let diags = client.collect_diagnostics(&abs_str, timeout).await;
             if !diags.is_empty() {
                 out.push((file.clone(), diags));
             }

@@ -108,10 +108,18 @@ where
 
 fn path_to_uri(path: &str) -> String {
     if path.starts_with("file://") {
-        path.to_string()
+        return path.to_string();
+    }
+    let normalized = path.replace('\\', "/");
+    // An absolute unix path already starts with '/', so the URI is
+    // "file://" + "/abs" = "file:///abs". Adding another slash here would
+    // yield "file:////abs", which servers reject. Windows drive paths
+    // ("C:/x") and relative paths don't start with '/', so they get the
+    // third slash: "file:///C:/x".
+    if normalized.starts_with('/') {
+        format!("file://{normalized}")
     } else {
-        let normalized = path.replace('\\', "/");
-        format!("file:///{}", normalized)
+        format!("file:///{normalized}")
     }
 }
 
@@ -162,6 +170,12 @@ impl LspClient {
         };
 
         client.initialize(root_uri).await?;
+        // Per the LSP spec the client must send `initialized` after the
+        // initialize response; servers like rust-analyzer gate workspace
+        // loading and flycheck on it and stay idle (no diagnostics) without it.
+        client
+            .send_notification("initialized", json!({}))
+            .await?;
         Ok(client)
     }
 
@@ -250,10 +264,12 @@ impl LspClient {
         self.send_notification("textDocument/didOpen", params).await
     }
 
-    /// Collect `publishDiagnostics` for `file_path` until `timeout` elapses.
-    /// Each notification carries the file's full diagnostic set, so the latest
-    /// one for the URI wins. Best-effort: any read error or the timeout returns
-    /// whatever was gathered and never fails the caller (fail-safe).
+    /// Collect `publishDiagnostics` for `file_path`. Each notification carries
+    /// the file's full diagnostic set. Servers (e.g. rust-analyzer) publish an
+    /// empty set first and the real one once analysis lands, so we wait through
+    /// empties and return as soon as a non-empty set arrives, or when `timeout`
+    /// elapses. Best-effort: any read error or the timeout returns whatever was
+    /// gathered and never fails the caller (fail-safe).
     pub async fn collect_diagnostics(
         &mut self,
         file_path: &str,
@@ -271,6 +287,9 @@ impl LspClient {
                 Ok(Ok(message)) => {
                     if is_publish_diagnostics_for(&message, &uri) {
                         diagnostics = parse_publish_diagnostics(&message, &uri);
+                        if !diagnostics.is_empty() {
+                            break;
+                        }
                     }
                 }
                 // Read error or deadline reached: stop and return what we have.
@@ -442,6 +461,16 @@ fn parse_one_diagnostic(value: &serde_json::Value) -> Option<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_to_uri_does_not_double_slash_absolute_paths() {
+        // Absolute unix path: exactly three slashes, not four.
+        assert_eq!(path_to_uri("/tmp/x/main.rs"), "file:///tmp/x/main.rs");
+        // Windows drive path keeps the third slash before the drive letter.
+        assert_eq!(path_to_uri("C:\\x\\main.rs"), "file:///C:/x/main.rs");
+        // Already a URI: passed through untouched.
+        assert_eq!(path_to_uri("file:///tmp/x"), "file:///tmp/x");
+    }
 
     #[test]
     fn response_matching_skips_notifications_and_other_ids() {
