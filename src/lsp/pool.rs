@@ -50,15 +50,19 @@ impl LspDiagnosticsPool {
             let Some(language) = language_id_for_path(file) else {
                 continue;
             };
-            if self.unavailable.contains(language) {
-                continue;
-            }
-            let Some(command) = config.servers.get(language) else {
+            // The config/server key may differ from the document's language id:
+            // a `.tsx` file is `typescriptreact` but is normally served by the
+            // `typescript` server the user configured. Resolve to the configured
+            // key (exact match first, then base language); skip if neither.
+            let Some((server_key, command)) = resolve_server(config, language) else {
                 continue;
             };
+            if self.unavailable.contains(server_key) {
+                continue;
+            }
             // A server we haven't started yet still owes its first-index cost.
-            let cold = !self.servers.contains_key(language);
-            if !self.ensure_server(language, command, project_root).await {
+            let cold = !self.servers.contains_key(server_key);
+            if !self.ensure_server(server_key, command, project_root).await {
                 continue;
             }
             let abs = project_root.join(file);
@@ -66,13 +70,19 @@ impl LspDiagnosticsPool {
                 continue;
             };
             let abs_str = abs.to_string_lossy().to_string();
-            let Some(client) = self.servers.get_mut(language) else {
+            let Some(client) = self.servers.get_mut(server_key) else {
                 continue;
             };
-            if client.did_open(&abs_str, language, &text).await.is_err() {
+            // didOpen still carries the precise language id (e.g. typescriptreact)
+            // so the server applies the right rules.
+            if client
+                .open_or_update(&abs_str, language, &text)
+                .await
+                .is_err()
+            {
                 // The server broke mid-stream; drop it and stop using it this run.
-                self.servers.remove(language);
-                self.unavailable.insert(language.to_string());
+                self.servers.remove(server_key);
+                self.unavailable.insert(server_key.to_string());
                 continue;
             }
             let timeout = if cold {
@@ -115,5 +125,67 @@ impl LspDiagnosticsPool {
                 false
             }
         }
+    }
+}
+
+/// The base language whose server also handles a JSX/TSX dialect, so users only
+/// need to configure `typescript`/`javascript` to cover `.tsx`/`.jsx` too.
+fn base_language(language: &str) -> Option<&'static str> {
+    match language {
+        "typescriptreact" => Some("typescript"),
+        "javascriptreact" => Some("javascript"),
+        _ => None,
+    }
+}
+
+/// Pick the configured server for `language`: exact key first, then the base
+/// language. Returns the matched config key and its command.
+fn resolve_server<'a>(
+    config: &'a LspConfig,
+    language: &str,
+) -> Option<(&'a str, &'a Vec<String>)> {
+    if let Some((key, command)) = config.servers.get_key_value(language) {
+        return Some((key.as_str(), command));
+    }
+    let base = base_language(language)?;
+    config
+        .servers
+        .get_key_value(base)
+        .map(|(key, command)| (key.as_str(), command))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_with(keys: &[&str]) -> LspConfig {
+        let mut servers = HashMap::new();
+        for key in keys {
+            servers.insert((*key).to_string(), vec!["server".to_string()]);
+        }
+        LspConfig {
+            enabled: true,
+            servers,
+        }
+    }
+
+    #[test]
+    fn resolve_server_prefers_exact_then_base() {
+        // tsx falls back to the typescript server when only `typescript` is set.
+        let cfg = config_with(&["typescript"]);
+        assert_eq!(
+            resolve_server(&cfg, "typescriptreact").map(|(k, _)| k),
+            Some("typescript")
+        );
+        // An exact key wins over the base fallback.
+        let cfg = config_with(&["typescript", "typescriptreact"]);
+        assert_eq!(
+            resolve_server(&cfg, "typescriptreact").map(|(k, _)| k),
+            Some("typescriptreact")
+        );
+        // No matching key at all -> None (server is skipped).
+        let cfg = config_with(&["python"]);
+        assert!(resolve_server(&cfg, "typescriptreact").is_none());
+        assert!(resolve_server(&cfg, "rust").is_none());
     }
 }

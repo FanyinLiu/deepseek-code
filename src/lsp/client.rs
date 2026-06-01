@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::Context;
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -11,6 +13,10 @@ pub struct LspClient {
     stdout: BufReader<ChildStdout>,
     stdin: ChildStdin,
     next_id: i64,
+    /// Open document URIs → last version we sent. Lets a re-edit of the same
+    /// file go out as `didChange` instead of a duplicate `didOpen` (which
+    /// servers ignore, leaving them with stale content and no fresh diagnostics).
+    open_docs: HashMap<String, i64>,
 }
 
 /// Severity of a diagnostic, mirroring the LSP `DiagnosticSeverity` values.
@@ -167,6 +173,7 @@ impl LspClient {
             stdout,
             stdin,
             next_id: 1,
+            open_docs: HashMap::new(),
         };
 
         client.initialize(root_uri).await?;
@@ -246,30 +253,56 @@ impl LspClient {
         Ok(())
     }
 
-    /// Tell the server a document is open so it computes diagnostics for it.
-    pub async fn did_open(
+    /// Make the server aware that `file_path` (now holding `text` on disk) was
+    /// just edited and saved, so it (re)computes diagnostics. Three things have
+    /// to happen for a re-edit to produce *fresh* diagnostics:
+    ///   - `didOpen` the first time; `didChange` (full-text, incrementing
+    ///     version) after — re-sending `didOpen` for an already-open URI is
+    ///     ignored as a duplicate, leaving the server on stale content;
+    ///   - `didSave` every time — flycheck-based diagnostics (the rustc-level
+    ///     errors that catch a hallucinated API or bad import) only re-run on
+    ///     save, reading the file from disk, never on change alone.
+    pub async fn open_or_update(
         &mut self,
         file_path: &str,
         language_id: &str,
         text: &str,
     ) -> Result<(), anyhow::Error> {
-        let params = json!({
-            "textDocument": {
-                "uri": path_to_uri(file_path),
-                "languageId": language_id,
-                "version": 1,
-                "text": text,
+        let uri = path_to_uri(file_path);
+        match self.open_docs.get(&uri).copied() {
+            Some(prev) => {
+                let version = prev + 1;
+                self.open_docs.insert(uri.clone(), version);
+                let params = json!({
+                    "textDocument": { "uri": uri.clone(), "version": version },
+                    "contentChanges": [ { "text": text } ],
+                });
+                self.send_notification("textDocument/didChange", params).await?;
             }
-        });
-        self.send_notification("textDocument/didOpen", params).await
+            None => {
+                self.open_docs.insert(uri.clone(), 1);
+                let params = json!({
+                    "textDocument": {
+                        "uri": uri.clone(),
+                        "languageId": language_id,
+                        "version": 1,
+                        "text": text,
+                    }
+                });
+                self.send_notification("textDocument/didOpen", params).await?;
+            }
+        }
+        let save = json!({ "textDocument": { "uri": uri } });
+        self.send_notification("textDocument/didSave", save).await
     }
 
-    /// Collect `publishDiagnostics` for `file_path`. Each notification carries
-    /// the file's full diagnostic set. Servers (e.g. rust-analyzer) publish an
-    /// empty set first and the real one once analysis lands, so we wait through
-    /// empties and return as soon as a non-empty set arrives, or when `timeout`
-    /// elapses. Best-effort: any read error or the timeout returns whatever was
-    /// gathered and never fails the caller (fail-safe).
+    /// Collect `publishDiagnostics` for `file_path` until `timeout` elapses;
+    /// the latest set for the URI wins. We can't return on the first non-empty
+    /// set: a server publishes in waves (rust-analyzer emits its fast native
+    /// diagnostics, sometimes a partial set, before the slower flycheck/cargo
+    /// check completes), and only the final merged set is complete — returning
+    /// early would drop errors. Best-effort: any read error or the timeout
+    /// returns whatever was gathered and never fails the caller (fail-safe).
     pub async fn collect_diagnostics(
         &mut self,
         file_path: &str,
@@ -287,9 +320,6 @@ impl LspClient {
                 Ok(Ok(message)) => {
                     if is_publish_diagnostics_for(&message, &uri) {
                         diagnostics = parse_publish_diagnostics(&message, &uri);
-                        if !diagnostics.is_empty() {
-                            break;
-                        }
                     }
                 }
                 // Read error or deadline reached: stop and return what we have.

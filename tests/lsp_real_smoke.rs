@@ -18,6 +18,21 @@ fn rust_analyzer_on_path() -> bool {
         .unwrap_or(false)
 }
 
+/// Run the pool over `src/main.rs` and return just the error messages.
+async fn pool_errors(
+    pool: &mut LspDiagnosticsPool,
+    dir: &std::path::Path,
+    config: &LspConfig,
+) -> Vec<String> {
+    pool.diagnostics(dir, &["src/main.rs".to_string()], config)
+        .await
+        .into_iter()
+        .flat_map(|(_, ds)| ds)
+        .filter(deepseek_code::lsp::client::Diagnostic::is_error)
+        .map(|d| d.message)
+        .collect()
+}
+
 /// Build a minimal cargo project containing `main_src`, run the real pool over
 /// it with rust-analyzer, and return the error-diagnostic messages.
 async fn error_messages_for(slug: &str, main_src: &str) -> Vec<String> {
@@ -111,5 +126,62 @@ async fn pool_catches_bad_import() {
             .any(|m| m.contains("totally_fake_crate")
                 || m.to_lowercase().contains("unresolved")),
         "expected an error for the non-dependency crate import; got: {errors:?}"
+    );
+}
+
+/// Regression guard for the warm path: one pool/server reused across several
+/// edits of the same file must report *fresh* diagnostics each time, not the
+/// stale set from the first edit. This only works because we send didChange
+/// (not a duplicate didOpen) plus didSave (so flycheck re-runs) per edit.
+#[tokio::test]
+#[ignore = "spawns real rust-analyzer; run explicitly"]
+async fn pool_reflects_repeated_edits() {
+    if !rust_analyzer_on_path() {
+        eprintln!("SKIP: rust-analyzer not on PATH");
+        return;
+    }
+
+    let dir = std::env::temp_dir().join(format!("octo_lsp_repeat_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"probe\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    let main = dir.join("src").join("main.rs");
+
+    let mut servers = HashMap::new();
+    servers.insert("rust".to_string(), vec!["rust-analyzer".to_string()]);
+    let config = LspConfig {
+        enabled: true,
+        servers,
+    };
+    let mut pool = LspDiagnosticsPool::new();
+
+    // Edit 1: a hallucinated function -> caught.
+    std::fs::write(&main, "fn main() { nope_not_real_one(); }\n").unwrap();
+    let e1 = pool_errors(&mut pool, &dir, &config).await;
+    assert!(
+        e1.iter().any(|m| m.contains("nope_not_real_one")),
+        "edit#1 should report the first hallucination; got: {e1:?}"
+    );
+
+    // Edit 2 (same server): fixed -> no errors, and crucially NOT the stale one.
+    std::fs::write(&main, "fn main() { println!(\"ok\"); }\n").unwrap();
+    let e2 = pool_errors(&mut pool, &dir, &config).await;
+    assert!(e2.is_empty(), "edit#2 (fixed) should be clean; got: {e2:?}");
+
+    // Edit 3 (same server): a DIFFERENT hallucination -> the new one, not stale.
+    std::fs::write(&main, "fn main() { nope_not_real_three(); }\n").unwrap();
+    let e3 = pool_errors(&mut pool, &dir, &config).await;
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        e3.iter().any(|m| m.contains("nope_not_real_three")),
+        "edit#3 should report the new hallucination; got: {e3:?}"
+    );
+    assert!(
+        !e3.iter().any(|m| m.contains("nope_not_real_one")),
+        "edit#3 must not report the stale first-edit error; got: {e3:?}"
     );
 }
