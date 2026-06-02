@@ -256,11 +256,7 @@ fn find_fuzzy_block(haystack: &str, needle: &str) -> BlockMatch {
     }
 }
 
-fn find_line_block(
-    haystack: &str,
-    needle: &str,
-    eq: impl Fn(&str, &str) -> bool,
-) -> BlockMatch {
+fn find_line_block(haystack: &str, needle: &str, eq: impl Fn(&str, &str) -> bool) -> BlockMatch {
     if needle.is_empty() {
         return BlockMatch::NotFound;
     }

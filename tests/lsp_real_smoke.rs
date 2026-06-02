@@ -58,7 +58,10 @@ async fn error_messages_for(slug: &str, main_src: &str) -> Vec<String> {
     let results = pool
         .diagnostics(&dir, &["src/main.rs".to_string()], &config)
         .await;
-    eprintln!("[{slug}] pool.diagnostics() returned after {:?}", t0.elapsed());
+    eprintln!(
+        "[{slug}] pool.diagnostics() returned after {:?}",
+        t0.elapsed()
+    );
 
     let mut errors = Vec::new();
     for (file, diags) in &results {
@@ -116,15 +119,16 @@ async fn pool_catches_bad_import() {
     .await;
 
     assert!(
-        errors.iter().any(|m| m.to_lowercase().contains("unresolved import")
-            || m.contains("DefinitelyNotAMap")),
+        errors
+            .iter()
+            .any(|m| m.to_lowercase().contains("unresolved import")
+                || m.contains("DefinitelyNotAMap")),
         "expected an unresolved-import error for the bad std path; got: {errors:?}"
     );
     assert!(
         errors
             .iter()
-            .any(|m| m.contains("totally_fake_crate")
-                || m.to_lowercase().contains("unresolved")),
+            .any(|m| m.contains("totally_fake_crate") || m.to_lowercase().contains("unresolved")),
         "expected an error for the non-dependency crate import; got: {errors:?}"
     );
 }

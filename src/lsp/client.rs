@@ -180,9 +180,7 @@ impl LspClient {
         // Per the LSP spec the client must send `initialized` after the
         // initialize response; servers like rust-analyzer gate workspace
         // loading and flycheck on it and stay idle (no diagnostics) without it.
-        client
-            .send_notification("initialized", json!({}))
-            .await?;
+        client.send_notification("initialized", json!({})).await?;
         Ok(client)
     }
 
@@ -277,7 +275,8 @@ impl LspClient {
                     "textDocument": { "uri": uri.clone(), "version": version },
                     "contentChanges": [ { "text": text } ],
                 });
-                self.send_notification("textDocument/didChange", params).await?;
+                self.send_notification("textDocument/didChange", params)
+                    .await?;
             }
             None => {
                 self.open_docs.insert(uri.clone(), 1);
@@ -289,7 +288,8 @@ impl LspClient {
                         "text": text,
                     }
                 });
-                self.send_notification("textDocument/didOpen", params).await?;
+                self.send_notification("textDocument/didOpen", params)
+                    .await?;
             }
         }
         let save = json!({ "textDocument": { "uri": uri } });

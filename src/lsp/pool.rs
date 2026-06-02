@@ -140,10 +140,7 @@ fn base_language(language: &str) -> Option<&'static str> {
 
 /// Pick the configured server for `language`: exact key first, then the base
 /// language. Returns the matched config key and its command.
-fn resolve_server<'a>(
-    config: &'a LspConfig,
-    language: &str,
-) -> Option<(&'a str, &'a Vec<String>)> {
+fn resolve_server<'a>(config: &'a LspConfig, language: &str) -> Option<(&'a str, &'a Vec<String>)> {
     if let Some((key, command)) = config.servers.get_key_value(language) {
         return Some((key.as_str(), command));
     }
