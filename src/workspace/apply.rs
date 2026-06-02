@@ -189,23 +189,33 @@ pub fn apply_edit(
         String::new()
     };
 
-    // Check uniqueness
+    // Locate old_string. Exact, unique match is the contract. When the model
+    // reconstructs the snippet with slightly-off whitespace/indentation an exact
+    // match would bail, so fall back to a whitespace-tolerant, line-aligned
+    // match — but only when it is unambiguous; never guess between candidates.
     let occurrences = original.matches(old_string).count();
-    if occurrences == 0 {
-        anyhow::bail!(
-            "old_string not found in {relative_path}. Read the file with read_file and copy the \
-             exact current text (including whitespace and indentation) instead of reconstructing \
-             it from memory."
-        );
-    }
-    if occurrences > 1 {
+    let modified = if occurrences == 1 {
+        original.replacen(old_string, new_string, 1)
+    } else if occurrences > 1 {
         anyhow::bail!(
             "old_string found {occurrences} times in {relative_path} — must be unique. Use more surrounding context."
         );
-    }
-
-    // Apply
-    let modified = original.replacen(old_string, new_string, 1);
+    } else {
+        match find_fuzzy_block(&original, old_string) {
+            BlockMatch::Unique(range) => {
+                replace_range_preserving_newline(&original, range, new_string)
+            }
+            BlockMatch::Ambiguous => anyhow::bail!(
+                "old_string matches several places in {relative_path} once whitespace is ignored — \
+                 must be unique. Use more surrounding context."
+            ),
+            BlockMatch::NotFound => anyhow::bail!(
+                "old_string not found in {relative_path}. Read the file with read_file and copy the \
+                 exact current text (including whitespace and indentation) instead of reconstructing \
+                 it from memory."
+            ),
+        }
+    };
     std::fs::create_dir_all(
         file_path
             .parent()
@@ -222,6 +232,84 @@ pub fn apply_edit(
         diff,
         stats,
     })
+}
+
+/// Result of a whitespace-tolerant search for `old_string`.
+enum BlockMatch {
+    /// Exactly one line-aligned match; the byte range to replace in the source.
+    Unique(std::ops::Range<usize>),
+    /// More than one match once whitespace is ignored — caller must not guess.
+    Ambiguous,
+    NotFound,
+}
+
+/// Find a unique run of whole lines in `haystack` equal to `needle` under a
+/// whitespace-tolerant comparison, returning the byte range (whole lines,
+/// including their trailing newlines) to replace. Tries trailing-whitespace
+/// tolerance first, then full leading+trailing trim, so the looser rule only
+/// applies when the stricter one finds nothing. Whole-line alignment keeps it
+/// conservative: a partial-line `needle` won't fuzzy-match.
+fn find_fuzzy_block(haystack: &str, needle: &str) -> BlockMatch {
+    match find_line_block(haystack, needle, |a, b| a.trim_end() == b.trim_end()) {
+        BlockMatch::NotFound => find_line_block(haystack, needle, |a, b| a.trim() == b.trim()),
+        other => other,
+    }
+}
+
+fn find_line_block(
+    haystack: &str,
+    needle: &str,
+    eq: impl Fn(&str, &str) -> bool,
+) -> BlockMatch {
+    if needle.is_empty() {
+        return BlockMatch::NotFound;
+    }
+    // Byte spans of each line (end includes the trailing '\n' when present),
+    // with the line content stripped of its line ending for comparison.
+    let mut lines: Vec<(usize, usize, &str)> = Vec::new();
+    let mut pos = 0;
+    for piece in haystack.split_inclusive('\n') {
+        let start = pos;
+        pos += piece.len();
+        let content = piece.strip_suffix('\n').unwrap_or(piece);
+        let content = content.strip_suffix('\r').unwrap_or(content);
+        lines.push((start, pos, content));
+    }
+    let needle_lines: Vec<&str> = needle.lines().collect();
+    let n = needle_lines.len();
+    if n == 0 || n > lines.len() {
+        return BlockMatch::NotFound;
+    }
+
+    let mut found: Option<std::ops::Range<usize>> = None;
+    for i in 0..=lines.len() - n {
+        if (0..n).all(|j| eq(lines[i + j].2, needle_lines[j])) {
+            if found.is_some() {
+                return BlockMatch::Ambiguous;
+            }
+            found = Some(lines[i].0..lines[i + n - 1].1);
+        }
+    }
+    found.map_or(BlockMatch::NotFound, BlockMatch::Unique)
+}
+
+/// Replace `range` in `original` with `replacement`, preserving the block's
+/// trailing newline so the following line isn't glued on.
+fn replace_range_preserving_newline(
+    original: &str,
+    range: std::ops::Range<usize>,
+    replacement: &str,
+) -> String {
+    let block_had_newline = original[range.clone()].ends_with('\n');
+    let mut replacement = replacement.to_string();
+    if block_had_newline && !replacement.ends_with('\n') {
+        replacement.push('\n');
+    }
+    let mut out = String::with_capacity(original.len() - range.len() + replacement.len());
+    out.push_str(&original[..range.start]);
+    out.push_str(&replacement);
+    out.push_str(&original[range.end..]);
+    out
 }
 
 /// Write a full file (create or overwrite).
@@ -606,6 +694,70 @@ rename to new.txt
         assert_eq!(
             std::fs::read_to_string(root.path().join("parent")).expect("read parent file"),
             "not a directory"
+        );
+        clear_history();
+    }
+
+    #[test]
+    fn fuzzy_edit_tolerates_indentation_drift() {
+        let _guard = history_test_guard();
+        clear_history();
+        let root = tempfile::tempdir().expect("tempdir");
+        // File is indented with 4 spaces; the model over-indents old_string to 8.
+        std::fs::write(
+            root.path().join("f.rs"),
+            "fn main() {\n    foo();\n    next();\n}\n",
+        )
+        .expect("write");
+
+        apply_edit(root.path(), "f.rs", "        foo();", "    bar();")
+            .expect("fuzzy match on indentation should apply");
+
+        // The matched line is replaced with new_string verbatim; surrounding
+        // lines (including the one right after) are preserved.
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("f.rs")).expect("read"),
+            "fn main() {\n    bar();\n    next();\n}\n"
+        );
+        clear_history();
+    }
+
+    #[test]
+    fn fuzzy_edit_tolerates_trailing_whitespace() {
+        let _guard = history_test_guard();
+        clear_history();
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("f.rs"), "let x = 1;\n").expect("write");
+
+        // old_string carries trailing whitespace the file doesn't have.
+        apply_edit(root.path(), "f.rs", "let x = 1;   ", "let y = 2;").expect("apply");
+
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("f.rs")).expect("read"),
+            "let y = 2;\n"
+        );
+        clear_history();
+    }
+
+    #[test]
+    fn fuzzy_edit_bails_when_whitespace_match_is_ambiguous() {
+        let _guard = history_test_guard();
+        clear_history();
+        let root = tempfile::tempdir().expect("tempdir");
+        // Two lines equal once whitespace is ignored; no exact match for the
+        // (differently-indented) old_string -> must refuse rather than guess.
+        std::fs::write(root.path().join("f.rs"), "    foo();\n    foo();\n").expect("write");
+
+        let err = apply_edit(root.path(), "f.rs", "        foo();", "    bar();")
+            .expect_err("ambiguous fuzzy match must fail");
+        assert!(
+            err.to_string().contains("must be unique"),
+            "unexpected error: {err}"
+        );
+        // File untouched.
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("f.rs")).expect("read"),
+            "    foo();\n    foo();\n"
         );
         clear_history();
     }
