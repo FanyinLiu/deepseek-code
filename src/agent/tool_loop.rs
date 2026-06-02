@@ -43,6 +43,31 @@ impl ToolLoopResult {
     }
 }
 
+/// A tool call is treated as a doom-loop once it has already run this many
+/// times in a row with identical arguments; the next identical call is skipped
+/// rather than executed again.
+const LOOP_REPEAT_LIMIT: usize = 2;
+
+/// Outcome of deciding whether to run a call this batch.
+enum CallExec {
+    Ran(Box<ToolRuntimeOutcome>),
+    /// Skipped as a repeated, non-progressing call (doom-loop guard).
+    Looped,
+}
+
+/// True when the tail of `history` already holds `LOOP_REPEAT_LIMIT` consecutive
+/// calls identical (name + arguments) to `tc` — i.e. running `tc` again would
+/// just repeat the same step. Targets the common single-call fixation.
+fn would_loop(history: &[ToolCallRecord], tc: &ToolCall) -> bool {
+    history
+        .iter()
+        .rev()
+        .take(LOOP_REPEAT_LIMIT)
+        .filter(|r| r.name == tc.function.name && r.arguments == tc.function.arguments)
+        .count()
+        == LOOP_REPEAT_LIMIT
+}
+
 impl ToolLoop {
     /// Execute tools with policy checks and approval before each tool.
     /// Sends `ToolApprovalNeeded` events and awaits oneshot responses.
@@ -74,44 +99,110 @@ impl ToolLoop {
             && tool_calls
                 .iter()
                 .all(|tc| crate::tools::metadata::is_read_only(&tc.function.name));
-        let outcomes = if parallel_safe {
-            futures::future::join_all(tool_calls.iter().map(|tc| {
-                run_tool_call(
-                    tc,
-                    &runtime,
-                    dispatch_config.clone(),
-                    session_id,
-                    turn_id,
-                    hooks_config,
-                    event_tx,
-                    yolo_mode,
-                    permission_mode,
-                )
+
+        // Doom-loop guard: a call that already ran LOOP_REPEAT_LIMIT times in a
+        // row with the same arguments is skipped instead of executed again, so a
+        // fixated model gets a course-correction nudge rather than burning turns.
+        let looped: Vec<bool> = tool_calls
+            .iter()
+            .map(|tc| would_loop(&session.tool_call_history, tc))
+            .collect();
+
+        // Shared reference so each (possibly concurrent) future borrows the
+        // runtime rather than trying to own it.
+        let runtime = &runtime;
+        let outcomes: Vec<CallExec> = if parallel_safe {
+            futures::future::join_all(tool_calls.iter().enumerate().map(|(i, tc)| {
+                let dispatch_config = dispatch_config.clone();
+                let looped = looped[i];
+                async move {
+                    if looped {
+                        CallExec::Looped
+                    } else {
+                        CallExec::Ran(Box::new(
+                            run_tool_call(
+                                tc,
+                                runtime,
+                                dispatch_config,
+                                session_id,
+                                turn_id,
+                                hooks_config,
+                                event_tx,
+                                yolo_mode,
+                                permission_mode,
+                            )
+                            .await,
+                        ))
+                    }
+                }
             }))
             .await
         } else {
             let mut out = Vec::with_capacity(tool_calls.len());
-            for tc in tool_calls {
-                out.push(
-                    run_tool_call(
-                        tc,
-                        &runtime,
-                        dispatch_config.clone(),
-                        session_id,
-                        turn_id,
-                        hooks_config,
-                        event_tx,
-                        yolo_mode,
-                        permission_mode,
-                    )
-                    .await,
-                );
+            for (i, tc) in tool_calls.iter().enumerate() {
+                if looped[i] {
+                    out.push(CallExec::Looped);
+                } else {
+                    out.push(CallExec::Ran(Box::new(
+                        run_tool_call(
+                            tc,
+                            runtime,
+                            dispatch_config.clone(),
+                            session_id,
+                            turn_id,
+                            hooks_config,
+                            event_tx,
+                            yolo_mode,
+                            permission_mode,
+                        )
+                        .await,
+                    )));
+                }
             }
             out
         };
 
         let mut results = Vec::with_capacity(tool_calls.len());
-        for (tc, outcome) in tool_calls.iter().zip(outcomes) {
+        for (tc, exec) in tool_calls.iter().zip(outcomes) {
+            let outcome = match exec {
+                CallExec::Ran(outcome) => *outcome,
+                CallExec::Looped => {
+                    session.tool_call_history.push(ToolCallRecord {
+                        id: tc.id.clone(),
+                        name: tc.function.name.clone(),
+                        arguments: tc.function.arguments.clone(),
+                        result_summary: "skipped a repeated call".to_string(),
+                        exit_code: Some(1),
+                        duration_ms: 0,
+                        risk_level: "none".to_string(),
+                        approved: false,
+                        at: Utc::now(),
+                    });
+                    send_event(
+                        event_tx,
+                        AgentEvent::ContentDelta(format!(
+                            "\n[skipped a repeated `{}` call that wasn't making progress]\n",
+                            tc.function.name
+                        )),
+                    );
+                    results.push(ToolLoopResult::new(
+                        tc.clone(),
+                        ToolResultRecord {
+                            tool_call_id: tc.id.clone(),
+                            name: tc.function.name.clone(),
+                            result: "Skipped: this exact call just ran a few times with the same \
+                                     result and isn't moving things forward. Try a different \
+                                     approach, or wrap up if you already have what you need."
+                                .to_string(),
+                            is_error: true,
+                        },
+                        0,
+                        Vec::new(),
+                    ));
+                    continue;
+                }
+            };
+
             for hook_summary in &outcome.hook_summaries {
                 emit_hook_summary(
                     event_tx,
@@ -317,6 +408,100 @@ mod tests {
             updated_at: Utc::now(),
             metadata: SessionMetadata::default(),
         }
+    }
+
+    fn history_record(name: &str, arguments: &str) -> ToolCallRecord {
+        ToolCallRecord {
+            id: "prev".into(),
+            name: name.into(),
+            arguments: arguments.into(),
+            result_summary: String::new(),
+            exit_code: Some(0),
+            duration_ms: 1,
+            risk_level: "none".into(),
+            approved: true,
+            at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn would_loop_trips_only_on_consecutive_identical_tail() {
+        let tc = ToolCall {
+            id: "c".into(),
+            call_type: "function".into(),
+            function: ToolCallFunction {
+                name: "read_file".into(),
+                arguments: r#"{"path":"a"}"#.into(),
+            },
+        };
+        let same = || history_record("read_file", r#"{"path":"a"}"#);
+        // Fewer than the limit, or interrupted by a different call -> no loop.
+        assert!(!would_loop(&[], &tc));
+        assert!(!would_loop(&[same()], &tc));
+        assert!(!would_loop(
+            &[same(), same(), history_record("list_files", "{}")],
+            &tc
+        ));
+        // Different arguments don't count as the same step.
+        assert!(!would_loop(
+            &[
+                history_record("read_file", r#"{"path":"b"}"#),
+                history_record("read_file", r#"{"path":"b"}"#)
+            ],
+            &tc
+        ));
+        // Two identical calls at the tail -> the next identical call loops.
+        assert!(would_loop(&[same(), same()], &tc));
+    }
+
+    #[tokio::test]
+    async fn doom_loop_skips_a_thrice_repeated_call_without_executing_it() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let args = serde_json::json!({ "path": "loop.txt", "content": "x" }).to_string();
+        let call = ToolCall {
+            id: "c3".into(),
+            call_type: "function".into(),
+            function: ToolCallFunction {
+                name: "write_file".into(),
+                arguments: args.clone(),
+            },
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut session = test_session(temp.path());
+        // Two identical prior calls already in history -> the third must skip.
+        session
+            .tool_call_history
+            .push(history_record("write_file", &args));
+        session
+            .tool_call_history
+            .push(history_record("write_file", &args));
+
+        let results = ToolLoop::execute_tools_with_approval(
+            &[call],
+            temp.path(),
+            TurnId::new_v4(),
+            SubTurnId::new_v4(),
+            &mut session,
+            &tx,
+            true,
+            PermissionMode::Default,
+            &crate::storage::config::PolicyConfig::default(),
+            &crate::storage::config::HooksConfig::default(),
+            None,
+        )
+        .await;
+
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].result.is_error,
+            "a looping call should come back as not-run"
+        );
+        assert!(results[0].result.result.contains("Skipped"));
+        // The side effect must not have happened.
+        assert!(
+            !temp.path().join("loop.txt").exists(),
+            "looping write must be skipped, not executed"
+        );
     }
 
     #[tokio::test]
