@@ -43,10 +43,14 @@ impl ToolLoopResult {
     }
 }
 
-/// A tool call is treated as a doom-loop once it has already run this many
-/// times in a row with identical arguments; the next identical call is skipped
-/// rather than executed again.
+/// How many times a call sequence must repeat at the tail of history before the
+/// next continuation of it is treated as a doom-loop and skipped.
 const LOOP_REPEAT_LIMIT: usize = 2;
+
+/// Longest call cycle the guard recognises. Period 1 is a single fixated call
+/// (A,A,A…); periods 2–3 catch non-progressing oscillation (A,B,A,B… or
+/// A,B,C,A,B,C…) that slips past the identical-call check.
+const MAX_LOOP_PERIOD: usize = 3;
 
 /// Outcome of deciding whether to run a call this batch.
 enum CallExec {
@@ -55,17 +59,33 @@ enum CallExec {
     Looped,
 }
 
-/// True when the tail of `history` already holds `LOOP_REPEAT_LIMIT` consecutive
-/// calls identical (name + arguments) to `tc` — i.e. running `tc` again would
-/// just repeat the same step. Targets the common single-call fixation.
-fn would_loop(history: &[ToolCallRecord], tc: &ToolCall) -> bool {
-    history
-        .iter()
-        .rev()
-        .take(LOOP_REPEAT_LIMIT)
-        .filter(|r| r.name == tc.function.name && r.arguments == tc.function.arguments)
-        .count()
-        == LOOP_REPEAT_LIMIT
+/// True when running `tc` next would continue a non-progressing cycle: some
+/// period-`p` (1..=`MAX_LOOP_PERIOD`) call sequence has already repeated
+/// `LOOP_REPEAT_LIMIT` times at the tail of `history`, and `tc` is the call the
+/// period predicts comes next. Period 1 is the common single-call fixation;
+/// longer periods catch edit→read→edit→read style oscillation. Interleaved or
+/// genuinely different calls break the period and reset the count.
+///
+/// Exposed so the reliability eval (`tests/reliability_eval_tests.rs`) can score
+/// the guard against a labeled dataset.
+pub fn would_loop(history: &[ToolCallRecord], tc: &ToolCall) -> bool {
+    (1..=MAX_LOOP_PERIOD).any(|period| continues_stuck_cycle(history, tc, period))
+}
+
+/// Checks one specific cycle length for `would_loop`.
+fn continues_stuck_cycle(history: &[ToolCallRecord], tc: &ToolCall, period: usize) -> bool {
+    let window = period * LOOP_REPEAT_LIMIT;
+    if history.len() < window {
+        return false;
+    }
+    let tail = &history[history.len() - window..];
+    let same =
+        |a: &ToolCallRecord, b: &ToolCallRecord| a.name == b.name && a.arguments == b.arguments;
+    // The window must be exactly period-periodic, and `tc` must be the call the
+    // period predicts next (the one a full period before the end of the tail).
+    (period..window).all(|i| same(&tail[i], &tail[i - period]))
+        && tail[window - period].name == tc.function.name
+        && tail[window - period].arguments == tc.function.arguments
 }
 
 impl ToolLoop {
@@ -190,9 +210,9 @@ impl ToolLoop {
                         ToolResultRecord {
                             tool_call_id: tc.id.clone(),
                             name: tc.function.name.clone(),
-                            result: "Skipped: this exact call just ran a few times with the same \
-                                     result and isn't moving things forward. Try a different \
-                                     approach, or wrap up if you already have what you need."
+                            result: "Skipped: the same steps keep repeating without moving things \
+                                     forward. Try a different approach, or wrap up if you already \
+                                     have what you need."
                                 .to_string(),
                             is_error: true,
                         },
@@ -452,6 +472,39 @@ mod tests {
         ));
         // Two identical calls at the tail -> the next identical call loops.
         assert!(would_loop(&[same(), same()], &tc));
+    }
+
+    #[test]
+    fn would_loop_trips_on_short_oscillating_cycle() {
+        // edit -> read -> edit -> read … then another edit would continue the
+        // period-2 cycle with no progress.
+        let edit = || history_record("edit_file", r#"{"path":"a"}"#);
+        let read = || history_record("read_file", r#"{"path":"a"}"#);
+        let next_edit = ToolCall {
+            id: "c".into(),
+            call_type: "function".into(),
+            function: ToolCallFunction {
+                name: "edit_file".into(),
+                arguments: r#"{"path":"a"}"#.into(),
+            },
+        };
+        // One full cycle is not enough to trip.
+        assert!(!would_loop(&[edit(), read()], &next_edit));
+        // Two full cycles at the tail -> the call that continues the cycle loops.
+        assert!(would_loop(&[edit(), read(), edit(), read()], &next_edit));
+        // A call that breaks the period does not trip.
+        let breaks_period = ToolCall {
+            id: "c".into(),
+            call_type: "function".into(),
+            function: ToolCallFunction {
+                name: "grep".into(),
+                arguments: "{}".into(),
+            },
+        };
+        assert!(!would_loop(
+            &[edit(), read(), edit(), read()],
+            &breaks_period
+        ));
     }
 
     #[tokio::test]
