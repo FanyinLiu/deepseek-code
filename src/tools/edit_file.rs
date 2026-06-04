@@ -9,8 +9,12 @@ pub fn edit_file(
     old_string: &str,
     new_string: &str,
 ) -> Result<DiffResult, anyhow::Error> {
-    let resolved = crate::workspace::paths::resolve_workspace_path(project_root, path)
-        .ok_or_else(|| anyhow::anyhow!("path not in workspace or protected: {path}"))?;
+    let resolved = crate::workspace::paths::resolve_workspace_path(project_root, path).ok_or_else(|| {
+        crate::workspace::paths::nearest_paths_hint(project_root, path).map_or_else(
+            || anyhow::anyhow!("path not in workspace or protected: {path}"),
+            |hint| anyhow::anyhow!("cannot edit {path} ({hint}) — not found, outside the workspace, or protected"),
+        )
+    })?;
 
     let relative = resolved
         .strip_prefix(project_root)

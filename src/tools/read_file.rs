@@ -11,8 +11,13 @@ pub fn read_file(
     offset: Option<usize>,
     limit: Option<usize>,
 ) -> Result<String, anyhow::Error> {
-    let resolved = crate::workspace::paths::resolve_read_path(project_root, path)
-        .ok_or_else(|| anyhow::anyhow!("path not found or unreadable: {path}"))?;
+    let resolved =
+        crate::workspace::paths::resolve_read_path(project_root, path).ok_or_else(|| {
+            crate::workspace::paths::nearest_paths_hint(project_root, path).map_or_else(
+                || anyhow::anyhow!("path not found or unreadable: {path}"),
+                |hint| anyhow::anyhow!("path not found: {path} — {hint}"),
+            )
+        })?;
 
     let display_path = crate::workspace::paths::display_path(project_root, &resolved);
 

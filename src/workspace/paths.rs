@@ -91,6 +91,76 @@ pub fn normalize_unicode_command(cmd: &str) -> (String, bool) {
     (normalized, changed)
 }
 
+/// When a requested path doesn't resolve, build a short re-grounding hint: the
+/// nearest existing ancestor directory inside the workspace plus a few of its
+/// real entries, ranked by similarity to the missing name. This lets the model
+/// correct a hallucinated or typo'd path instead of guessing again. Returns
+/// None when there is nothing useful to suggest.
+#[must_use]
+pub fn nearest_paths_hint(project_root: &Path, requested: &str) -> Option<String> {
+    let canonical_root = std::fs::canonicalize(project_root).ok()?;
+    let req = Path::new(requested);
+    let absolute = if req.is_absolute() {
+        req.to_path_buf()
+    } else {
+        project_root.join(req)
+    };
+    let wanted = absolute
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_string();
+
+    let mut ancestor = absolute.parent();
+    while let Some(dir) = ancestor {
+        if let Ok(canon) = std::fs::canonicalize(dir) {
+            if canon.is_dir() && canon.starts_with(&canonical_root) {
+                let mut names: Vec<String> = std::fs::read_dir(&canon)
+                    .ok()?
+                    .flatten()
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .filter(|name| !name.starts_with('.'))
+                    .collect();
+                if names.is_empty() {
+                    return None;
+                }
+                names.sort_by(|a, b| {
+                    shared_prefix_len(b, &wanted)
+                        .cmp(&shared_prefix_len(a, &wanted))
+                        .then_with(|| a.cmp(b))
+                });
+                names.truncate(12);
+                let rel = canon.strip_prefix(&canonical_root).map_or_else(
+                    |_| canon.display().to_string(),
+                    |relative| {
+                        let shown = relative.to_string_lossy();
+                        if shown.is_empty() {
+                            ".".to_string()
+                        } else {
+                            shown.into_owned()
+                        }
+                    },
+                );
+                return Some(format!(
+                    "nearest existing directory is `{rel}`, which contains: {}. \
+                     Re-check the path, or use grep/glob to find the file.",
+                    names.join(", ")
+                ));
+            }
+        }
+        ancestor = dir.parent();
+    }
+    None
+}
+
+/// Length of the shared leading character run of `a` and `b`.
+fn shared_prefix_len(a: &str, b: &str) -> usize {
+    a.chars()
+        .zip(b.chars())
+        .take_while(|(left, right)| left == right)
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +199,24 @@ mod tests {
             resolved,
             std::fs::canonicalize(file.path()).expect("canonical")
         );
+    }
+
+    #[test]
+    fn nearest_paths_hint_points_at_real_siblings() {
+        let root = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(root.path().join("src/agent")).expect("mkdir");
+        std::fs::write(root.path().join("src/agent/orchestrator.rs"), "x").expect("write");
+        std::fs::write(root.path().join("src/agent/tool_loop.rs"), "x").expect("write");
+
+        // A typo'd basename surfaces the real sibling (ranked by shared prefix).
+        let hint = nearest_paths_hint(root.path(), "src/agent/orchestratr.rs")
+            .expect("hint for typo'd path");
+        assert!(hint.contains("orchestrator.rs"), "hint: {hint}");
+        assert!(hint.contains("src/agent"), "hint: {hint}");
+
+        // A missing intermediate directory walks up to the nearest existing one.
+        let walked =
+            nearest_paths_hint(root.path(), "src/nope/deeper/x.rs").expect("hint walks up to src");
+        assert!(walked.contains("agent"), "walked: {walked}");
     }
 }
