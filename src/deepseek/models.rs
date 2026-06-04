@@ -846,6 +846,21 @@ pub struct Session {
     pub metadata: SessionMetadata,
 }
 
+impl Session {
+    /// Keep at most this many tool-call records in memory to avoid unbounded
+    /// session growth during long tool-heavy runs.
+    pub const MAX_TOOL_CALL_HISTORY: usize = 512;
+
+    #[inline]
+    pub fn push_tool_call_record(&mut self, record: ToolCallRecord) {
+        self.tool_call_history.push(record);
+        if self.tool_call_history.len() > Self::MAX_TOOL_CALL_HISTORY {
+            let remove_count = self.tool_call_history.len() - Self::MAX_TOOL_CALL_HISTORY;
+            self.tool_call_history.drain(0..remove_count);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionMetadata {
     pub total_tokens: u64,
@@ -932,6 +947,50 @@ mod tests {
         // Empty stays zero; a tiny input still rounds up to at least 1.
         assert_eq!(estimate_tokenish_count(""), 0);
         assert_eq!(estimate_tokenish_count("a"), 1);
+    }
+
+    #[test]
+    fn push_tool_call_record_keeps_session_history_bounded() {
+        let mut session = Session {
+            id: SessionId::new_v4(),
+            name: None,
+            project_root: ".".into(),
+            messages: Vec::new(),
+            reasoning_state: ReasoningState::default(),
+            tool_call_history: Vec::new(),
+            checkpoints: Vec::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            metadata: SessionMetadata::default(),
+        };
+
+        for i in 0..Session::MAX_TOOL_CALL_HISTORY + 4 {
+            session.push_tool_call_record(ToolCallRecord {
+                id: format!("id-{i}"),
+                name: "read_file".into(),
+                arguments: format!("{{\"path\":\"/tmp/{i}\"}}"),
+                result_summary: "ok".into(),
+                exit_code: Some(0),
+                duration_ms: 1,
+                risk_level: "safe".into(),
+                approved: true,
+                at: Utc::now(),
+            });
+        }
+
+        assert_eq!(
+            session.tool_call_history.len(),
+            Session::MAX_TOOL_CALL_HISTORY
+        );
+        assert_eq!(session.tool_call_history[0].id, "id-4");
+        assert_eq!(
+            session
+                .tool_call_history
+                .last()
+                .expect("tool-call history exists")
+                .id,
+            format!("id-{}", Session::MAX_TOOL_CALL_HISTORY + 3)
+        );
     }
 
     #[test]

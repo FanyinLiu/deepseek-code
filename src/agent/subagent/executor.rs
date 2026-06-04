@@ -594,7 +594,7 @@ impl SubagentExecutor {
                 approved: meta.approved,
                 at: Utc::now(),
             };
-            session.tool_call_history.push(tool_record);
+            session.push_tool_call_record(tool_record);
         }
 
         results

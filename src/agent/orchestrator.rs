@@ -2561,8 +2561,7 @@ impl Orchestrator {
                             is_error: true,
                         };
                         self.session
-                            .tool_call_history
-                            .push(crate::deepseek::ToolCallRecord {
+                            .push_tool_call_record(crate::deepseek::ToolCallRecord {
                                 id: tc.id.clone(),
                                 name: tc.function.name.clone(),
                                 arguments: tc.function.arguments.clone(),
@@ -2591,8 +2590,7 @@ impl Orchestrator {
                                 is_error: true,
                             };
                             self.session
-                                .tool_call_history
-                                .push(crate::deepseek::ToolCallRecord {
+                                .push_tool_call_record(crate::deepseek::ToolCallRecord {
                                     id: tc.id.clone(),
                                     name: tc.function.name.clone(),
                                     arguments: tc.function.arguments.clone(),
@@ -2636,8 +2634,7 @@ impl Orchestrator {
                         is_error: true,
                     };
                     self.session
-                        .tool_call_history
-                        .push(crate::deepseek::ToolCallRecord {
+                        .push_tool_call_record(crate::deepseek::ToolCallRecord {
                             id: tc.id.clone(),
                             name: tc.function.name.clone(),
                             arguments: tc.function.arguments.clone(),
@@ -2672,8 +2669,7 @@ impl Orchestrator {
                     is_error,
                 };
                 self.session
-                    .tool_call_history
-                    .push(crate::deepseek::ToolCallRecord {
+                    .push_tool_call_record(crate::deepseek::ToolCallRecord {
                         id: tc.id.clone(),
                         name: tc.function.name.clone(),
                         arguments: tc.function.arguments.clone(),
@@ -2815,7 +2811,7 @@ impl Orchestrator {
                         approved: outcome.approval.approved(),
                         at: Utc::now(),
                     };
-                    self.session.tool_call_history.push(record);
+                    self.session.push_tool_call_record(record);
 
                     results.push(ToolLoopResult::new(
                         tc.clone(),

@@ -187,7 +187,7 @@ impl ToolLoop {
             let outcome = match exec {
                 CallExec::Ran(outcome) => *outcome,
                 CallExec::Looped => {
-                    session.tool_call_history.push(ToolCallRecord {
+                    session.push_tool_call_record(ToolCallRecord {
                         id: tc.id.clone(),
                         name: tc.function.name.clone(),
                         arguments: tc.function.arguments.clone(),
@@ -248,7 +248,7 @@ impl ToolLoop {
                 approved,
                 at: Utc::now(),
             };
-            session.tool_call_history.push(record);
+            session.push_tool_call_record(record);
 
             results.push(ToolLoopResult::new(
                 tc.clone(),
